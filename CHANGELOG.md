@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.40.3](https://github.com/kunchenguid/no-mistakes/compare/v1.40.2...v1.40.3) (2026-07-21)
+
+
+### Bug Fixes
+
+* **gate:** redact embedded credentials from stored upstream URLs and error surfaces ([#469](https://github.com/kunchenguid/no-mistakes/issues/469)) ([9111e12](https://github.com/kunchenguid/no-mistakes/commit/9111e12dc77240331e3178a983583af045e9d056))
+* **paths:** guard default daemon root under go test ([#451](https://github.com/kunchenguid/no-mistakes/issues/451)) ([ba61aaa](https://github.com/kunchenguid/no-mistakes/commit/ba61aaa5a6451ca2b0191a063777c93c3e208bd1))
+
 ## [1.40.2](https://github.com/kunchenguid/no-mistakes/compare/v1.40.1...v1.40.2) (2026-07-21)
 
 
