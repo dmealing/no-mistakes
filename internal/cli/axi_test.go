@@ -940,3 +940,176 @@ func TestSkillExitCodeGuidanceDistinguishesDecisionGates(t *testing.T) {
 		t.Fatal("skill should explicitly identify decision gates as normal exit 0 stops")
 	}
 }
+
+func TestSkillBackgroundWatcherGuidance(t *testing.T) {
+	md := skill.Markdown()
+	if !strings.Contains(md, "## Background watchers") {
+		t.Fatal("skill should own the background-watcher contract (finite watchers, run-id anchoring)")
+	}
+	for _, want := range []string{
+		"A watcher must be able to end.",
+		"Anchor to the run id",
+		"no-mistakes axi status --run <id>",
+		"Silence must never be the steady state.",
+		"liveness_reason",
+	} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("skill background-watcher guidance missing %q", want)
+		}
+	}
+}
+
+// --- axi status liveness (machine-readable dead/stalled/ok signal) ---
+
+func seedLivenessRun(t *testing.T, database *db.DB, repo *db.Repo, branch string) (*db.Run, *db.StepResult) {
+	t.Helper()
+	dbRun, err := database.InsertRun(repo.ID, branch, "headsha", "basesha")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := database.UpdateRunStatus(dbRun.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	step, err := database.InsertStepResult(dbRun.ID, types.StepReview)
+	if err != nil {
+		t.Fatalf("insert step: %v", err)
+	}
+	if err := database.StartStep(step.ID); err != nil {
+		t.Fatalf("start step: %v", err)
+	}
+	return dbRun, step
+}
+
+func runStatusForTest(t *testing.T, runID string) string {
+	t.Helper()
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&out)
+	if _, err := runAxiStatus(cmd, runID); err != nil {
+		t.Fatalf("axi status: %v\n%s", err, out.String())
+	}
+	return out.String()
+}
+
+func stubDaemonRunning(t *testing.T, alive bool) {
+	t.Helper()
+	restore := daemonIsRunningFn
+	daemonIsRunningFn = func(*paths.Paths) (bool, error) { return alive, nil }
+	t.Cleanup(func() { daemonIsRunningFn = restore })
+}
+
+func TestAxiStatusLivenessDeadWhenDaemonDown(t *testing.T) {
+	repoDir, _, database, repo := setupAxiQueryRepo(t)
+	chdir(t, repoDir)
+	stubDaemonRunning(t, false)
+	dbRun, _ := seedLivenessRun(t, database, repo, "feature/daemon-down")
+
+	got := runStatusForTest(t, dbRun.ID)
+	for _, want := range []string{"liveness: dead", "daemon is not running", "no-mistakes axi abort --run " + dbRun.ID} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("axi status missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestAxiStatusLivenessDeadWhenWorktreeMissing(t *testing.T) {
+	repoDir, _, database, repo := setupAxiQueryRepo(t)
+	chdir(t, repoDir)
+	stubDaemonRunning(t, true)
+	dbRun, _ := seedLivenessRun(t, database, repo, "feature/worktree-gone")
+
+	got := runStatusForTest(t, dbRun.ID)
+	if !strings.Contains(got, "liveness: dead") || !strings.Contains(got, "worktree no longer exists") {
+		t.Fatalf("axi status should report a missing run worktree as dead:\n%s", got)
+	}
+}
+
+func TestAxiStatusLivenessStalledOnQuietStep(t *testing.T) {
+	repoDir, p, database, repo := setupAxiQueryRepo(t)
+	chdir(t, repoDir)
+	stubDaemonRunning(t, true)
+	dbRun, _ := seedLivenessRun(t, database, repo, "feature/stalled")
+	if err := os.MkdirAll(p.WorktreeDir(repo.ID, dbRun.ID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	restore := nowUnix
+	nowUnix = func() int64 { return time.Now().Add(30 * time.Minute).Unix() }
+	defer func() { nowUnix = restore }()
+
+	got := runStatusForTest(t, dbRun.ID)
+	for _, want := range []string{"liveness: stalled", "step review has had no activity", "step_stall_timeout"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("axi status missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestAxiStatusLivenessOkForHealthyActiveRun(t *testing.T) {
+	repoDir, p, database, repo := setupAxiQueryRepo(t)
+	chdir(t, repoDir)
+	stubDaemonRunning(t, true)
+	dbRun, _ := seedLivenessRun(t, database, repo, "feature/healthy")
+	if err := os.MkdirAll(p.WorktreeDir(repo.ID, dbRun.ID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := runStatusForTest(t, dbRun.ID)
+	if !strings.Contains(got, "liveness: ok") {
+		t.Fatalf("axi status missing liveness: ok in:\n%s", got)
+	}
+	if strings.Contains(got, "liveness_reason") {
+		t.Fatalf("healthy run must not carry a liveness_reason:\n%s", got)
+	}
+}
+
+func TestAxiStatusLivenessCIQuietStaysOk(t *testing.T) {
+	repoDir, p, database, repo := setupAxiQueryRepo(t)
+	chdir(t, repoDir)
+	stubDaemonRunning(t, true)
+	dbRun, err := database.InsertRun(repo.ID, "feature/ci-quiet", "headsha", "basesha")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := database.UpdateRunStatus(dbRun.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	step, err := database.InsertStepResult(dbRun.ID, types.StepCI)
+	if err != nil {
+		t.Fatalf("insert step: %v", err)
+	}
+	if err := database.StartStep(step.ID); err != nil {
+		t.Fatalf("start step: %v", err)
+	}
+	if err := os.MkdirAll(p.WorktreeDir(repo.ID, dbRun.ID), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	restore := nowUnix
+	nowUnix = func() int64 { return time.Now().Add(72 * time.Hour).Unix() }
+	defer func() { nowUnix = restore }()
+
+	got := runStatusForTest(t, dbRun.ID)
+	if !strings.Contains(got, "liveness: ok") {
+		t.Fatalf("a quiet CI monitor is not stalled (ci_timeout owns it):\n%s", got)
+	}
+}
+
+func TestAxiStatusTerminalRunHasNoLivenessField(t *testing.T) {
+	repoDir, _, database, repo := setupAxiQueryRepo(t)
+	chdir(t, repoDir)
+	dbRun, err := database.InsertRun(repo.ID, "feature/terminal", "headsha", "basesha")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := database.UpdateRunStatus(dbRun.ID, types.RunCompleted); err != nil {
+		t.Fatalf("mark run completed: %v", err)
+	}
+
+	got := runStatusForTest(t, dbRun.ID)
+	if strings.Contains(got, "liveness") {
+		t.Fatalf("terminal runs already carry outcome; liveness must be absent:\n%s", got)
+	}
+	if !strings.Contains(got, "outcome: passed") {
+		t.Fatalf("terminal run missing outcome:\n%s", got)
+	}
+}

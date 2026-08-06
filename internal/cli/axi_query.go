@@ -84,7 +84,8 @@ func runAxiStatus(cmd *cobra.Command, runID string) (string, error) {
 	if syncField := cachedBranchSyncField(cmd, run.ID); syncField != nil {
 		fields = append(fields, *syncField)
 	}
-	if gate, ok := rv.awaitingStep(); ok {
+	gate, atGate := rv.awaitingStep()
+	if atGate {
 		fields = append(fields, gateFields(gate)...)
 	} else if terminalStatus(rv.Status) {
 		fields = append(fields, toon.Field{Key: "outcome", Value: outcomeFor(rv.Status)})
@@ -92,8 +93,83 @@ func runAxiStatus(cmd *cobra.Command, runID string) (string, error) {
 			fields = append(fields, toon.Field{Key: "error", Value: *run.Error})
 		}
 	}
+	fingerprint := runStateFingerprint(rv)
+	if !terminalStatus(rv.Status) {
+		value, reason := runLiveness(env, run, steps, atGate)
+		fields = append(fields, toon.Field{Key: "liveness", Value: value})
+		if reason != "" {
+			fields = append(fields, toon.Field{Key: "liveness_reason", Value: reason})
+		}
+		fingerprint += "|liveness:" + value
+	}
 	emitDoc(cmd, fields...)
-	return runStateFingerprint(rv), nil
+	return fingerprint, nil
+}
+
+// Machine-readable liveness values for an active (non-terminal) run in
+// `axi status`. The prose `quiet` prefix inside last_activity stays a display
+// hint; `liveness` is the contract a polling agent should branch on: `dead`
+// means the run can no longer make progress on its own and waiting longer is
+// pointless, `stalled` means activity has been silent past step_quiet_warning
+// and the daemon's dead-run watchdog will fail the run if silence reaches
+// step_stall_timeout.
+const (
+	runLivenessOK      = "ok"
+	runLivenessStalled = "stalled"
+	runLivenessDead    = "dead"
+)
+
+// runLiveness classifies whether a non-terminal run can still make progress.
+// The recovery guidance lives in the reason string so a reader that sees
+// `dead` never has to guess the next command.
+func runLiveness(env *axiEnv, run *db.Run, steps []*db.StepResult, atGate bool) (string, string) {
+	if alive, _ := daemonIsRunningFn(env.p); !alive {
+		return runLivenessDead, "the daemon is not running, so this run cannot progress; " +
+			"`no-mistakes daemon start` recovers it, or `no-mistakes axi abort --run " + run.ID + "` clears it"
+	}
+	if run.Status == types.RunRunning {
+		if _, err := os.Stat(env.p.WorktreeDir(run.RepoID, run.ID)); err != nil && os.IsNotExist(err) {
+			return runLivenessDead, "the run worktree no longer exists; the daemon's dead-run watchdog will fail this run"
+		}
+	}
+	if atGate || run.AwaitingAgentSince != nil {
+		return runLivenessOK, "" // parked at a gate: waiting on the agent is progress
+	}
+	quietWarning := configQuietWarning(env)
+	if quietWarning <= 0 {
+		return runLivenessOK, ""
+	}
+	for _, step := range steps {
+		if step.Status != types.StepStatusRunning && step.Status != types.StepStatusFixing {
+			continue
+		}
+		if step.StepName == types.StepCI {
+			continue // the CI monitor dedupes unchanged poll logs; ci_timeout owns its lifetime
+		}
+		last := run.UpdatedAt
+		if step.StartedAt != nil && *step.StartedAt > last {
+			last = *step.StartedAt
+		}
+		if step.LastActivityAt != nil && *step.LastActivityAt > last {
+			last = *step.LastActivityAt
+		}
+		quietFor := time.Duration(nowUnix()-last) * time.Second
+		if quietFor >= quietWarning {
+			reason := fmt.Sprintf("step %s has had no activity for %s", step.StepName, quietFor.Truncate(time.Second))
+			if stall := stepStallTimeout(env); stall > 0 {
+				reason += fmt.Sprintf("; the daemon's dead-run watchdog fails the run after %s of silence (step_stall_timeout)", stall)
+			}
+			return runLivenessStalled, reason
+		}
+	}
+	return runLivenessOK, ""
+}
+
+func stepStallTimeout(env *axiEnv) time.Duration {
+	if env == nil || env.cfg == nil || env.cfg.StepStallTimeout <= 0 {
+		return 0
+	}
+	return env.cfg.StepStallTimeout
 }
 
 // runStateFingerprint summarizes a run's observable state for telemetry
