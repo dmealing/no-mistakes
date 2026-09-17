@@ -126,9 +126,11 @@ func TestLifecycleCommandsWriteCallerAttributionToCLILog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("daemon restart --force failed: %v\n%s", err, out)
 	}
+	// This local fork build refuses self-update, but only after attributing
+	// the invocation.
 	out, err = executeCmd("update", "--force")
-	if err != nil {
-		t.Fatalf("update --force failed: %v\n%s", err, out)
+	if err == nil || !strings.Contains(err.Error(), "local fork build") {
+		t.Fatalf("update --force = %v, want local fork refusal\n%s", err, out)
 	}
 
 	data, err := os.ReadFile(filepath.Join(nmHome, "logs", "cli.log"))

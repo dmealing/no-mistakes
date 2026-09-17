@@ -231,6 +231,9 @@ Run the pipeline and decide on its findings as they come up:
      configured idle timeout elapses, so a human can watch it in the TUI.
    - ` + "`passed`" + ` - the pipeline completed under the requested steps, including any
      explicit per-run skips. This alone is not evidence that a PR was merged.
+     When ` + "`run.local_ci`" + ` is present, CI is local (` + "`ci_mode: local`" + `): the CI
+     step was skipped, no forge checks will run, and there is nothing to wait
+     for - the PR is ready for a human to review and merge.
    - ` + "`passed-with-skips`" + ` - publication or CI verification automatically skipped.
      Report the missing evidence and its cause from ` + "`run.automatic_skips`" + `,
      bound to the full ` + "`run.head_sha`" + `. This is neither CI readiness nor a

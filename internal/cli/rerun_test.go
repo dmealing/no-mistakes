@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -200,9 +201,13 @@ func TestRerunSendsOnlyCleanCallerHead(t *testing.T) {
 			})
 			requests := make(chan map[string]string, 1)
 			srv.Handle(ipc.MethodRerun, func(_ context.Context, raw json.RawMessage) (interface{}, error) {
-				var params map[string]string
-				if err := json.Unmarshal(raw, &params); err != nil {
+				var fields map[string]any
+				if err := json.Unmarshal(raw, &fields); err != nil {
 					return nil, err
+				}
+				params := make(map[string]string, len(fields))
+				for key, value := range fields {
+					params[key] = fmt.Sprint(value)
 				}
 				requests <- params
 				return &ipc.RerunResult{RunID: "rerun-1"}, nil
@@ -230,6 +235,9 @@ func TestRerunSendsOnlyCleanCallerHead(t *testing.T) {
 			params := <-requests
 			if params["caller_head_sha"] != wantHead || params["repo_id"] != repo.ID || params["intent"] != "keep the caller's changes" {
 				t.Fatalf("rerun request = %v, want caller head %q and original repo/intent", params, wantHead)
+			}
+			if skips := params["skip_steps"]; skips != "[ci]" {
+				t.Fatalf("rerun skip_steps = %s, want [ci] under default local ci_mode", skips)
 			}
 			if !strings.Contains(out.String(), "Rerun started") {
 				t.Fatalf("missing rerun confirmation: %s", out.String())

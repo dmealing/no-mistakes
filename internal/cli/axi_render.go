@@ -8,6 +8,7 @@ import (
 
 	toon "github.com/toon-format/toon-go"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -128,6 +129,9 @@ type runView struct {
 	// it to keep a deliberate override from reading identically to a
 	// genuinely green run in agent-facing output.
 	CIOverrideReason string
+	// LocalCI is true when the CI step was skipped because CI is local
+	// (ci_mode: local), so no forge checks exist to wait for.
+	LocalCI bool
 }
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
@@ -172,6 +176,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		}
 		rv.Steps = append(rv.Steps, sv)
 	}
+	rv.LocalCI = localCISkipped(rv.Steps)
 	return rv
 }
 
@@ -225,7 +230,23 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 		}
 		rv.Steps = append(rv.Steps, sv)
 	}
+	rv.LocalCI = localCISkipped(rv.Steps)
 	return rv
+}
+
+// localCISkipped reports whether the CI step was skipped because CI is local.
+// A daemon that knows ci_mode records the reason; a daemon started before
+// ci_mode existed records none, so an unexplained CI skip is attributed to this
+// machine's configured mode (launch clients add the CI skip in local mode).
+func localCISkipped(steps []stepView) bool {
+	for _, s := range steps {
+		if s.Name != string(types.StepCI) || s.Status != string(types.StepStatusSkipped) {
+			continue
+		}
+		return s.SkipReason == config.LocalCISkipReason ||
+			(s.SkipReason == "" && config.ConfiguredCIMode().Local())
+	}
+	return false
 }
 
 // awaitingStep returns the step currently blocking on a human decision, if any.
@@ -484,6 +505,9 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 		}
 	}
 	fields = append(fields, toon.Field{Key: "steps", Value: rows})
+	if rv.LocalCI {
+		fields = append(fields, toon.Field{Key: "local_ci", Value: config.LocalCISkipReason})
+	}
 	if skips := rv.automaticSkips(); len(skips) > 0 {
 		fields = append(fields, toon.Field{Key: "automatic_skips", Value: skips})
 	}
@@ -499,7 +523,7 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 func (rv runView) automaticSkips() []automaticSkipRow {
 	var rows []automaticSkipRow
 	for _, s := range rv.Steps {
-		if s.Status == string(types.StepStatusSkipped) && s.SkipReason != "" &&
+		if s.Status == string(types.StepStatusSkipped) && s.SkipReason != "" && s.SkipReason != config.LocalCISkipReason &&
 			(s.Name == string(types.StepPR) || s.Name == string(types.StepCI)) {
 			rows = append(rows, automaticSkipRow{Step: s.Name, Reason: s.SkipReason})
 		}

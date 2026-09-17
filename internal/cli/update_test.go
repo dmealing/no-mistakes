@@ -5,39 +5,21 @@ import (
 	"testing"
 )
 
-func TestUpdateCommandDevBuild(t *testing.T) {
-	isolateUpdateCommand(t)
+// This local fork build refuses self-update whatever the flags, so an agent
+// obeying an upstream release cannot replace it and restore forge check waiting.
+func TestUpdateCommandRefusesLocalForkBuild(t *testing.T) {
+	for _, args := range [][]string{{"update"}, {"update", "--beta"}, {"update", "-y"}, {"update", "--force"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			isolateUpdateCommand(t)
 
-	out, err := executeCmd("update")
-	if err != nil {
-		t.Fatalf("update failed: %v\noutput: %s", err, out)
-	}
-	if !strings.Contains(out, "self-update unavailable for development builds") {
-		t.Fatalf("unexpected update output: %s", out)
-	}
-}
-
-func TestUpdateCommandBetaFlag(t *testing.T) {
-	isolateUpdateCommand(t)
-
-	out, err := executeCmd("update", "--beta")
-	if err != nil {
-		t.Fatalf("update --beta failed: %v\noutput: %s", err, out)
-	}
-	if !strings.Contains(out, "self-update unavailable for development builds") {
-		t.Fatalf("unexpected update output: %s", out)
-	}
-}
-
-func TestUpdateCommandYesFlag(t *testing.T) {
-	isolateUpdateCommand(t)
-
-	out, err := executeCmd("update", "-y")
-	if err != nil {
-		t.Fatalf("update -y failed: %v\noutput: %s", err, out)
-	}
-	if !strings.Contains(out, "self-update unavailable for development builds") {
-		t.Fatalf("unexpected update output: %s", out)
+			out, err := executeCmd(args...)
+			if err == nil {
+				t.Fatalf("%v succeeded, want local fork refusal\noutput: %s", args, out)
+			}
+			if msg := err.Error(); strings.Contains(msg, "\n") || !strings.Contains(msg, "local fork build") {
+				t.Fatalf("%v error = %q, want one-line local fork refusal", args, msg)
+			}
+		})
 	}
 }
 

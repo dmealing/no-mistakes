@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -57,7 +58,7 @@ func newRerunCmd() *cobra.Command {
 					return err
 				}
 				var result ipc.RerunResult
-				if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: branch, Intent: intent, PRBaseBranch: baseBranch, CallerHeadSHA: callerHead}, &result); err != nil {
+				if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: branch, SkipSteps: config.LaunchSkipSteps(nil), Intent: intent, PRBaseBranch: baseBranch, CallerHeadSHA: callerHead}, &result); err != nil {
 					return fmt.Errorf("rerun pipeline: %w", err)
 				}
 

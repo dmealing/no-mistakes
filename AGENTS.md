@@ -14,6 +14,12 @@ Safest local verification sequence after non-trivial changes:
 - `make e2e` when touching agent integrations, the e2e harness, or recorded fixtures
 - `go build -o ./bin/no-mistakes ./cmd/no-mistakes`
 
+**Local Fork Build: `ci_mode` (branch `local`)**
+
+- This branch is a carried local patch on an upstream release, not an upstream contribution: `ci_mode` (global-only, default `local`) skips the CI step on every run, `no-mistakes update` refuses, and the update banner is off (`internal/update/local_fork.go`); the Makefile stamps `VERSION` as `<upstream>-local.N`.
+- Local mode is enforced twice: the daemon via `applyCIMode` at run creation and recovery (`internal/daemon/ci_mode.go`), and every run-launch IPC request via `config.LaunchSkipSteps`, so it holds against a daemon started by an older build. A new launch site must call `LaunchSkipSteps`; never change the IPC protocol in a way an older daemon rejects.
+- `run.local_ci` renders the reason; a local CI skip is not an `automatic_skips` missing-evidence row. Upstream builds reject the `ci_mode` key, so the generated config template keeps it commented. Regressions: `internal/daemon/ci_mode_test.go`, `internal/cli/ci_mode_test.go`, `internal/update/local_fork_test.go`.
+
 **Self-update channel manifest (`internal/update`)**
 
 - `no-mistakes update` reads version metadata exclusively from `channels.json` on the GitHub release-asset CDN (`releases/download/channels/channels.json`), not `api.github.com`; a token is never required. Publisher: `cmd/publish-channels`, invoked from `.github/workflows/publish-channels.yml`. Regressions: `internal/update/channels_test.go`.
