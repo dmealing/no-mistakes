@@ -42,11 +42,11 @@ func newStatusCmd() *cobra.Command {
 				fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  fork:"), safeurl.Redact(repo.ForkURL))
 			}
 			fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  gate:"), p.RepoDir(repo.ID))
+			ciText := "github (forge checks monitored)"
 			if config.ConfiguredCIMode().Local() {
-				fmt.Fprintf(w, "  %s  %s\n", sDim.Render("    ci:"), config.LocalCISkipReason)
-			} else {
-				fmt.Fprintf(w, "  %s  %s\n", sDim.Render("    ci:"), "github (forge checks monitored)")
+				ciText = config.LocalCISkipReason
 			}
+			fmt.Fprintf(w, "  %s  %s\n", sDim.Render("    ci:"), ciText)
 
 			// Check daemon status.
 			alive, _ := daemon.IsRunning(p)

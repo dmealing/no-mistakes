@@ -664,11 +664,7 @@ func TestConfigErrorForFreshAxiRunAllowsReattach(t *testing.T) {
 }
 
 func TestRerunParamsIncludeSkipSteps(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("NM_HOME", home)
-	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("ci_mode: github\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	setCIModeHome(t, config.CIModeGitHub)
 	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "develop")
 	if params.RepoID != "repo-1" || params.Branch != "feature/x" || params.Intent != "user goal" {
 		t.Fatalf("unexpected rerun params: %#v", params)
@@ -682,7 +678,7 @@ func TestRerunParamsIncludeSkipSteps(t *testing.T) {
 }
 
 func TestRerunParamsAddCIUnderDefaultLocalCIMode(t *testing.T) {
-	t.Setenv("NM_HOME", t.TempDir())
+	setCIModeHome(t, "")
 	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "")
 	if want := []types.StepName{types.StepReview, types.StepCI}; !reflect.DeepEqual(params.SkipSteps, want) {
 		t.Fatalf("SkipSteps = %#v, want %#v", params.SkipSteps, want)

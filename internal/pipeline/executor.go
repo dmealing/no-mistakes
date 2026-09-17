@@ -90,23 +90,36 @@ func (e *Executor) SetForgeContext(ctx *forgecontext.Context) {
 
 // SetSkippedSteps configures steps that should be marked skipped without running.
 func (e *Executor) SetSkippedSteps(steps []types.StepName) {
-	if len(steps) == 0 {
-		e.skips = nil
-		return
-	}
-	e.skips = make(map[types.StepName]string, len(steps))
+	e.skips = nil
 	for _, step := range steps {
-		e.skips[step] = ""
+		e.SkipStepWithReason(step, "")
 	}
 }
 
 // SkipStepWithReason marks one step skipped without running and records why,
-// so status output can explain a configuration-driven skip.
+// so status output can explain a configuration-driven skip. It is the single
+// writer of the skip map.
 func (e *Executor) SkipStepWithReason(step types.StepName, reason string) {
 	if e.skips == nil {
 		e.skips = make(map[types.StepName]string, 1)
 	}
 	e.skips[step] = reason
+}
+
+// completeSkippedStep durably records and announces a configured skip for the
+// named step without running it, and reports whether the step was marked
+// skipped. Both the fresh and the recovered execution path route skips through
+// it so a step never records or reports differently after a daemon restart.
+func (e *Executor) completeSkippedStep(run *db.Run, repo *db.Repo, stepResultID string, name types.StepName) (bool, error) {
+	reason, skipped := e.skips[name]
+	if !skipped {
+		return false, nil
+	}
+	if err := e.db.CompleteSkippedStep(stepResultID, 0, 0, "", reason); err != nil {
+		return true, fmt.Errorf("skip step %s: %w", name, err)
+	}
+	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, name, string(types.StepStatusSkipped), "", "", nil)
+	return true, nil
 }
 
 // NewExecutor creates a pipeline executor.
@@ -241,11 +254,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		}
 
 		sr := stepRecords[step.Name()]
-		if reason, skipped := e.skips[step.Name()]; skipped {
-			if err := e.db.CompleteSkippedStep(sr.ID, 0, 0, "", reason); err != nil {
-				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
-			}
-			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(types.StepStatusSkipped), "", "", nil)
+		if skipped, err := e.completeSkippedStep(run, repo, sr.ID, step.Name()); err != nil {
+			return e.failRun(run, repo, err, ctx)
+		} else if skipped {
 			continue
 		}
 		state, err := e.durableExecutionState(sr.ID)
@@ -638,11 +649,9 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		if results[index].Status == types.StepStatusSkipped {
 			continue
 		}
-		if reason, skipped := e.skips[e.steps[index].Name()]; skipped {
-			if err := e.db.CompleteSkippedStep(results[index].ID, 0, 0, "", reason); err != nil {
-				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", e.steps[index].Name(), err), ctx)
-			}
-			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", nil)
+		if skipped, err := e.completeSkippedStep(run, repo, results[index].ID, e.steps[index].Name()); err != nil {
+			return e.failRun(run, repo, err, ctx)
+		} else if skipped {
 			continue
 		}
 		state, stateErr := e.durableExecutionState(results[index].ID)

@@ -157,8 +157,15 @@ func (u *updater) refreshCache(ctx context.Context) error {
 	})
 }
 
+// backgroundUpdateDisabled is the single predicate for staying silent about
+// updates: no banner, no background refresh, no cached latest version. A local
+// fork build never advertises an update it would refuse to apply.
+func (u *updater) backgroundUpdateDisabled() bool {
+	return u.localFork || u.disableBackground || isDevVersion(u.currentVersion) || os.Getenv(noUpdateCheckEnv) == "1"
+}
+
 func (u *updater) maybeNotifyAndCheck(args []string) {
-	if u.localFork || u.disableBackground || isDevVersion(u.currentVersion) || os.Getenv(noUpdateCheckEnv) == "1" {
+	if u.backgroundUpdateDisabled() {
 		return
 	}
 	// Informational commands must be side-effect-free probes: `update` and the
@@ -181,7 +188,7 @@ func (u *updater) maybeNotifyAndCheck(args []string) {
 }
 
 func (u *updater) cachedLatestVersion() string {
-	if u == nil || u.localFork || u.disableBackground || isDevVersion(u.currentVersion) || os.Getenv(noUpdateCheckEnv) == "1" {
+	if u == nil || u.backgroundUpdateDisabled() {
 		return ""
 	}
 	cache := readCache(u.cachePath)
