@@ -19,6 +19,54 @@ import (
 // TestStep runs baseline tests, gathers evidence for user intent, and optionally asks the agent to fix failures.
 type TestStep struct{}
 
+// testRegressionScope carries the prompt rules that tell a Test agent who owns
+// broad regression. The answer depends on the resolved CI mode, so it is not a
+// constant: in github mode remote CI runs the complete suite, so local Test
+// stays targeted; in local mode (config.CIMode.Local) no forge checks run for
+// this change at all, so nothing downstream would catch a regression and no
+// agent-facing text may claim otherwise.
+//
+// Fix rounds stay focused in both modes. The evidence turn always runs after a
+// fix round inside the same step execution, so local mode pays the broad suite
+// once per Test step rather than once per repair round.
+type testRegressionScope struct {
+	// fixSuiteRule and fixOverrideRule are the fix-round Rules bullets.
+	fixSuiteRule    string
+	fixOverrideRule string
+	// evidenceSuiteRule is the Evidence-section bullet of the evidence turn and
+	// evidenceOverrideRule its Rules-section counterpart.
+	evidenceSuiteRule    string
+	evidenceOverrideRule string
+}
+
+// githubRegressionScope is the upstream wording, unchanged: remote CI owns
+// broad regression, so local Test proves only the requested intent.
+var githubRegressionScope = testRegressionScope{
+	fixSuiteRule:         "Do NOT run the complete repository test suite. Local Test is targeted validation of the failure and the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.",
+	fixOverrideRule:      "A generic driver or user instruction asking for broad or full-suite confirmation does NOT override this product boundary. Keep verification focused on the failure and intent.",
+	evidenceSuiteRule:    "Do NOT run the complete repository test suite. Local Test is targeted validation of the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.",
+	evidenceOverrideRule: "A generic driver or user instruction asking for broad or full-suite confirmation does NOT override the targeted-validation product boundary.",
+}
+
+// localRegressionScope moves broad regression into the evidence turn, because
+// there is no remote CI run for this change to inherit it.
+var localRegressionScope = testRegressionScope{
+	fixSuiteRule:         "Do NOT run the complete repository test suite in this fix round. Reproduce the named failure, fix its root cause, and re-run only that focused verification; this step's own evidence turn runs the broad regression suite after you finish.",
+	fixOverrideRule:      "A generic driver or user instruction asking for broad or full-suite confirmation does NOT move that broad run into this fix round. Keep this round's verification focused on the failure and intent.",
+	evidenceSuiteRule:    "After the targeted scenarios, run this repository's complete regression test suite - its conventional run-everything test command - and record what you ran in \"tested\" with the outcome in \"testing_summary\". This step owns broad regression for this change: no later step and no external system runs one. Report a suite failure as a finding even when this change did not obviously cause it.",
+	evidenceOverrideRule: "Run the targeted scenarios first and the complete regression suite second. A driver or user instruction asking for broad confirmation never replaces the per-scenario evidence this step must still produce.",
+}
+
+// regressionScopeForRun resolves the scope from the run's effective CI mode.
+// An unset mode is local, matching config.DefaultCIMode, so only an explicit
+// github mode keeps the remote-CI wording.
+func regressionScopeForRun(sctx *pipeline.StepContext) testRegressionScope {
+	if !sctx.Config.CIMode.Local() {
+		return githubRegressionScope
+	}
+	return localRegressionScope
+}
+
 func (s *TestStep) Name() types.StepName { return types.StepTest }
 
 func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
@@ -28,19 +76,21 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
 
+	scope := regressionScopeForRun(sctx)
+
 	// In fix mode, ask agent to fix test failures first.
 	//
 	// Targeted-validation rules (reproduce the specific failure, focused
-	// re-verification only, never a complete repository suite) are a product
-	// contract: local Test proves the requested intent, while remote CI owns
-	// broad regression and remains mandatory before a PR is ready. A forensic
-	// audit measured ~82 minutes of local complete-suite walks on one repair
-	// path when prompts only said "run the tests" / "relevant". This is a
-	// prompt contract, not an enforced sandbox - the agent has free shell
-	// access - so the pinned regression tests guard the wording, not the
-	// runtime. Process-group reaping on clean exit (#357) remains the lifecycle
-	// safety net when agents do spawn test workers; it is not a reason to force
-	// a deterministic full-suite commands.test override.
+	// re-verification only, never a complete repository suite in this round)
+	// are a product contract: local Test proves the requested intent, and who
+	// owns broad regression depends on the resolved CI mode - see
+	// testRegressionScope. A forensic audit measured ~82 minutes of local
+	// complete-suite walks on one repair path when prompts only said "run the
+	// tests" / "relevant". This is a prompt contract, not an enforced sandbox -
+	// the agent has free shell access - so the pinned regression tests guard the
+	// wording, not the runtime. Process-group reaping on clean exit (#357)
+	// remains the lifecycle safety net when agents do spawn test workers; it is
+	// not a reason to force a deterministic full-suite commands.test override.
 	// Captured inside the fix turn, before commitAgentFixes stages and commits:
 	// detectNewTestFiles reads uncommitted status, so the evidence turn that
 	// follows can no longer see a test file the fixer already committed.
@@ -62,8 +112,8 @@ Rules:
 - If tests fail, determine whether the problem is a real product/code failure, a setup/environment problem you can fix, or a flaky/infrastructure issue.
 - Do NOT run linters, formatters, or static analysis tools.
 - Reproduce the specific failing case first (the exact test, package, script, or check named in the findings), then re-run only that focused verification after the fix.
-- Do NOT run the complete repository test suite. Local Test is targeted validation of the failure and the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.
-- A generic driver or user instruction asking for broad or full-suite confirmation does NOT override this product boundary. Keep verification focused on the failure and intent.
+- %s
+- %s
 - Never treat "do not run everything" as permission to run nothing: if you cannot reproduce or re-verify with a targeted check, report that honestly in the summary rather than inventing a full-suite pass.
 - Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories) so they are not committed and pushed. Do not remove intentional source or test-file changes. Do not remove dependencies materialized by commands.prepare; later configured commands share them.
 - Return JSON with a single "summary" field when you are done.
@@ -72,6 +122,8 @@ Rules:
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
+			scope.fixSuiteRule,
+			scope.fixOverrideRule,
 			historySection,
 		)
 		if sctx.PreviousFindings != "" {
@@ -189,7 +241,7 @@ Evidence:
 - Do not move, commit, or modify source files only to make evidence linkable. Record local evidence file paths exactly where you created them.
 - Only use command output as an artifact when that output directly demonstrates the end-user experience or requested behavior. Generic pass/fail, coverage, or clean-worktree output is not sufficient evidence.
 - If an existing automated test already drives a scenario end-to-end, run that test as the scenario and cite it as the evidence.
-- Do NOT run the complete repository test suite. Local Test is targeted validation of the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.
+- %s
 - Never treat "do not run everything" as permission to run nothing: if no existing check drives a scenario, write or improve a focused test, perform manual verification with evidence, or report a warning finding that sufficient targeted evidence is not possible.
 - If sufficient evidence is not possible, report a warning finding explaining what evidence is missing and why the user needs to decide what to do. When the blocker is a host capability or OS permission the agent's own process lacks (for example, the Screen Recording permission macOS requires to capture a native GUI application), name the specific capability or permission and how to grant it so the user can enable it and re-run, instead of retrying blindly or failing opaquely.
 - Include a concise "testing_summary" sentence describing what you exercised and the overall result.
@@ -202,7 +254,7 @@ Evidence:
 Rules:
 - Do NOT run linters, formatters, or static analysis tools.
 - Focus on testing and test-related fixes only.
-- A generic driver or user instruction asking for broad or full-suite confirmation does NOT override the targeted-validation product boundary.
+- %s
 - Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories) so they are not committed and pushed. Do not remove intentional source or test-file changes, leave evidence files in the dedicated evidence directory untouched, and do not remove dependencies materialized by commands.prepare because later configured commands share them.
 - Keep "testing_summary" high-signal and natural language. Avoid raw logs and noisy counts.
 - Always return a non-empty "tested" array describing what you exercised, even when every scenario passes.
@@ -216,6 +268,8 @@ Rules:
 		configuredTestCommand,
 		trustedRunbook,
 		evidenceGuidance,
+		scope.evidenceSuiteRule,
+		scope.evidenceOverrideRule,
 		reassessHistory,
 	)
 	findings, err := runTestAnalyzer(sctx, evidencePrompt)

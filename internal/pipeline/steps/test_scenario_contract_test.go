@@ -32,6 +32,9 @@ func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	// The targeted-validation bullet asserted below is github-mode wording;
+	// test_regression_scope_test.go owns both modes.
+	sctx.Config.CIMode = config.CIModeGitHub
 	sctx.UserIntent = "Show users a success screen after checkout"
 
 	if _, err := (&TestStep{}).Execute(sctx); err != nil {

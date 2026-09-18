@@ -413,6 +413,8 @@ Whether the CI step monitors forge checks. This key exists only in the local for
 - `local` skips the CI step on every run, whatever the launch path (`axi run`, `git push` to the gate, `rerun`, the TUI), with no `--skip ci`. Review, test, lint, push, and PR creation run unchanged; `axi` status shows `local_ci` with the reason, and a finished run never waits for forge checks.
 - `github` restores upstream CI monitoring: the CI step waits for the PR's checks and applies `ci_timeout` below.
 
+The mode also decides who owns broad regression in the [Test](/no-mistakes/reference/pipeline-steps/#test) step: `github` leaves it to remote CI, while `local` makes the Test step's evidence turn run the repository's complete regression suite itself.
+
 The daemon enforces the mode when it creates or recovers a run, and launch clients also request the CI skip, so local mode holds even against a daemon started by an older build.
 Upstream builds reject this key as unknown, so set it only while this build runs both the CLI and the daemon.
 
