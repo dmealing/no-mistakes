@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -143,7 +144,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				Ref:                  ref,
 				Old:                  oldSHA,
 				New:                  newSHA,
-				SkipSteps:            skipSteps,
+				SkipSteps:            config.LaunchSkipSteps(skipSteps),
 				Intent:               intent,
 				LaunchNonce:          launchNonce,
 				ValidationGeneration: validationGeneration,

@@ -60,6 +60,8 @@ type updater struct {
 	includePrereleases bool
 	assumeYes          bool
 	force              bool
+	// localFork disables self-update and the update banner (see localForkBuild).
+	localFork bool
 }
 
 type RunOptions struct {
@@ -92,6 +94,9 @@ func MaybeHandleBackgroundCheck(args []string) (bool, error) {
 		return true, err
 	}
 	u.currentVersion = args[1]
+	if u.localFork {
+		return true, nil
+	}
 	return true, u.refreshCache(context.Background())
 }
 
@@ -137,6 +142,7 @@ func defaultUpdater(stdout, stderr io.Writer) (*updater, error) {
 		resetDaemon: func() error {
 			return defaultResetDaemon(p)
 		},
+		localFork: localForkBuild,
 	}, nil
 }
 
@@ -151,8 +157,15 @@ func (u *updater) refreshCache(ctx context.Context) error {
 	})
 }
 
+// backgroundUpdateDisabled is the single predicate for staying silent about
+// updates: no banner, no background refresh, no cached latest version. A local
+// fork build never advertises an update it would refuse to apply.
+func (u *updater) backgroundUpdateDisabled() bool {
+	return u.localFork || u.disableBackground || isDevVersion(u.currentVersion) || os.Getenv(noUpdateCheckEnv) == "1"
+}
+
 func (u *updater) maybeNotifyAndCheck(args []string) {
-	if u.disableBackground || isDevVersion(u.currentVersion) || os.Getenv(noUpdateCheckEnv) == "1" {
+	if u.backgroundUpdateDisabled() {
 		return
 	}
 	// Informational commands must be side-effect-free probes: `update` and the
@@ -175,7 +188,7 @@ func (u *updater) maybeNotifyAndCheck(args []string) {
 }
 
 func (u *updater) cachedLatestVersion() string {
-	if u == nil || u.disableBackground || isDevVersion(u.currentVersion) || os.Getenv(noUpdateCheckEnv) == "1" {
+	if u == nil || u.backgroundUpdateDisabled() {
 		return ""
 	}
 	cache := readCache(u.cachePath)
@@ -190,6 +203,9 @@ func (u *updater) cachedLatestVersion() string {
 }
 
 func (u *updater) run(ctx context.Context) error {
+	if u.localFork {
+		return errLocalForkUpdate(u.currentVersion)
+	}
 	if isDevVersion(u.currentVersion) {
 		fmt.Fprintf(u.stdoutWriter(), "self-update unavailable for development builds (%s)\n", u.currentVersion)
 		return nil

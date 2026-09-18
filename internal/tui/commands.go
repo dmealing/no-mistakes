@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -74,7 +75,7 @@ func (m Model) rerunCmd(requestID uint64) tea.Cmd {
 	previousRunID := m.run.ID
 	return func() tea.Msg {
 		var rerun ipc.RerunResult
-		if err := m.client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repoID, Branch: branch, PreviousRunID: previousRunID}, &rerun); err != nil {
+		if err := m.client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repoID, Branch: branch, PreviousRunID: previousRunID, SkipSteps: config.LaunchSkipSteps(nil)}, &rerun); err != nil {
 			return rerunErrMsg{err: err, requestID: requestID}
 		}
 		var result ipc.GetRunResult

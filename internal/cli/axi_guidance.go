@@ -13,6 +13,11 @@ package cli
 // agents guide (docs/.../guides/agents.md) keeps the monitor invariant and links
 // to the CLI reference for restart conditions.
 // TestStaleMonitorGuidance_SyncedAcrossSurfaces guards that contract.
+// localCICompletedGuidance closes a run whose CI step was skipped because CI is
+// local (ci_mode: local): nothing on the forge will report, so there is nothing
+// to wait for.
+const localCICompletedGuidance = "CI is local (ci_mode: local): the CI step was skipped and no forge checks will run, so there is nothing to wait for. The run's local validation is the result; the PR is ready for a human to review and merge."
+
 const staleMonitorGuidance = "If this PR later falls behind the default branch or hits a merge conflict, the CI monitor rebases onto the base, resolves it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes it through Push automatically - run no command and never hand-rebase. Only when that monitor is no longer running (PR closed, run aborted, idle-timeout, or auto-fix exhausted) use `no-mistakes rerun` to validate the selected gate or preserved head; it refuses a known clean caller HEAD mismatch. If heads differ, inspect `no-mistakes axi status` and follow its exact `branch_sync.next_action.command` for custody or synchronization, then submit intended local commits with a fresh `no-mistakes axi run` once custody permits."
 
 // preserveGateFixCommitsGuidance is the canonical, point-of-use guidance an

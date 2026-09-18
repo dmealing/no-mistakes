@@ -15,6 +15,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
@@ -594,7 +595,7 @@ func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, s
 	}
 	var result ipc.StartFreshRunResult
 	if err := env.client.Call(ipc.MethodStartFreshRun, &ipc.StartFreshRunParams{
-		RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, SkipSteps: skipSteps,
+		RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, SkipSteps: config.LaunchSkipSteps(skipSteps),
 		Intent: intent, LaunchNonce: launchNonce, ValidationGeneration: validationGeneration, PRBaseBranch: baseBranch,
 	}, &result); err != nil {
 		return nil, fmt.Errorf("start fresh run: %w", err)
@@ -704,7 +705,7 @@ func activeRunLookupParams(repoID, branch string) *ipc.GetActiveRunParams {
 }
 
 func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, baseBranch string) *ipc.RerunParams {
-	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: skipSteps, Intent: intent, PRBaseBranch: baseBranch}
+	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: config.LaunchSkipSteps(skipSteps), Intent: intent, PRBaseBranch: baseBranch}
 }
 
 // emitLaunchReceipt writes the proof before driveRun subscribes, so callers
@@ -949,6 +950,9 @@ func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error
 		}
 		if len(rv.automaticSkips()) > 0 {
 			help = append(help, "Publication or CI verification did not run (see `run.automatic_skips` and `run.head_sha`). Report the missing evidence and its cause; this outcome does not establish CI readiness or a code failure.")
+		}
+		if rv.LocalCI {
+			help = append(help, localCICompletedGuidance)
 		}
 		if rv.PRURL != "" {
 			help = append(help, fmt.Sprintf("Open the PR: %s", rv.PRURL))
