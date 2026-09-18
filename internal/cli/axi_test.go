@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -696,6 +697,7 @@ func TestAxiRunClosesFlagIsRepeatable(t *testing.T) {
 }
 
 func TestRerunParamsIncludeSkipSteps(t *testing.T) {
+	setCIModeHome(t, config.CIModeGitHub)
 	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "develop")
 	if params.RepoID != "repo-1" || params.Branch != "feature/x" || params.Intent != "user goal" {
 		t.Fatalf("unexpected rerun params: %#v", params)
@@ -834,6 +836,14 @@ func (s *scriptedClosingIssueRefsUpdateClient) Call(method string, params interf
 		out.OK = true
 	}
 	return nil
+}
+
+func TestRerunParamsAddCIUnderDefaultLocalCIMode(t *testing.T) {
+	setCIModeHome(t, "")
+	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "")
+	if want := []types.StepName{types.StepReview, types.StepCI}; !reflect.DeepEqual(params.SkipSteps, want) {
+		t.Fatalf("SkipSteps = %#v, want %#v", params.SkipSteps, want)
+	}
 }
 
 func TestPreflightGuardReportsWorkingTreeCheckError(t *testing.T) {

@@ -1,4 +1,6 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# Local fork build stamp: this branch carries ci_mode and refuses self-update,
+# so the version names the upstream base plus the fork patch level.
+VERSION ?= v1.72.0-local.1
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 DEFAULT_UMAMI_HOST := https://a.kunchenguid.com

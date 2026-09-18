@@ -201,6 +201,7 @@ type GlobalConfig struct {
 	// pushed branch may set it.
 	Worktree                  Worktree      `yaml:"-"`
 	CITimeout                 time.Duration `yaml:"-"`
+	CIMode                    CIMode        `yaml:"-"`
 	StepQuietWarning          time.Duration `yaml:"-"`
 	AgentTimeout              time.Duration `yaml:"-"`
 	ReviewAgentTimeout        time.Duration `yaml:"-"`
@@ -270,6 +271,7 @@ type globalConfigRaw struct {
 	WorktreeRoots             map[string]string          `yaml:"worktree_roots"`
 	Worktree                  WorktreeRaw                `yaml:"worktree"`
 	CITimeout                 string                     `yaml:"ci_timeout"`
+	CIMode                    string                     `yaml:"ci_mode"`
 	DaemonConnectTimeout      string                     `yaml:"daemon_connect_timeout"`
 	BranchSyncRemoteTimeout   string                     `yaml:"branch_sync_remote_timeout"`
 	GateReconcileInterval     string                     `yaml:"gate_reconcile_interval"`
@@ -795,6 +797,7 @@ type Config struct {
 	AgentConfig               map[string]agentcfg.Profile
 	ReviewAgents              map[string]ReviewAgent
 	CITimeout                 time.Duration
+	CIMode                    CIMode
 	StepQuietWarning          time.Duration
 	AgentTimeout              time.Duration
 	ReviewAgentTimeout        time.Duration
@@ -1355,6 +1358,13 @@ forgejo_axi_path: forgejo-axi
 # non-positive duration to monitor until the PR is merged, closed, or the run is
 # aborted with: no-mistakes axi abort --run <id>
 ci_timeout: "168h"
+
+# CI mode (this fork build). "local" (the default when the key is absent) skips
+# the CI step on every run: validation is the local pipeline, pull requests are
+# still opened, and no-mistakes never waits for forge checks. "github" restores
+# upstream forge check monitoring. Left commented so this file stays readable
+# by upstream builds, which reject unknown keys.
+# ci_mode: local
 
 # AXI status marks a running/fixing step as quiet when no step log or native
 # agent lifecycle activity has appeared for this long. This is observability
@@ -2255,6 +2265,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		Agents:                  []types.AgentName{types.AgentAuto},
 		ForgejoAXIPath:          "forgejo-axi",
 		CITimeout:               DefaultCITimeout,
+		CIMode:                  DefaultCIMode,
 		StepQuietWarning:        DefaultStepQuietWarning,
 		AgentTimeout:            DefaultAgentTimeout,
 		ReviewAgentTimeout:      DefaultReviewAgentTimeout,
@@ -2497,6 +2508,11 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.WorktreeRoots = raw.WorktreeRoots
 	}
+	ciMode, err := parseCIMode(raw.CIMode)
+	if err != nil {
+		return nil, err
+	}
+	cfg.CIMode = ciMode
 	timeoutValue := raw.CITimeout
 	if timeoutValue == "" {
 		timeoutValue = raw.BabysitTimeout
@@ -3648,6 +3664,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		AgentConfig:               global.AgentConfig,
 		ReviewAgents:              global.ReviewAgents,
 		CITimeout:                 global.CITimeout,
+		CIMode:                    global.CIMode,
 		StepQuietWarning:          global.StepQuietWarning,
 		AgentTimeout:              global.AgentTimeout,
 		ReviewAgentTimeout:        global.ReviewAgentTimeout,

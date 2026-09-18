@@ -126,7 +126,9 @@ func yamlDoubleQuoted(s string) string {
 // this parked at review; after, the deferred finding is stripped and the run
 // proceeds through PR ownership.
 func TestReviewPipelineOwnedPRCriterionDoesNotPark(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: writePipelineOwnedPRScenario(t)})
+	// This journey asserts upstream forge CI monitoring, which the local fork
+	// build only runs in github CI mode.
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: writePipelineOwnedPRScenario(t), GlobalConfigExtra: "ci_mode: github"})
 	parentURL := "https://github.com/example/no-mistakes.git"
 	forkURL := "https://github.com/example-fork/no-mistakes.git"
 	forkDir := filepath.Join(filepath.Dir(h.UpstreamDir), "fork.git")

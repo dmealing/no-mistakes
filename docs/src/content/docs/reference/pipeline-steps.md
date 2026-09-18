@@ -335,6 +335,8 @@ The comment is intentionally data only. It does not declare any step required, p
 
 Monitors PR health after creation and auto-fixes CI failures. Mergeability polling and merge-conflict handling apply to GitHub, GitLab, Forgejo, Azure DevOps, and provider plugins declaring `mergeable_state`.
 
+In the local fork build this step is skipped on every run by default, because [`ci_mode`](/no-mistakes/reference/global-config/#ci_mode) defaults to `local`; set `ci_mode: github` to restore the monitoring described below.
+
 **Active for GitHub, GitLab, Forgejo, Bitbucket Cloud (`bitbucket.org`), Azure DevOps (`dev.azure.com` / `*.visualstudio.com`), Gitea, and any host claimed by a [provider plugin](/no-mistakes/reference/provider-plugin-protocol/)**.
 
 - GitHub requires `gh` CLI, installed and authenticated, version >= 2.50 (older versions reject the `gh pr checks --json` call the monitor reads checks with).
