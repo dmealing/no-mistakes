@@ -594,6 +594,9 @@ func TestTestStep_InitialAgent_TargetedValidationContract(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	// Pins the github-mode wording; the local-mode contract, where this step
+	// owns broad regression, lives in test_regression_scope_test.go.
+	sctx.Config.CIMode = config.CIModeGitHub
 	sctx.UserIntent = "Keep doctor checks green for CLI users"
 
 	if _, err := (&TestStep{}).Execute(sctx); err != nil {
@@ -647,6 +650,9 @@ func TestTestStep_FixMode_TargetedVerificationContract(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+	// Pins the github-mode wording; test_regression_scope_test.go owns the
+	// local-mode contract, where this step runs broad regression itself.
+	sctx.Config.CIMode = config.CIModeGitHub
 	sctx.Fixing = true
 	sctx.PreviousFindings = `{"findings":[{"id":"test-1","severity":"error","description":"tests failed with exit code 1","action":"auto-fix"}],"summary":"FAIL: TestFoo"}`
 
@@ -698,6 +704,7 @@ func TestTestStep_FixMode_DriverFullSuiteInstructionDoesNotOverrideContract(t *t
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+	sctx.Config.CIMode = config.CIModeGitHub
 	sctx.Fixing = true
 	sctx.PreviousFindings = `{"findings":[{"id":"test-1","severity":"error","description":"tests failed with exit code 1","action":"auto-fix","user_instructions":"confirm the full suite path for this failure is green"}],"summary":"FAIL: TestFoo"}`
 

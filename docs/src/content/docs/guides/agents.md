@@ -29,7 +29,7 @@ Testing prompts also ask agents to remove transient working-tree artifacts they 
 - Leave `agent: auto` if one good agent is already installed and you do not need repo-specific behavior.
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
 - Use an ordered fallback list when you prefer one agent but want no-mistakes to try another if the first process is unavailable.
-- Set explicit `commands.lint` and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice. Test always follows its optional baseline with agent-driven end-user scenarios; remote CI owns broad regression. See [Test](/no-mistakes/reference/pipeline-steps/#test) for the live-validation contract.
+- Set explicit `commands.lint` and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice. Test always follows its optional baseline with agent-driven end-user scenarios; who owns broad regression follows [`ci_mode`](/no-mistakes/reference/global-config/#ci_mode) - remote CI under `github`, the Test step's own complete-suite evidence turn under `local`. See [Test](/no-mistakes/reference/pipeline-steps/#test) for the live-validation contract.
 
 That last point matters: explicit repo commands make the baseline predictable, while the agent establishes whether the requested behavior works in the real product.
 That testing invocation is expected to leave only intentional source or test-file changes in the worktree, while preserving requested evidence files under the dedicated evidence directory.
