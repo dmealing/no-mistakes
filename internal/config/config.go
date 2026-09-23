@@ -1063,6 +1063,12 @@ type TestRaw struct {
 	// (see EffectiveRepoConfig): a contributor's pushed branch must not be able
 	// to waive the configured-test gate that validates it.
 	AllowApproveOverFailure string `yaml:"allow_approve_over_failure"`
+	// LiveEvidence, when explicitly false, skips the live-evidence agent when
+	// commands.test ran and passed: the configured suite is then the whole
+	// test step. A failing baseline still gets the agent, which diagnoses it.
+	// Like instructions it is trusted-only (see EffectiveRepoConfig): a pushed
+	// branch must not be able to switch off the validation of itself.
+	LiveEvidence *bool `yaml:"live_evidence"`
 }
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
@@ -1107,6 +1113,9 @@ type Test struct {
 	Evidence                Evidence
 	Instructions            string
 	AllowApproveOverFailure string
+	// SkipLiveEvidence is true only when test.live_evidence is explicitly
+	// false, so a zero-value Test keeps the live-evidence agent.
+	SkipLiveEvidence bool
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -3067,6 +3076,9 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// trusted-only for the same reason no_ci is: a pushed branch must not
 		// waive the gate that certifies it.
 		effective.Test.AllowApproveOverFailure = trusted.Test.AllowApproveOverFailure
+		// test.live_evidence decides whether the gate validates the branch
+		// beyond its own test command, so it is trusted-only for the same reason.
+		effective.Test.LiveEvidence = trusted.Test.LiveEvidence
 		// pr.base_branch controls where the contributor's PR lands, so it is
 		// trusted-only unless the repository explicitly opts into pushed
 		// settings alongside commands and agent selection. TitleFormat is a
@@ -3095,6 +3107,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.Prepare = false
 		effective.Test.BaseAttribution = false
 		effective.Test.AllowApproveOverFailure = ""
+		effective.Test.LiveEvidence = nil
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
 		}
@@ -3193,6 +3206,9 @@ func testDefaults() Test {
 // The local-storage half is applied separately by applyEvidenceStorageOverrides
 // so a repository config can never reach it (see EvidenceRaw.LocalRoot).
 func applyTestOverrides(dst *Test, src *TestRaw) {
+	if src.LiveEvidence != nil {
+		dst.SkipLiveEvidence = !*src.LiveEvidence
+	}
 	if src.Evidence.StoreInRepo != nil {
 		dst.Evidence.StoreInRepo = *src.Evidence.StoreInRepo
 	}
