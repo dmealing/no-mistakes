@@ -228,3 +228,37 @@ func TestEffectiveRepoConfig_EvidenceBranchTrustedOnly(t *testing.T) {
 		t.Errorf("without a trusted copy the branch must fall back to the default, got %q", *withoutTrusted.Test.Evidence.Branch)
 	}
 }
+
+func TestEffectiveRepoConfig_LiveEvidenceTrustedOnly(t *testing.T) {
+	off := false
+	on := true
+
+	pushedOnly := EffectiveRepoConfig(
+		&RepoConfig{Test: TestRaw{LiveEvidence: &off}},
+		&RepoConfig{},
+		true,
+	)
+	if pushedOnly.Test.LiveEvidence != nil {
+		t.Fatalf("a pushed branch switched live evidence off: %v", *pushedOnly.Test.LiveEvidence)
+	}
+	trusted := EffectiveRepoConfig(
+		&RepoConfig{Test: TestRaw{LiveEvidence: &on}},
+		&RepoConfig{Test: TestRaw{LiveEvidence: &off}},
+		true,
+	)
+	if trusted.Test.LiveEvidence == nil || *trusted.Test.LiveEvidence {
+		t.Fatalf("effective live_evidence = %v, want the trusted false", trusted.Test.LiveEvidence)
+	}
+	if EffectiveRepoConfig(&RepoConfig{Test: TestRaw{LiveEvidence: &off}}, nil, true).Test.LiveEvidence != nil {
+		t.Fatal("without a trusted copy live_evidence must fall back to the default")
+	}
+
+	test := testDefaults()
+	if test.SkipLiveEvidence {
+		t.Fatal("live evidence must be on by default")
+	}
+	applyTestOverrides(&test, &TestRaw{LiveEvidence: &off})
+	if !test.SkipLiveEvidence {
+		t.Fatal("live_evidence: false must skip the agent")
+	}
+}

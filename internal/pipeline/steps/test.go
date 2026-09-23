@@ -178,6 +178,28 @@ Previous test findings to address:
 		}
 	}
 
+	if testCmd != "" && baselineExitCode == 0 && sctx.Config.Test.SkipLiveEvidence {
+		sctx.Log("baseline tests passed; live evidence disabled by test.live_evidence=false")
+		findings := Findings{
+			Summary:       fmt.Sprintf("configured test command passed; live evidence disabled by test.live_evidence=false: `%s`", testCmd),
+			Tested:        tested,
+			TestedHeadSHA: sctx.Run.HeadSHA,
+		}
+		for _, f := range newTestsFromFix {
+			findings.Items = append(findings.Items, Finding{
+				Severity:    "info",
+				Action:      types.ActionNoOp,
+				File:        f,
+				Description: fmt.Sprintf("new test file written by agent: %s", f),
+			})
+		}
+		findingsJSON, _ := json.Marshal(findings)
+		return &pipeline.StepOutcome{
+			Findings:   string(findingsJSON),
+			FixSummary: fixSummary,
+		}, nil
+	}
+
 	evidenceDir := testEvidenceDir(sctx)
 	if evidenceDir == "" {
 		return nil, fmt.Errorf("test evidence dir is not configured for this run")

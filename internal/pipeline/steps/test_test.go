@@ -758,3 +758,62 @@ func TestTestStep_InitialAgent_NoTargetedEvidenceRequiresHonestFinding(t *testin
 		}
 	}
 }
+
+func TestTestStep_LiveEvidenceDisabledSkipsAgentWhenBaselinePasses(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			calls++
+			return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+	sctx.Config.Test.SkipLiveEvidence = true
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("evidence agent calls = %d, want 0", calls)
+	}
+	if outcome.NeedsApproval || outcome.ExitCode != 0 {
+		t.Fatalf("outcome = %+v, want a passing step", outcome)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings.TestedHeadSHA != headSHA || len(findings.Tested) != 1 || findings.Tested[0] != "exit 0" {
+		t.Fatalf("findings = %+v, want the baseline command recorded against the head", findings)
+	}
+}
+
+func TestTestStep_LiveEvidenceDisabledStillRunsAgentWhenBaselineFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			calls++
+			return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 3"})
+	sctx.Config.Test.SkipLiveEvidence = true
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("evidence agent calls = %d, want 1 for a failing baseline", calls)
+	}
+	if !outcome.NeedsApproval || outcome.ExitCode != 3 {
+		t.Fatalf("outcome = %+v, want the failing baseline to block", outcome)
+	}
+}
