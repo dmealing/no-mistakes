@@ -119,6 +119,19 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Records a content-versioned gate configuration stamp only after the whole migration succeeds. Normal restarts check current stamped gates from the filesystem without rerunning the mutating Git commands
 - Clears any parked-awaiting-agent marker so a recovered failed run is not shown as still waiting for `axi respond`
 
+## Dead-run watchdog
+
+Crash recovery only helps when the daemon itself restarts. While the daemon stays alive, a periodic dead-run watchdog (every minute) keeps a wedged run from staying `running` forever - previously such a run was indistinguishable from real progress to anything polling `axi status`. It declares an active run dead, cancelling its pipeline (which kills the step's agent process tree, persists the terminal state, and cleans up the worktree) when any of the following holds:
+
+- The run's worktree directory no longer exists, so no remaining step could ever fix, commit, or push
+- The active step's recorded agent process is gone but the step never observed the exit
+- A running or fixing step other than CI has produced no log or agent lifecycle activity for [`step_stall_timeout`](/no-mistakes/reference/global-config/#step_stall_timeout) (default `1h`; the CI monitor is exempt because [`ci_timeout`](/no-mistakes/reference/global-config/#ci_timeout) owns its idle lifetime, and a running configured `commands.*` invocation counts as activity while the daemon waits on it)
+- An active run row has no live pipeline executor in the daemon at all, past a short startup grace
+
+A watchdog-killed run is a normal terminal `failed` run whose `error` starts with `dead run:`, so pollers and `axi status` see an unambiguous outcome. Runs parked at an approval or fix-review gate are never watchdog targets: parking is agent-paced by design and is surfaced separately as `awaiting_agent`. `axi status` additionally reports a client-side `liveness: ok|stalled|dead` signal for active runs, which also covers the case the watchdog cannot: a daemon that is not running at all.
+
+When a run reaches a terminal state, worktree removal first reaps orphaned processes still anchored to the worktree (working directory inside it, or the worktree path in their command line). This catches children that escaped the per-command process-group boundary - for example a dev server an agent backgrounded during a step - which would otherwise both leak indefinitely and keep re-creating files that defeat the worktree removal itself.
+
 ## Logging
 
 Daemon lifecycle logs go to `~/.no-mistakes/logs/daemon.log`. Startup logs report concise phase durations, gate migration counts, and a final `daemon ready` message only after IPC health succeeds. Successful read-only IPC requests such as health and run-state reads appear only at `debug`; mutations, stream starts, lifecycle transitions, and failed requests remain visible at `info` or `warn`.

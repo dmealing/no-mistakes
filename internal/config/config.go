@@ -35,6 +35,13 @@ const (
 	// DefaultStepQuietWarning is how long a running/fixing step can go without
 	// a new log or lifecycle activity before AXI status marks it quiet.
 	DefaultStepQuietWarning = 10 * time.Minute
+	// DefaultStepStallTimeout is how long a running/fixing non-CI step can go
+	// without any log or agent lifecycle activity before the daemon's dead-run
+	// watchdog declares the run dead and fails it. It is deliberately much
+	// longer than step_quiet_warning: quiet is a display hint, stall is a
+	// kill. The CI step is exempt (its idle lifetime is owned by ci_timeout,
+	// and its monitor deliberately deduplicates unchanged poll logs).
+	DefaultStepStallTimeout = time.Hour
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
 	// daemon socket that exists but is not accepting connections.
 	DefaultDaemonConnectTimeout = 3 * time.Second
@@ -55,6 +62,7 @@ type GlobalConfig struct {
 	AgentArgsOverride    map[string][]string `yaml:"agent_args_override"`
 	CITimeout            time.Duration       `yaml:"-"`
 	StepQuietWarning     time.Duration       `yaml:"-"`
+	StepStallTimeout     time.Duration       `yaml:"-"`
 	DaemonConnectTimeout time.Duration       `yaml:"-"`
 	LogLevel             string              `yaml:"log_level"`
 	// SessionReuse controls per-run, per-role agent session reuse in the
@@ -79,6 +87,7 @@ type globalConfigRaw struct {
 	DaemonConnectTimeout string              `yaml:"daemon_connect_timeout"`
 	BabysitTimeout       string              `yaml:"babysit_timeout"`
 	StepQuietWarning     string              `yaml:"step_quiet_warning"`
+	StepStallTimeout     string              `yaml:"step_stall_timeout"`
 	LogLevel             string              `yaml:"log_level"`
 	SessionReuse         *bool               `yaml:"session_reuse"`
 	AutoFix              AutoFixRaw          `yaml:"auto_fix"`
@@ -202,6 +211,7 @@ type Config struct {
 	AgentArgsOverride    map[string][]string
 	CITimeout            time.Duration
 	StepQuietWarning     time.Duration
+	StepStallTimeout     time.Duration
 	LogLevel             string
 	SessionReuse         bool
 	Commands             Commands
@@ -347,6 +357,13 @@ ci_timeout: "168h"
 # agent lifecycle activity has appeared for this long. This is observability
 # only; it never cancels work.
 step_quiet_warning: "10m"
+
+# The daemon's dead-run watchdog fails a run whose running/fixing step has
+# produced no log or agent lifecycle activity for this long, so a wedged run
+# cannot stay "running" forever. The CI step is exempt (its idle lifetime is
+# owned by ci_timeout). Set to "off", "none", "never", "unlimited", or any
+# non-positive duration to disable the inactivity kill.
+step_stall_timeout: "1h"
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
@@ -884,6 +901,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		Agents:               []types.AgentName{types.AgentAuto},
 		CITimeout:            DefaultCITimeout,
 		StepQuietWarning:     DefaultStepQuietWarning,
+		StepStallTimeout:     DefaultStepStallTimeout,
 		DaemonConnectTimeout: DefaultDaemonConnectTimeout,
 		LogLevel:             "info",
 		SessionReuse:         true,
@@ -951,6 +969,13 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 			cfg.StepQuietWarning = d
 		}
 	}
+	if raw.StepStallTimeout != "" {
+		d, err := parseStepStallTimeout(raw.StepStallTimeout)
+		if err != nil {
+			return nil, err
+		}
+		cfg.StepStallTimeout = d
+	}
 	if raw.DaemonConnectTimeout != "" {
 		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)
 		if err != nil {
@@ -990,6 +1015,25 @@ func parseCITimeout(value string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return CITimeoutUnlimited, nil
+	}
+	return d, nil
+}
+
+// parseStepStallTimeout interprets the step_stall_timeout config value. The
+// keywords "off"/"none"/"never"/"unlimited", or any non-positive duration,
+// disable the dead-run watchdog's inactivity kill entirely (resolved as 0);
+// otherwise the value is parsed as a Go duration.
+func parseStepStallTimeout(value string) (time.Duration, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "unlimited", "none", "off", "never":
+		return 0, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse step_stall_timeout %q: %w", value, err)
+	}
+	if d <= 0 {
+		return 0, nil
 	}
 	return d, nil
 }
@@ -1261,6 +1305,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		AgentArgsOverride:    global.AgentArgsOverride,
 		CITimeout:            global.CITimeout,
 		StepQuietWarning:     global.StepQuietWarning,
+		StepStallTimeout:     global.StepStallTimeout,
 		LogLevel:             global.LogLevel,
 		SessionReuse:         global.SessionReuse,
 		Commands:             repo.Commands,

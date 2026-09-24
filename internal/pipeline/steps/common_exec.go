@@ -3,11 +3,14 @@ package steps
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -241,8 +244,56 @@ func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, erro
 	return runShellCommandWithEnv(ctx, dir, nil, cmdStr)
 }
 
+// configuredCommandHeartbeatInterval paces the step-activity heartbeat while a
+// configured commands.* invocation runs. It must stay well under the default
+// step_quiet_warning (10m) and step_stall_timeout (1h): configured commands
+// are captured with buffered combined output, so without the heartbeat a
+// legitimately long command (a 1h+ test suite) would look completely silent
+// and be killed by the daemon's dead-run watchdog mid-run. A package var so
+// tests can shorten it.
+var configuredCommandHeartbeatInterval = 4 * time.Minute
+
+// runStepShellCommand runs a configured repo command (commands.test/lint/
+// format), heartbeating the step's activity while the command is in flight.
+// The heartbeat records what the daemon knows first-hand - it is still
+// synchronously waiting on the live command it launched - and names the
+// command plus elapsed time so `axi status` last_activity stays honest.
 func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int, error) {
+	stop := startConfiguredCommandHeartbeat(sctx, cmdStr, configuredCommandHeartbeatInterval)
+	defer stop()
 	return runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, cmdStr)
+}
+
+// startConfiguredCommandHeartbeat periodically touches the step's activity row
+// until the returned stop func is called. Callers without a recorded step
+// (nil DB or empty StepResultID) get a no-op.
+func startConfiguredCommandHeartbeat(sctx *pipeline.StepContext, cmdStr string, interval time.Duration) func() {
+	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" || interval <= 0 {
+		return func() {}
+	}
+	command := cmdStr
+	if len(command) > 120 {
+		command = command[:120] + "..."
+	}
+	started := time.Now()
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				text := fmt.Sprintf("waiting on configured command (%s elapsed): %s", time.Since(started).Truncate(time.Second), command)
+				if err := sctx.DB.TouchStepActivity(sctx.StepResultID, text); err != nil {
+					slog.Warn("failed to heartbeat configured command activity", "step_result_id", sctx.StepResultID, "error", err)
+				}
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
 }
 
 func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdStr string) (string, int, error) {

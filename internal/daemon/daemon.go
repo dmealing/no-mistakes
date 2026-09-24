@@ -222,6 +222,15 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, stepFactory StepFactory, sta
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Start the dead-run watchdog after exclusive recovery so every run it
+	// sweeps was started or deliberately preserved by this daemon. It stops
+	// with the daemon context on shutdown.
+	stallTimeout := config.DefaultStepStallTimeout
+	if watchdogCfg, cfgErr := config.LoadGlobal(p.ConfigFile()); cfgErr == nil {
+		stallTimeout = watchdogCfg.StepStallTimeout
+	}
+	go newRunWatchdog(d, p, mgr, stallTimeout).run(ctx)
+
 	var shutdownOnce sync.Once
 	doShutdown := func(reason string) {
 		shutdownOnce.Do(func() {
@@ -444,7 +453,7 @@ func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths) {
 				slog.Info("skipping worktree cleanup", "path", wtPath, "reason", reason)
 				continue
 			}
-			if err := git.WorktreeRemove(ctx, gateDir, wtPath); err != nil {
+			if err := removeRunWorktree(ctx, gateDir, wtPath); err != nil {
 				slog.Warn("git worktree remove failed, falling back to os.RemoveAll", "path", wtPath, "error", err)
 				if err := os.RemoveAll(wtPath); err != nil {
 					slog.Warn("failed to remove orphaned worktree", "path", wtPath, "error", err)

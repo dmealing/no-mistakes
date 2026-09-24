@@ -120,7 +120,9 @@ Run the pipeline and decide on its findings as they come up:
    A long-running call is working, not stalled - background it if your harness
    needs to, but the run **never advances past a gate on its own**. Read every
    return; on a `gate:`, respond; loop until an `outcome:`. Never idle-wait
-   for the run to move forward by itself.
+   for the run to move forward by itself. If you background a watcher to do
+   this, it must be finite and able to notice its own deadness - see
+   [Background watchers](#background-watchers).
    When that status output includes `awaiting_agent: parked <duration>` under the run,
    the run is parked at an approval or fix-review gate and waiting for you to
    send `axi respond`. The field is observability only: it does not change
@@ -132,6 +134,17 @@ Run the pipeline and decide on its findings as they come up:
    `quiet`, no step log or native-agent lifecycle activity has arrived for
    longer than `step_quiet_warning`. Treat that as a liveness clue, not as
    permission to cancel, rerun, or edit the worktree yourself.
+   For a non-terminal run, `axi status` also reports a machine-readable
+   `liveness: ok|stalled|dead` (with a `liveness_reason` when not `ok`):
+   `dead` means the run cannot progress on its own (daemon down or the run
+   worktree is gone) and waiting longer is pointless - follow the reason's
+   recovery command instead of continuing to poll. The daemon's dead-run
+   watchdog fails a wedged run itself (its terminal `error` then starts with
+   `dead run:`), so a run can no longer stay `running` forever. When you
+   poll a run, always use `no-mistakes axi status --run <id>` - it works
+   from any directory, so your loop keeps seeing the terminal outcome even
+   after the branch's worktree is removed; a poll that suddenly returns
+   nothing means your working directory is gone, not that the run is alive.
 2. If the output contains a `gate:` object, the pipeline is waiting on you.
    Read its `findings` table. Each finding has an `id`, `severity`,
    `file`, `description`, and an `action` that tells you how the
@@ -232,6 +245,31 @@ format - what was validated and what was found. If the output includes a
 `fixes` table, the pipeline fixed findings your original change missed:
 acknowledge those misses and explicitly list each fix so the user can easily
 review them.
+
+## Background watchers
+
+If you background a poll loop to watch a run, the watcher is part of the job: a
+dead watcher that still looks alive is worse than none, because its silence
+reads as "still working". A pipeline run is a finite job, so every watcher must
+be finite too:
+
+- **A watcher must be able to end.** Give it a bounded lifetime - never
+  persistent or otherwise unbounded.
+- **Anchor to the run id, never to a path that can disappear.** Poll
+  `no-mistakes axi status --run <id>` as described above, never anything
+  that lives inside a git worktree - the worktree is removed after merge.
+- **Silence must never be the steady state.** The moment the target becomes
+  unobservable - the status command errors or returns nothing - the watcher
+  must emit that fact and exit. Never write a loop where "no output" and "no
+  change" look the same.
+- **Act on `liveness`.** A `dead` run will not progress; stop polling and
+  follow the recovery command in its `liveness_reason` instead.
+- **Bound the wait and re-verify.** If roughly 15 minutes pass with no observed
+  state change, stop trusting the watcher: run `no-mistakes axi status --run <id>`
+  yourself and report what it actually says. Repeating "still running" or
+  "waiting" without re-checking is not an answer.
+- **Clean up watchers** when a run reaches a terminal outcome, and before
+  deleting any worktree a watcher depends on.
 
 ## Escalate `ask-user` findings
 
