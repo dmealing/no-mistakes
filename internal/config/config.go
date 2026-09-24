@@ -56,6 +56,13 @@ const (
 	// invocation, including the post-test evidence-gathering turn and a
 	// Test-repair turn, so a silent agent cannot leave a run active forever.
 	DefaultTestAgentTimeout = 30 * time.Minute
+	// DefaultStepStallTimeout is how long a running/fixing non-CI step can go
+	// without any log or agent lifecycle activity before the daemon's dead-run
+	// watchdog declares the run dead and fails it. It is deliberately much
+	// longer than step_quiet_warning: quiet is a display hint, stall is a
+	// kill. The CI step is exempt (its idle lifetime is owned by ci_timeout,
+	// and its monitor deliberately deduplicates unchanged poll logs).
+	DefaultStepStallTimeout = time.Hour
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
 	// daemon socket that exists but is not accepting connections.
 	DefaultDaemonConnectTimeout = 3 * time.Second
@@ -203,6 +210,7 @@ type GlobalConfig struct {
 	CITimeout                 time.Duration `yaml:"-"`
 	CIMode                    CIMode        `yaml:"-"`
 	StepQuietWarning          time.Duration `yaml:"-"`
+	StepStallTimeout          time.Duration `yaml:"-"`
 	AgentTimeout              time.Duration `yaml:"-"`
 	ReviewAgentTimeout        time.Duration `yaml:"-"`
 	TestAgentTimeout          time.Duration `yaml:"-"`
@@ -278,6 +286,7 @@ type globalConfigRaw struct {
 	GateReconcileTimeout      string                     `yaml:"gate_reconcile_timeout"`
 	BabysitTimeout            string                     `yaml:"babysit_timeout"`
 	StepQuietWarning          string                     `yaml:"step_quiet_warning"`
+	StepStallTimeout          string                     `yaml:"step_stall_timeout"`
 	AgentTimeout              string                     `yaml:"agent_timeout"`
 	ReviewAgentTimeout        string                     `yaml:"review_agent_timeout"`
 	TestAgentTimeout          string                     `yaml:"test_agent_timeout"`
@@ -799,6 +808,7 @@ type Config struct {
 	CITimeout                 time.Duration
 	CIMode                    CIMode
 	StepQuietWarning          time.Duration
+	StepStallTimeout          time.Duration
 	AgentTimeout              time.Duration
 	ReviewAgentTimeout        time.Duration
 	TestAgentTimeout          time.Duration
@@ -1409,6 +1419,13 @@ test_agent_timeout: "30m"
 # Optional still-working cap for Test. Unset means no extension past
 # test_agent_timeout. Must be at least test_agent_timeout.
 # test_agent_working_timeout: "1h"
+
+# The daemon's dead-run watchdog fails a run whose running/fixing step has
+# produced no log or agent lifecycle activity for this long, so a wedged run
+# cannot stay "running" forever. The CI step is exempt (its idle lifetime is
+# owned by ci_timeout). Set to "off", "none", "never", "unlimited", or any
+# non-positive duration to disable the inactivity kill.
+step_stall_timeout: "1h"
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
@@ -2276,6 +2293,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		CITimeout:               DefaultCITimeout,
 		CIMode:                  DefaultCIMode,
 		StepQuietWarning:        DefaultStepQuietWarning,
+		StepStallTimeout:        DefaultStepStallTimeout,
 		AgentTimeout:            DefaultAgentTimeout,
 		ReviewAgentTimeout:      DefaultReviewAgentTimeout,
 		TestAgentTimeout:        DefaultTestAgentTimeout,
@@ -2593,6 +2611,13 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateWorkingCap("test_agent_working_timeout", "test_agent_timeout", cfg.TestAgentWorkingTimeout, cfg.TestAgentTimeout); err != nil {
 		return nil, err
 	}
+	if raw.StepStallTimeout != "" {
+		d, err := parseStepStallTimeout(raw.StepStallTimeout)
+		if err != nil {
+			return nil, err
+		}
+		cfg.StepStallTimeout = d
+	}
 	if raw.DaemonConnectTimeout != "" {
 		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)
 		if err != nil {
@@ -2737,6 +2762,25 @@ func parseCITimeout(value string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return CITimeoutUnlimited, nil
+	}
+	return d, nil
+}
+
+// parseStepStallTimeout interprets the step_stall_timeout config value. The
+// keywords "off"/"none"/"never"/"unlimited", or any non-positive duration,
+// disable the dead-run watchdog's inactivity kill entirely (resolved as 0);
+// otherwise the value is parsed as a Go duration.
+func parseStepStallTimeout(value string) (time.Duration, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "unlimited", "none", "off", "never":
+		return 0, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse step_stall_timeout %q: %w", value, err)
+	}
+	if d <= 0 {
+		return 0, nil
 	}
 	return d, nil
 }
@@ -3682,6 +3726,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		CITimeout:                 global.CITimeout,
 		CIMode:                    global.CIMode,
 		StepQuietWarning:          global.StepQuietWarning,
+		StepStallTimeout:          global.StepStallTimeout,
 		AgentTimeout:              global.AgentTimeout,
 		ReviewAgentTimeout:        global.ReviewAgentTimeout,
 		TestAgentTimeout:          global.TestAgentTimeout,

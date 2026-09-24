@@ -48,6 +48,8 @@ review_agent_timeout: "30m"
 
 test_agent_timeout: "30m"
 
+step_stall_timeout: "1h"
+
 daemon_connect_timeout: "3s"
 
 branch_sync_remote_timeout: "60s"
@@ -759,6 +761,24 @@ The 10-minute quiet stop still applies.
 | Default | unset                  |
 
 It is global-only.
+
+### step_stall_timeout
+
+How long a running or fixing step (other than CI) can go without recorded step-log or native-agent lifecycle activity before the daemon's dead-run watchdog declares the run dead and fails it.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `1h`                   |
+
+Accepts any positive Go `time.ParseDuration` string.
+Set it to `off` (`none`, `never`, and `unlimited` are accepted aliases), `0`, or any non-positive duration to disable the inactivity kill.
+
+Unlike `step_quiet_warning`, this one acts: a run whose active step stays silent past the threshold transitions to `failed` with an error starting with `dead run:`, its agent process tree is killed, and its worktree is cleaned up.
+A running configured `commands.*` invocation counts as activity: its output is captured buffered, so the daemon heartbeats the step while it waits on the live command, and a long-but-healthy test suite is never stall-killed.
+The CI step is exempt because its monitor deliberately deduplicates unchanged poll logs and its idle lifetime is owned by [`ci_timeout`](#ci_timeout); runs parked at an approval gate are exempt because parking is agent-paced by design.
+The watchdog also fails a run whose worktree directory was removed out from under it or whose recorded agent process died without the step observing the exit, regardless of this setting.
+See [the daemon lifecycle](/no-mistakes/concepts/daemon/) for the full dead-run model.
 
 ### daemon_connect_timeout
 

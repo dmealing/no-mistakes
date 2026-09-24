@@ -268,6 +268,15 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Start the dead-run watchdog after exclusive recovery so every run it
+	// sweeps was started or deliberately preserved by this daemon. It stops
+	// with the daemon context on shutdown.
+	stallTimeout := config.DefaultStepStallTimeout
+	if watchdogCfg, cfgErr := config.LoadGlobal(p.ConfigFile()); cfgErr == nil {
+		stallTimeout = watchdogCfg.StepStallTimeout
+	}
+	go newRunWatchdog(d, p, mgr, stallTimeout).run(ctx)
+
 	var shutdownOnce sync.Once
 	doShutdown := func(reason string) {
 		shutdownOnce.Do(func() {
