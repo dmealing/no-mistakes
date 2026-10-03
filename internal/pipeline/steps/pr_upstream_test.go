@@ -49,21 +49,16 @@ func newUpstreamBodyContext(t *testing.T, upstreamURL, forkURL string) (*pipelin
 	if err := os.WriteFile(embedded, []byte(upstreamTestEmbedText), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[`+
-		`{"kind":"log","label":"Local only log","path":%q},`+
-		`{"kind":"log","label":"Captioned log","path":%q,"content":"captioned evidence text"},`+
-		`{"kind":"log","label":"Server log","path":%q},`+
-		`{"kind":"log","label":"Inline log","content":%q}]}`, localOnly, captioned, embedded, upstreamTestInlineText)
-	testStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sctx.DB.UpdateStepStatus(testStep.ID, types.StepStatusCompleted); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sctx.DB.InsertStepRound(testStep.ID, 1, "initial", &findings, nil, 300); err != nil {
-		t.Fatal(err)
-	}
+	findings := findingsJSON(t, types.Findings{
+		TestingSummary: "Evidence was collected.",
+		Artifacts: []types.TestArtifact{
+			{Kind: "log", Label: "Local only log", Path: localOnly},
+			{Kind: "log", Label: "Captioned log", Path: captioned, Content: "captioned evidence text"},
+			{Kind: "log", Label: "Server log", Path: embedded},
+			{Kind: "log", Label: "Inline log", Content: upstreamTestInlineText},
+		},
+	})
+	insertCompletedStep(t, sctx, types.StepTest, findings, "")
 	return sctx, baseSHA
 }
 
@@ -121,30 +116,25 @@ func TestPRBody_SameOwnerKeepsIntentAndLocalPathEvidence(t *testing.T) {
 	}
 }
 
-func insertCompletedReview(t *testing.T, sctx *pipeline.StepContext, findings string) {
-	t.Helper()
-	review, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sctx.DB.UpdateStepStatus(review.ID, types.StepStatusCompleted); err != nil {
-		t.Fatal(err)
-	}
-	if findings == "" {
-		return
-	}
-	if err := sctx.DB.SetStepFindings(review.ID, findings); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestPRStep_RefusesWhileApprovedIntentConformanceFindingIsUnresolved(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	env, logFile := fakeGH(t, "")
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
-	insertCompletedReview(t, sctx, `{"findings":[{"id":"review-1","severity":"error","description":"range does not contain the change the intent marks as its subject","action":"ask-user","review_scope":"source","category":"intent-conformance"}],"summary":"intent mismatch","risk_level":"high","risk_rationale":"needs maintainer decision"}`)
+	insertCompletedStep(t, sctx, types.StepReview, findingsJSON(t, types.Findings{
+		Items: []types.Finding{{
+			ID:          "review-1",
+			Severity:    "error",
+			Description: "range does not contain the change the intent marks as its subject",
+			Action:      "ask-user",
+			ReviewScope: "source",
+			Category:    types.FindingCategoryIntentConformance,
+		}},
+		Summary:       "intent mismatch",
+		RiskLevel:     "high",
+		RiskRationale: "needs maintainer decision",
+	}), "")
 
 	_, err := (&PRStep{}).Execute(sctx)
 	if err == nil {
@@ -164,7 +154,18 @@ func TestPRStep_ProceedsWhenReviewHoldsNoIntentConformanceFinding(t *testing.T) 
 	env, logFile := fakeGH(t, "")
 	sctx := newTestContextWithDBRecords(t, tidyPRAgent(), dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
-	insertCompletedReview(t, sctx, `{"findings":[{"id":"review-1","severity":"warning","description":"naming nit","action":"ask-user","review_scope":"source"}],"summary":"nit","risk_level":"low","risk_rationale":"small"}`)
+	insertCompletedStep(t, sctx, types.StepReview, findingsJSON(t, types.Findings{
+		Items: []types.Finding{{
+			ID:          "review-1",
+			Severity:    "warning",
+			Description: "naming nit",
+			Action:      "ask-user",
+			ReviewScope: "source",
+		}},
+		Summary:       "nit",
+		RiskLevel:     "low",
+		RiskRationale: "small",
+	}), "")
 
 	if _, err := (&PRStep{}).Execute(sctx); err != nil {
 		t.Fatalf("PR step must proceed when no intent-conformance finding is held, got: %v", err)
@@ -186,7 +187,25 @@ func TestReviewIntentConformanceCategoryIsRequestedAndAccepted(t *testing.T) {
 	if clause := intentConformanceReviewClause(sctx); !strings.Contains(clause, `category "intent-conformance"`) {
 		t.Fatalf("conformance clause must request the intent-conformance category, got:\n%s", clause)
 	}
-	if !strings.Contains(string(reviewFindingsSchema), `"category": {"type": "string", "enum": ["`+types.FindingCategoryIntentConformance+`"]}`) {
-		t.Fatalf("review findings schema must accept the intent-conformance category:\n%s", reviewFindingsSchema)
+	// Assert on the parsed schema, not the literal's formatting: a reflow of
+	// the JSON string must not decide whether the contract holds.
+	var schema map[string]any
+	if err := json.Unmarshal(reviewFindingsSchema, &schema); err != nil {
+		t.Fatalf("review findings schema is not valid JSON: %v", err)
 	}
+	properties, _ := schema["properties"].(map[string]any)
+	findingsProp, _ := properties["findings"].(map[string]any)
+	items, _ := findingsProp["items"].(map[string]any)
+	itemProperties, _ := items["properties"].(map[string]any)
+	categoryProp, _ := itemProperties["category"].(map[string]any)
+	enum, ok := categoryProp["enum"].([]any)
+	if !ok {
+		t.Fatalf("review findings schema finding-item category has no enum: %#v", itemProperties)
+	}
+	for _, value := range enum {
+		if value == types.FindingCategoryIntentConformance {
+			return
+		}
+	}
+	t.Fatalf("review findings schema category enum must accept %q, got: %v", types.FindingCategoryIntentConformance, enum)
 }
