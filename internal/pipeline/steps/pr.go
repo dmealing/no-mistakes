@@ -82,6 +82,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		sctx.Log(fmt.Sprintf("skipping PR creation: %v", err))
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: err.Error()}, nil
 	}
+	if err := refuseUnresolvedIntentConformance(sctx); err != nil {
+		return nil, err
+	}
 
 	// Resolve the branch base so PR summaries cover the full branch delta.
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, baseBranch)
@@ -406,7 +409,7 @@ func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, provider scm.P
 	}
 
 	pipelineMD, riskLine = BuildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider)
-	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds))
+	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds), isForeignOwnerPR(sctx))
 	return pipelineMD, riskLine, testingMD
 }
 
@@ -518,9 +521,7 @@ func appendGeneratedSections(body, riskLine, testingMD, pipelineMD string) strin
 func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext) string {
 	body = stripGeneratedSections(body)
 	sections := appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD)
-	// Neutralized for the same reason as in prependIntentSection: intent is
-	// agent-extracted text placed ahead of the pipeline section.
-	cleaned := neutralizeAttestationMarkers(cleanedUserIntent(sctx))
+	cleaned := prBodyIntent(sctx)
 	if cleaned == "" {
 		return sections
 	}
@@ -1275,10 +1276,7 @@ func isGeneratedSectionHeading(line string) bool {
 // rather than being paraphrased by the agent. Returns body unchanged when
 // no intent is available.
 func prependIntentSection(body string, sctx *pipeline.StepContext) string {
-	// Intent is agent-extracted text that lands ahead of the pipeline section,
-	// so it can shadow the real attestation the same way the Testing section
-	// can. See appendGeneratedSectionsToCleanBodyWithinLimit.
-	cleaned := neutralizeAttestationMarkers(cleanedUserIntent(sctx))
+	cleaned := prBodyIntent(sctx)
 	if cleaned == "" {
 		return body
 	}
@@ -1287,6 +1285,74 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 		return section
 	}
 	return section + "\n\n" + body
+}
+
+// prBodyIntent returns the intent text the PR body's "## Intent" section
+// carries, or "" when the body must not carry one. A pull request against a
+// repository another owner holds goes to a maintainer who never saw the run's
+// task intent, so it is omitted there (see isForeignOwnerPR).
+//
+// Intent is agent-extracted text that lands ahead of the pipeline section, so
+// it can shadow the real attestation the same way the Testing section can; it
+// is neutralized for that reason. See
+// appendGeneratedSectionsToCleanBodyWithinLimit.
+func prBodyIntent(sctx *pipeline.StepContext) string {
+	if isForeignOwnerPR(sctx) {
+		return ""
+	}
+	return neutralizeAttestationMarkers(cleanedUserIntent(sctx))
+}
+
+// isForeignOwnerPR reports whether the pull request targets a base repository
+// owned by someone other than the pushing account: a configured fork whose
+// owner differs from the parent's. Without a fork the branch is pushed to the
+// base repository itself, so the pushing account is treated as its owner.
+func isForeignOwnerPR(sctx *pipeline.StepContext) bool {
+	if sctx == nil || sctx.Repo == nil {
+		return false
+	}
+	fork := strings.TrimSpace(sctx.Repo.ForkURL)
+	if fork == "" {
+		return false
+	}
+	return !strings.EqualFold(remoteOwner(fork), remoteOwner(sctx.Repo.UpstreamURL))
+}
+
+func remoteOwner(remote string) string {
+	owner, _, _ := strings.Cut(scm.RepoPath(remote), "/")
+	return owner
+}
+
+// refuseUnresolvedIntentConformance stops the PR step while the completed
+// review still holds an intent-conformance finding. The step's findings are
+// those of its latest round, so a finding still present there was approved
+// through rather than fixed: the change contradicts the run's authoritative
+// intent, and publishing it would hand a maintainer a PR whose own review
+// says it does not do what it claims. The branch stays pushed.
+func refuseUnresolvedIntentConformance(sctx *pipeline.StepContext) error {
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		return fmt.Errorf("read review findings before opening a pull request: %w", err)
+	}
+	for _, sr := range steps {
+		if sr.StepName != types.StepReview || sr.Status != types.StepStatusCompleted || sr.FindingsJSON == nil {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+		if err != nil {
+			return fmt.Errorf("read review findings before opening a pull request: %w", err)
+		}
+		var ids []string
+		for _, item := range findings.Items {
+			if item.Category == types.FindingCategoryIntentConformance {
+				ids = append(ids, item.ID)
+			}
+		}
+		if len(ids) > 0 {
+			return fmt.Errorf("refusing to open or update the pull request: review was approved with unresolved intent-conformance finding(s) %s - the change does not match the run's intent; fix the change or rerun with a corrected --intent (the branch stays pushed)", strings.Join(ids, ", "))
+		}
+	}
+	return nil
 }
 
 func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingMD, pipelineMD string, bodyLimit int) prContent {
