@@ -22,19 +22,22 @@ const (
 	upstreamTestEmbedText  = "embedded evidence file body"
 )
 
+func tidyPRAgent() *mockAgent {
+	return &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"title":"fix: tidy","body":"## What Changed\n\n- tidy"}`)}, nil
+		},
+	}
+}
+
 // newUpstreamBodyContext builds a PR step context whose Test step recorded a
 // path-only local artifact, a captioned local artifact, an embeddable evidence
 // file, and an inline content artifact, plus an authoritative intent.
 func newUpstreamBodyContext(t *testing.T, upstreamURL, forkURL string) (*pipeline.StepContext, string) {
 	t.Helper()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"title":"fix: tidy","body":"## What Changed\n\n- tidy"}`)}, nil
-		},
-	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, tidyPRAgent(), dir, baseSHA, headSHA, config.Commands{})
 	sctx.Repo.UpstreamURL = upstreamURL
 	sctx.Repo.ForkURL = forkURL
 	sctx.UserIntent = upstreamTestIntent
@@ -159,13 +162,7 @@ func TestPRStep_ProceedsWhenReviewHoldsNoIntentConformanceFinding(t *testing.T) 
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	env, logFile := fakeGH(t, "")
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"title":"fix: tidy","body":"## What Changed\n\n- tidy"}`)}, nil
-		},
-	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, tidyPRAgent(), dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	insertCompletedReview(t, sctx, `{"findings":[{"id":"review-1","severity":"warning","description":"naming nit","action":"ask-user","review_scope":"source"}],"summary":"nit","risk_level":"low","risk_rationale":"small"}`)
 
