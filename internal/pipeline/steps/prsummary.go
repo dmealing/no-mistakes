@@ -96,6 +96,10 @@ type testingSummaryOptions struct {
 	// uploaded at PR render time. Nil means nothing was uploaded; the renderer
 	// then keeps today's local-path or commit-pinned link.
 	attachments map[string]string
+	// omitLocalPaths drops local-file references a reader cannot open: a PR
+	// against a repository another owner holds (see isForeignOwnerPR). An
+	// artifact with nothing else to show is omitted; inline text is kept.
+	omitLocalPaths bool
 }
 
 // BuildPipelineSummary produces a deterministic markdown section from step results and rounds.
@@ -298,10 +302,10 @@ func BuildTestingSummaryForPR(steps []*db.StepResult, rounds map[string][]*db.St
 }
 
 func BuildTestingSummaryForPRWithProvider(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider) string {
-	return buildPRTestingSummary(steps, rounds, upstreamURL, ref, repoRoot, evidenceRoot, links, provider, nil)
+	return buildPRTestingSummary(steps, rounds, upstreamURL, ref, repoRoot, evidenceRoot, links, provider, nil, false)
 }
 
-func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider, attachments map[string]string) string {
+func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider, attachments map[string]string, omitLocalPaths bool) string {
 	opts := testingSummaryOptionsForGitHub(upstreamURL, ref)
 	opts.flavor = prBodyFlavorFor(provider)
 	opts.compactArtifacts = true
@@ -311,6 +315,7 @@ func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepR
 	opts.evidenceRoot = evidenceRoot
 	opts.evidence = links
 	opts.attachments = attachments
+	opts.omitLocalPaths = omitLocalPaths
 	return buildTestingSummary(steps, rounds, opts)
 }
 
@@ -944,7 +949,7 @@ func repoRelativeArtifactPath(target string, opts testingSummaryOptions) string 
 }
 
 func localArtifactPath(target string, opts testingSummaryOptions) string {
-	if target == "" || !filepath.IsAbs(target) {
+	if opts.omitLocalPaths || target == "" || !filepath.IsAbs(target) {
 		return ""
 	}
 	if _, ok := artifactPathRelativeToRoot(target, opts.repoRoot); ok {
