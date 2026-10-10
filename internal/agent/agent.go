@@ -230,7 +230,10 @@ type TokenUsage struct {
 	CacheCreationTokens int
 	// ReasoningTokens is the output tokens the model spent on hidden reasoning,
 	// when the provider reports it separately. Zero when not reported.
-	ReasoningTokens       int
+	ReasoningTokens int
+	// CostUSD is the provider-reported cost of the invocation, when the
+	// adapter reports one. Zero when not reported.
+	CostUSD               float64
 	Reported              bool
 	CacheCreationReported bool
 }
@@ -776,6 +779,7 @@ func (u *TokenUsage) Add(other TokenUsage) {
 	u.CacheReadTokens += other.CacheReadTokens
 	u.CacheCreationTokens += other.CacheCreationTokens
 	u.ReasoningTokens += other.ReasoningTokens
+	u.CostUSD += other.CostUSD
 	u.Reported = u.Reported || other.Reported
 	u.CacheCreationReported = u.CacheCreationReported || other.CacheCreationReported
 }
