@@ -280,7 +280,10 @@ type TokenUsage struct {
 	ReasoningTokens int
 	// ReasoningReported distinguishes a genuine zero from an adapter that does
 	// not expose reasoning usage.
-	ReasoningReported     bool
+	ReasoningReported bool
+	// CostUSD is the provider-reported cost of the invocation, when the
+	// adapter reports one. Zero when not reported.
+	CostUSD               float64
 	Reported              bool
 	CacheCreationReported bool
 }
@@ -1304,6 +1307,7 @@ func (u *TokenUsage) Add(other TokenUsage) {
 	u.CacheCreationTokens += other.CacheCreationTokens
 	u.ReasoningTokens += other.ReasoningTokens
 	u.ReasoningReported = u.ReasoningReported || other.ReasoningReported
+	u.CostUSD += other.CostUSD
 	u.Reported = u.Reported || other.Reported
 	u.CacheCreationReported = u.CacheCreationReported || other.CacheCreationReported
 }
