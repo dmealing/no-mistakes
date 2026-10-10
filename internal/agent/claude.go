@@ -271,6 +271,9 @@ type claudeEvent struct {
 	IsError          bool            `json:"is_error,omitempty"`
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
 	Usage            *claudeUsage    `json:"usage,omitempty"`
+	ModelUsage       map[string]struct {
+		CostUSD float64 `json:"costUSD"`
+	} `json:"modelUsage,omitempty"`
 }
 
 // claudeResult captures the parsed result event.
@@ -307,7 +310,8 @@ type claudeContent struct {
 // result event's usage is the invocation total, whereas per-message usage on
 // assistant events is partial and repeated across events of one message, so
 // summing it undercounts output and double-counts cache reads. The summed
-// assistant usage is only the fallback when no result event carries usage.
+// assistant usage is only the fallback when no result event carries non-zero
+// usage. Per-model modelUsage costUSD on the result event is summed into CostUSD.
 func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, result **claudeResult) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), claudeScannerMaxTokenSize)
@@ -315,6 +319,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	var lastSessionID string
 	var lastModel string
 	var resultUsage *claudeUsage
+	var resultCost float64
 
 	for scanner.Scan() {
 		select {
@@ -366,6 +371,10 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			if event.Usage != nil {
 				resultUsage = event.Usage
 			}
+			resultCost = 0
+			for _, mu := range event.ModelUsage {
+				resultCost += mu.CostUSD
+			}
 			if result != nil {
 				raw := make(json.RawMessage, len(line))
 				copy(raw, line)
@@ -385,7 +394,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	if err := scanner.Err(); err != nil {
 		return err
 	}
-	if resultUsage != nil {
+	if resultUsage != nil && *resultUsage != (claudeUsage{}) {
 		*usage = TokenUsage{
 			InputTokens:           resultUsage.InputTokens,
 			OutputTokens:          resultUsage.OutputTokens,
@@ -395,5 +404,6 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			CacheCreationReported: true,
 		}
 	}
+	usage.CostUSD = resultCost
 	return nil
 }

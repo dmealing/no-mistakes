@@ -746,14 +746,14 @@ func TestParseClaudeEvents_UsageFromResultEvent(t *testing.T) {
 {"type":"assistant","message":{"model":"m","usage":{"input_tokens":3,"output_tokens":8,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50},"content":[{"type":"thinking","text":""}]}}
 {"type":"assistant","message":{"model":"m","usage":{"input_tokens":3,"output_tokens":8,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50},"content":[{"type":"text","text":"hi"}]}}
 {"type":"assistant","message":{"model":"m","usage":{"input_tokens":3,"output_tokens":8,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50},"content":[{"type":"tool_use"}]}}
-{"type":"result","subtype":"success","session_id":"s1","usage":{"input_tokens":7,"output_tokens":400,"cache_read_input_tokens":1500,"cache_creation_input_tokens":60},"modelUsage":{"m":{"costUSD":0.5}}}
+{"type":"result","subtype":"success","session_id":"s1","usage":{"input_tokens":7,"output_tokens":400,"cache_read_input_tokens":1500,"cache_creation_input_tokens":60},"modelUsage":{"m":{"costUSD":0.5},"n":{"costUSD":0.25}}}
 `
 	var usage TokenUsage
 	var result *claudeResult
 	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &result); err != nil {
 		t.Fatal(err)
 	}
-	want := TokenUsage{InputTokens: 7, OutputTokens: 400, CacheReadTokens: 1500, CacheCreationTokens: 60, Reported: true, CacheCreationReported: true}
+	want := TokenUsage{InputTokens: 7, OutputTokens: 400, CacheReadTokens: 1500, CacheCreationTokens: 60, CostUSD: 0.75, Reported: true, CacheCreationReported: true}
 	if usage != want {
 		t.Errorf("usage = %+v, want %+v", usage, want)
 	}
@@ -763,6 +763,21 @@ func TestParseClaudeEvents_UsageFallsBackToAssistantSum(t *testing.T) {
 	events := `{"type":"assistant","message":{"usage":{"input_tokens":3,"output_tokens":8},"content":[]}}
 {"type":"assistant","message":{"usage":{"input_tokens":4,"output_tokens":9},"content":[]}}
 {"type":"result","subtype":"success"}
+`
+	var usage TokenUsage
+	var result *claudeResult
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &result); err != nil {
+		t.Fatal(err)
+	}
+	if usage.InputTokens != 7 || usage.OutputTokens != 17 || !usage.Reported {
+		t.Errorf("usage = %+v", usage)
+	}
+}
+
+func TestParseClaudeEvents_ZeroResultUsageFallsBackToAssistantSum(t *testing.T) {
+	events := `{"type":"assistant","message":{"usage":{"input_tokens":3,"output_tokens":8},"content":[]}}
+{"type":"assistant","message":{"usage":{"input_tokens":4,"output_tokens":9},"content":[]}}
+{"type":"result","subtype":"success","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}
 `
 	var usage TokenUsage
 	var result *claudeResult
