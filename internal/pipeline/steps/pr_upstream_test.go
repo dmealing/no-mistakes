@@ -71,7 +71,7 @@ func buildUpstreamTestBody(t *testing.T, sctx *pipeline.StepContext, baseSHA str
 	return content.Body
 }
 
-func TestPRBody_ForeignOwnerOmitsIntentAndLocalPathEvidence(t *testing.T) {
+func TestPRBody_ForeignOwnerOmitsLocalPathEvidence(t *testing.T) {
 	t.Parallel()
 	for _, limit := range []int{0, 60000} {
 		t.Run(fmt.Sprintf("limit_%d", limit), func(t *testing.T) {
@@ -79,12 +79,13 @@ func TestPRBody_ForeignOwnerOmitsIntentAndLocalPathEvidence(t *testing.T) {
 			sctx, baseSHA := newUpstreamBodyContext(t, "https://github.com/parent-owner/widgets.git", "git@github.com:fork-owner/widgets.git")
 			body := buildUpstreamTestBody(t, sctx, baseSHA, limit)
 
-			for _, unwanted := range []string{"## Intent", upstreamTestIntent, "local file:", "missing.bin", "missing-captioned.bin"} {
+			for _, unwanted := range []string{"local file:", "missing.bin", "missing-captioned.bin"} {
 				if strings.Contains(body, unwanted) {
 					t.Fatalf("foreign-owner PR body must not contain %q, got:\n%s", unwanted, body)
 				}
 			}
-			for _, want := range []string{"## What Changed", "## Testing", upstreamTestInlineText, "captioned evidence text", upstreamTestEmbedText, pipelineAttestationCommentPrefix} {
+			// Intent publication is governed by pr.publish_intent, not by PR ownership.
+			for _, want := range []string{"## Intent\n\n" + upstreamTestIntent, "## What Changed", "## Testing", upstreamTestInlineText, "captioned evidence text", upstreamTestEmbedText, pipelineAttestationCommentPrefix} {
 				if !strings.Contains(body, want) {
 					t.Fatalf("foreign-owner PR body missing %q, got:\n%s", want, body)
 				}
