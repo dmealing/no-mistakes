@@ -303,13 +303,18 @@ type claudeContent struct {
 }
 
 // parseClaudeEvents reads JSONL from the reader and dispatches events.
-// It accumulates token usage and captures the final result event.
+// It captures the final result event and reports token usage from it. The
+// result event's usage is the invocation total, whereas per-message usage on
+// assistant events is partial and repeated across events of one message, so
+// summing it undercounts output and double-counts cache reads. The summed
+// assistant usage is only the fallback when no result event carries usage.
 func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, result **claudeResult) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), claudeScannerMaxTokenSize)
 	var textBuf string
 	var lastSessionID string
 	var lastModel string
+	var resultUsage *claudeUsage
 
 	for scanner.Scan() {
 		select {
@@ -358,6 +363,9 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			}
 
 		case "result":
+			if event.Usage != nil {
+				resultUsage = event.Usage
+			}
 			if result != nil {
 				raw := make(json.RawMessage, len(line))
 				copy(raw, line)
@@ -374,5 +382,18 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 		}
 	}
 
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if resultUsage != nil {
+		*usage = TokenUsage{
+			InputTokens:           resultUsage.InputTokens,
+			OutputTokens:          resultUsage.OutputTokens,
+			CacheReadTokens:       resultUsage.CacheReadInputTokens,
+			CacheCreationTokens:   resultUsage.CacheCreationInputTokens,
+			Reported:              true,
+			CacheCreationReported: true,
+		}
+	}
+	return nil
 }
