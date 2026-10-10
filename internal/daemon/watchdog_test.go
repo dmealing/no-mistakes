@@ -26,7 +26,9 @@ func newWatchdogTestEnv(t *testing.T, sf StepFactory) (*paths.Paths, *db.DB, *Ru
 		t.Fatal(err)
 	}
 	mockClaude := writeMockClaude(t, t.TempDir())
-	configYAML := "agent: claude\nagent_path_override:\n  claude: " + mockClaude + "\n"
+	configYAML := "agent: claude\nagent_path_override:\n  claude: " + mockClaude + "\n" +
+		// The CI-exemption test runs a real CI step, which local CI mode skips.
+		"ci_mode: github\n"
 	if err := os.WriteFile(p.ConfigFile(), []byte(configYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}

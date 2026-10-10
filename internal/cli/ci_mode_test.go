@@ -49,6 +49,7 @@ func TestNotifyPushRequestsCISkipUnderDefaultLocalMode(t *testing.T) {
 			if err := p.EnsureDirs(); err != nil {
 				t.Fatal(err)
 			}
+			gate := p.RepoDir("repo-1")
 			srv := ipc.NewServer()
 			srv.Handle(ipc.MethodHealth, func(context.Context, json.RawMessage) (interface{}, error) {
 				return &ipc.HealthResult{Status: "ok"}, nil
@@ -74,7 +75,7 @@ func TestNotifyPushRequestsCISkipUnderDefaultLocalMode(t *testing.T) {
 			}
 
 			cmd := newDaemonNotifyPushCmd()
-			cmd.SetArgs([]string{"--gate", t.TempDir(), "--ref", "refs/heads/feature", "--old", strings.Repeat("0", 40), "--new", strings.Repeat("a", 40)})
+			cmd.SetArgs([]string{"--gate", gate, "--ref", "refs/heads/feature", "--old", strings.Repeat("0", 40), "--new", strings.Repeat("a", 40)})
 			if err := cmd.Execute(); err != nil {
 				t.Fatal(err)
 			}
