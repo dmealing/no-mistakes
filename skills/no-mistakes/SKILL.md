@@ -269,6 +269,9 @@ Run the pipeline and decide on its findings as they come up:
      configured idle timeout elapses, so a human can watch it in the TUI.
    - `passed` - the pipeline completed under the requested steps, including any
      explicit per-run skips. This alone is not evidence that a PR was merged.
+     When `run.local_ci` is present, CI is local (`ci_mode: local`): the CI
+     step was skipped, no forge checks will run, and there is nothing to wait
+     for - the PR is ready for a human to review and merge.
    - `passed-with-override` - the pipeline completed with an explicitly approved Test exception or CI failure.
      Report the exception, not a clean pass.
      Test evidence is in `run.test_override_reason`, including when CI readiness returns `checks-passed`; do not omit it from the summary.
