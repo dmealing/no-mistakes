@@ -7,10 +7,10 @@ import (
 // publicPRIntent returns the intent text published on the PR body, or "" when
 // publication is suppressed. It is the single publication gate: every PR-body
 // render path (ordinary drafting, fallback content, and template appendix)
-// goes through it, so caller-side omission and the repository's trusted
-// policy compose here and nowhere else.
+// goes through it, so caller-side omission, the repository's trusted policy,
+// and the foreign-owner rule compose here and nowhere else.
 //
-// The control is tighten-only in both directions:
+// Every control is tighten-only:
 //
 //   - The repository's trusted pr.publish_intent (default true) is the
 //     ceiling. A caller can never publish intent on a repository whose
@@ -19,14 +19,17 @@ import (
 //     axi run --no-publish-intent flag, or the operator's global
 //     intent.publish_intent: false default, folded together at run start)
 //     can only remove the section, never restore it.
+//   - A foreign-owner PR (isForeignOwnerPR: a fork whose owner differs from
+//     the parent's) omits the section whatever the other two allow.
 //
 // The repository policy never touches the intent that reaches step prompts.
 // The caller-side omission is different: it also WITHHOLDS the intent from the
 // PR-drafting turns (prDraftIntentPromptSection), because a PR title or body
 // drafted with the intent in context can paraphrase it into the public text,
 // and there is deliberately no output filter or prose scanner to catch that.
+// The foreign-owner rule removes only the section; drafting keeps the intent.
 // Review, test, document, lint, and CI-fix prompts keep the full intent
-// under either signal.
+// under every signal.
 func publicPRIntent(sctx *pipeline.StepContext) string {
 	if sctx != nil && sctx.Config != nil && !sctx.Config.PR.PublishesIntent() {
 		return ""

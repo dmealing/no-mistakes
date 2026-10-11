@@ -168,8 +168,8 @@ func TestOmitIntentJourney(t *testing.T) {
 		}
 	}
 
-	// Foreign-owner fork: the Intent section is omitted with no caller-side
-	// control set, so the other owner's maintainers never see the run's intent.
+	// Foreign-owner fork: the Intent section is removed from the PR body with
+	// no caller-side control set.
 	const foreignIntent = "FOREIGN-OWNER intent that stays off another owner's PR"
 	h.CommitChange("feature/omit-foreign", "feature.txt", "foreign\n", "add foreign feature")
 	foreignWT := h.AddWorktree("feature/omit-foreign")
