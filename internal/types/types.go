@@ -45,6 +45,14 @@ func (s RunStatus) Terminal() bool {
 	}
 }
 
+// RunDeadReasonPrefix prefixes the runs.error message of every run the daemon's
+// dead-run watchdog declared dead (step agent gone, worktree removed, or a
+// non-CI step silent past step_stall_timeout). The prefix is a machine-readable
+// contract: a terminal `failed` run whose error starts with this prefix was
+// killed for deadness, not by its own step logic. AXI renders and the skill
+// guidance reference it; change it only with those surfaces.
+const RunDeadReasonPrefix = "dead run: "
+
 // StepName identifies a pipeline step.
 type StepName string
 

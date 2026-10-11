@@ -173,7 +173,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				Ref:                    ref,
 				Old:                    oldSHA,
 				New:                    newSHA,
-				SkipSteps:              skipSteps,
+				SkipSteps:              config.LaunchSkipSteps(skipSteps),
 				Intent:                 intent,
 				LaunchNonce:            launchNonce,
 				ValidationGeneration:   validationGeneration,

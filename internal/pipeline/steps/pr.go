@@ -102,6 +102,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		sctx.Log(fmt.Sprintf("skipping PR creation: %v", err))
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: err.Error()}, nil
 	}
+	if err := refuseUnresolvedIntentConformance(sctx); err != nil {
+		return nil, err
+	}
 
 	// Capture live author content before model drafting. An unreadable
 	// provider cannot promise template preservation.
@@ -645,7 +648,7 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	if owned && provider == scm.ProviderBitbucket && pipelineMD != "" {
 		pipelineMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, rounds, sctx.Run.HeadSHA, policy) + "\n```"
 	}
-	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds))
+	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds), isForeignOwnerPR(sctx))
 	return pipelineMD, riskLine, testingMD
 }
 
@@ -1526,6 +1529,58 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 		return section
 	}
 	return section + "\n\n" + body
+}
+
+// isForeignOwnerPR reports whether the pull request targets a base repository
+// owned by someone other than the pushing account: a configured fork whose
+// owner differs from the parent's. Without a fork the branch is pushed to the
+// base repository itself, so the pushing account is treated as its owner.
+func isForeignOwnerPR(sctx *pipeline.StepContext) bool {
+	if sctx == nil || sctx.Repo == nil {
+		return false
+	}
+	fork := strings.TrimSpace(sctx.Repo.ForkURL)
+	if fork == "" {
+		return false
+	}
+	return !strings.EqualFold(remoteOwner(fork), remoteOwner(sctx.Repo.UpstreamURL))
+}
+
+func remoteOwner(remote string) string {
+	owner, _, _ := strings.Cut(scm.RepoPath(remote), "/")
+	return owner
+}
+
+// refuseUnresolvedIntentConformance stops the PR step while the completed
+// review still holds an intent-conformance finding. The step's findings are
+// those of its latest round, so a finding still present there was approved
+// through rather than fixed: the change contradicts the run's authoritative
+// intent, and publishing it would hand a maintainer a PR whose own review
+// says it does not do what it claims. The branch stays pushed.
+func refuseUnresolvedIntentConformance(sctx *pipeline.StepContext) error {
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		return fmt.Errorf("read review findings before opening a pull request: %w", err)
+	}
+	for _, sr := range steps {
+		if sr.StepName != types.StepReview || sr.Status != types.StepStatusCompleted || sr.FindingsJSON == nil {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+		if err != nil {
+			return fmt.Errorf("read review findings before opening a pull request: %w", err)
+		}
+		var ids []string
+		for _, item := range findings.Items {
+			if item.Category == types.FindingCategoryIntentConformance {
+				ids = append(ids, item.ID)
+			}
+		}
+		if len(ids) > 0 {
+			return fmt.Errorf("refusing to open or update the pull request: review was approved with unresolved intent-conformance finding(s) %s - the change does not match the run's intent; fix the change or rerun with a corrected --intent (the branch stays pushed)", strings.Join(ids, ", "))
+		}
+	}
+	return nil
 }
 
 func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) (prContent, error) {

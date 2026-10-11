@@ -49,6 +49,7 @@ type RunManager struct {
 	executors    map[string]*pipeline.Executor      // runID → executor
 	cancels      map[string]context.CancelCauseFunc // runID → cancel function with cause
 	dones        map[string]chan struct{}           // runID → closed when goroutine exits
+	settingUp    map[string]struct{}                // runID → startRun setup in progress (row exists, executor not yet registered)
 	wg           sync.WaitGroup                     // tracks background run goroutines
 	shuttingDown atomic.Bool                        // prevents new runs during shutdown
 	db           *db.DB
@@ -90,6 +91,7 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		executors:     make(map[string]*pipeline.Executor),
 		cancels:       make(map[string]context.CancelCauseFunc),
 		dones:         make(map[string]chan struct{}),
+		settingUp:     make(map[string]struct{}),
 		db:            database,
 		paths:         p,
 		steps:         stepFactory,
@@ -419,6 +421,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		}()
 	})
 	executor.SetForgeContext(plan.forge)
+	applyCIMode(executor, plan.cfg.CIMode)
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.executors[plan.run.ID] = executor
@@ -1464,6 +1467,14 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
+	// Shield the fresh row from the dead-run watchdog for the rest of setup:
+	// worktree checkout and the trusted default-branch fetch can legitimately
+	// take minutes on a large repo, and the row has no executor yet. On the
+	// success path the executor is registered before this defer runs; every
+	// failure path finalizes the row via UpdateRunError; a mid-setup panic
+	// leaves a pending row the watchdog then rightly finalizes after its grace.
+	m.beginRunSetup(run.ID)
+	defer m.endRunSetup(run.ID)
 	if inherited := strings.TrimSpace(inheritedPRURL); inherited != "" {
 		if err := m.db.UpdateRunPRURL(run.ID, inherited); err != nil {
 			m.db.UpdateRunError(run.ID, fmt.Sprintf("inherit PR URL: %s", err))
@@ -1685,6 +1696,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
 	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
+	applyCIMode(executor, cfg.CIMode)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -2172,6 +2184,48 @@ func (m *RunManager) Shutdown() {
 	case <-time.After(30 * time.Second):
 		slog.Warn("timed out waiting for runs to finish during shutdown")
 	}
+}
+
+// tracksRun reports whether this daemon currently owns the run: a live
+// executor goroutine, or a startRun setup still in progress (the run row
+// exists before the executor is registered).
+func (m *RunManager) tracksRun(runID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.cancels[runID]; ok {
+		return true
+	}
+	_, ok := m.settingUp[runID]
+	return ok
+}
+
+// beginRunSetup marks a run row as owned by an in-progress startRun, so the
+// dead-run watchdog does not mistake a long (but attended) setup for an
+// orphaned row. endRunSetup releases the mark.
+func (m *RunManager) beginRunSetup(runID string) {
+	m.mu.Lock()
+	m.settingUp[runID] = struct{}{}
+	m.mu.Unlock()
+}
+
+func (m *RunManager) endRunSetup(runID string) {
+	m.mu.Lock()
+	delete(m.settingUp, runID)
+	m.mu.Unlock()
+}
+
+// cancelRunWithCause cancels a tracked run's context with the given cause; the
+// executor persists the cause as the run's terminal error. Returns false when
+// the run has no live executor in this daemon.
+func (m *RunManager) cancelRunWithCause(runID string, cause error) bool {
+	m.mu.Lock()
+	cancel, ok := m.cancels[runID]
+	m.mu.Unlock()
+	if !ok {
+		return false
+	}
+	cancel(cause)
+	return true
 }
 
 // HandleCancel stops an active run and propagates cancellation to the executor.

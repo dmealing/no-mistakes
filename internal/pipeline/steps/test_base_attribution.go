@@ -168,7 +168,9 @@ func runTestCommandOnBase(sctx *pipeline.StepContext, testCmd, baseSHA string) (
 	}
 	env := stepEnvironment(sctx)
 	if prepareCmd := strings.TrimSpace(sctx.Config.Commands.Prepare); prepareCmd != "" {
+		stop := startConfiguredCommandHeartbeat(sctx, prepareCmd, configuredCommandHeartbeatInterval)
 		output, exitCode, err := runShellCommandWithPriority(ctx, checkout, env, prepareCmd, sctx.Config.CommandOverrides["prepare"].Nice)
+		stop()
 		if err := exceeded(); err != nil {
 			return "", 0, err
 		}
@@ -188,7 +190,9 @@ func runTestCommandOnBase(sctx *pipeline.StepContext, testCmd, baseSHA string) (
 			return "", 0, fmt.Errorf("clean base preparation changes: %w", err)
 		}
 	}
+	stop := startConfiguredCommandHeartbeat(sctx, testCmd, configuredCommandHeartbeatInterval)
 	output, exitCode, err := runShellCommandWithPriority(ctx, checkout, env, testCmd, sctx.Config.CommandOverrides["test"].Nice)
+	stop()
 	if err := exceeded(); err != nil {
 		return "", 0, err
 	}

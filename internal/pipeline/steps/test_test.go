@@ -1278,6 +1278,9 @@ func TestTestStep_InitialAgent_TargetedValidationContract(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	// Pins the github-mode wording; the local-mode contract, where this step
+	// owns broad regression, lives in test_regression_scope_test.go.
+	sctx.Config.CIMode = config.CIModeGitHub
 	sctx.UserIntent = "Keep doctor checks green for CLI users"
 
 	if _, err := (&TestStep{}).Execute(sctx); err != nil {
@@ -1331,6 +1334,9 @@ func TestTestStep_FixMode_TargetedVerificationContract(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+	// Pins the github-mode wording; test_regression_scope_test.go owns the
+	// local-mode contract, where this step runs broad regression itself.
+	sctx.Config.CIMode = config.CIModeGitHub
 	sctx.Fixing = true
 	sctx.PreviousFindings = `{"findings":[{"id":"test-1","severity":"error","description":"tests failed with exit code 1","action":"auto-fix"}],"summary":"FAIL: TestFoo"}`
 
@@ -1382,6 +1388,7 @@ func TestTestStep_FixMode_DriverFullSuiteInstructionDoesNotOverrideContract(t *t
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+	sctx.Config.CIMode = config.CIModeGitHub
 	sctx.Fixing = true
 	sctx.PreviousFindings = `{"findings":[{"id":"test-1","severity":"error","description":"tests failed with exit code 1","action":"auto-fix","user_instructions":"confirm the full suite path for this failure is green"}],"summary":"FAIL: TestFoo"}`
 
@@ -1433,5 +1440,64 @@ func TestTestStep_InitialAgent_NoTargetedEvidenceRequiresHonestFinding(t *testin
 		if !strings.Contains(prompt, want) {
 			t.Errorf("expected no-targeted-evidence guidance %q in prompt:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestTestStep_LiveEvidenceDisabledSkipsAgentWhenBaselinePasses(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			calls++
+			return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+	sctx.Config.Test.SkipLiveEvidence = true
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("evidence agent calls = %d, want 0", calls)
+	}
+	if outcome.NeedsApproval || outcome.ExitCode != 0 {
+		t.Fatalf("outcome = %+v, want a passing step", outcome)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings.TestedHeadSHA != headSHA || len(findings.Tested) != 1 || findings.Tested[0] != "exit 0" {
+		t.Fatalf("findings = %+v, want the baseline command recorded against the head", findings)
+	}
+}
+
+func TestTestStep_LiveEvidenceDisabledStillRunsAgentWhenBaselineFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			calls++
+			return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 3"})
+	sctx.Config.Test.SkipLiveEvidence = true
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("evidence agent calls = %d, want 1 for a failing baseline", calls)
+	}
+	if !outcome.NeedsApproval || outcome.ExitCode != 3 {
+		t.Fatalf("outcome = %+v, want the failing baseline to block", outcome)
 	}
 }

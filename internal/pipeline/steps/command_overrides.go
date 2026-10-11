@@ -28,6 +28,8 @@ func declareStepCommandOverrides(sctx *pipeline.StepContext, name string) {
 }
 
 func executeRepositoryCommand(sctx *pipeline.StepContext, name, command string) (string, int, error) {
+	stop := startConfiguredCommandHeartbeat(sctx, command, configuredCommandHeartbeatInterval)
+	defer stop()
 	return runShellCommandWithPriority(sctx.Ctx, sctx.WorkDir, stepEnvironment(sctx), command, sctx.Config.CommandOverrides[name].Nice)
 }
 

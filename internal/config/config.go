@@ -56,6 +56,13 @@ const (
 	// invocation, including the post-test evidence-gathering turn and a
 	// Test-repair turn, so a silent agent cannot leave a run active forever.
 	DefaultTestAgentTimeout = 30 * time.Minute
+	// DefaultStepStallTimeout is how long a running/fixing non-CI step can go
+	// without any log or agent lifecycle activity before the daemon's dead-run
+	// watchdog declares the run dead and fails it. It is deliberately much
+	// longer than step_quiet_warning: quiet is a display hint, stall is a
+	// kill. The CI step is exempt (its idle lifetime is owned by ci_timeout,
+	// and its monitor deliberately deduplicates unchanged poll logs).
+	DefaultStepStallTimeout = time.Hour
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
 	// daemon socket that exists but is not accepting connections.
 	DefaultDaemonConnectTimeout = 3 * time.Second
@@ -201,7 +208,9 @@ type GlobalConfig struct {
 	// pushed branch may set it.
 	Worktree                  Worktree      `yaml:"-"`
 	CITimeout                 time.Duration `yaml:"-"`
+	CIMode                    CIMode        `yaml:"-"`
 	StepQuietWarning          time.Duration `yaml:"-"`
+	StepStallTimeout          time.Duration `yaml:"-"`
 	AgentTimeout              time.Duration `yaml:"-"`
 	ReviewAgentTimeout        time.Duration `yaml:"-"`
 	TestAgentTimeout          time.Duration `yaml:"-"`
@@ -270,12 +279,14 @@ type globalConfigRaw struct {
 	WorktreeRoots             map[string]string          `yaml:"worktree_roots"`
 	Worktree                  WorktreeRaw                `yaml:"worktree"`
 	CITimeout                 string                     `yaml:"ci_timeout"`
+	CIMode                    string                     `yaml:"ci_mode"`
 	DaemonConnectTimeout      string                     `yaml:"daemon_connect_timeout"`
 	BranchSyncRemoteTimeout   string                     `yaml:"branch_sync_remote_timeout"`
 	GateReconcileInterval     string                     `yaml:"gate_reconcile_interval"`
 	GateReconcileTimeout      string                     `yaml:"gate_reconcile_timeout"`
 	BabysitTimeout            string                     `yaml:"babysit_timeout"`
 	StepQuietWarning          string                     `yaml:"step_quiet_warning"`
+	StepStallTimeout          string                     `yaml:"step_stall_timeout"`
 	AgentTimeout              string                     `yaml:"agent_timeout"`
 	ReviewAgentTimeout        string                     `yaml:"review_agent_timeout"`
 	TestAgentTimeout          string                     `yaml:"test_agent_timeout"`
@@ -795,7 +806,9 @@ type Config struct {
 	AgentConfig               map[string]agentcfg.Profile
 	ReviewAgents              map[string]ReviewAgent
 	CITimeout                 time.Duration
+	CIMode                    CIMode
 	StepQuietWarning          time.Duration
+	StepStallTimeout          time.Duration
 	AgentTimeout              time.Duration
 	ReviewAgentTimeout        time.Duration
 	TestAgentTimeout          time.Duration
@@ -1060,6 +1073,12 @@ type TestRaw struct {
 	// (see EffectiveRepoConfig): a contributor's pushed branch must not be able
 	// to waive the configured-test gate that validates it.
 	AllowApproveOverFailure string `yaml:"allow_approve_over_failure"`
+	// LiveEvidence, when explicitly false, skips the live-evidence agent when
+	// commands.test ran and passed: the configured suite is then the whole
+	// test step. A failing baseline still gets the agent, which diagnoses it.
+	// Like instructions it is trusted-only (see EffectiveRepoConfig): a pushed
+	// branch must not be able to switch off the validation of itself.
+	LiveEvidence *bool `yaml:"live_evidence"`
 }
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
@@ -1104,6 +1123,9 @@ type Test struct {
 	Evidence                Evidence
 	Instructions            string
 	AllowApproveOverFailure string
+	// SkipLiveEvidence is true only when test.live_evidence is explicitly
+	// false, so a zero-value Test keeps the live-evidence agent.
+	SkipLiveEvidence bool
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -1356,6 +1378,13 @@ forgejo_axi_path: forgejo-axi
 # aborted with: no-mistakes axi abort --run <id>
 ci_timeout: "168h"
 
+# CI mode (this fork build). "local" (the default when the key is absent) skips
+# the CI step on every run: validation is the local pipeline, pull requests are
+# still opened, and no-mistakes never waits for forge checks. "github" restores
+# upstream forge check monitoring. Left commented so this file stays readable
+# by upstream builds, which reject unknown keys.
+# ci_mode: local
+
 # AXI status marks a running/fixing step as quiet when no step log or native
 # agent lifecycle activity has appeared for this long. This is observability
 # only; it never cancels work.
@@ -1390,6 +1419,13 @@ test_agent_timeout: "30m"
 # Optional still-working cap for Test. Unset means no extension past
 # test_agent_timeout. Must be at least test_agent_timeout.
 # test_agent_working_timeout: "1h"
+
+# The daemon's dead-run watchdog fails a run whose running/fixing step has
+# produced no log or agent lifecycle activity for this long, so a wedged run
+# cannot stay "running" forever. The CI step is exempt (its idle lifetime is
+# owned by ci_timeout). Set to "off", "none", "never", "unlimited", or any
+# non-positive duration to disable the inactivity kill.
+step_stall_timeout: "1h"
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
@@ -2255,7 +2291,9 @@ func DefaultGlobalConfig() *GlobalConfig {
 		Agents:                  []types.AgentName{types.AgentAuto},
 		ForgejoAXIPath:          "forgejo-axi",
 		CITimeout:               DefaultCITimeout,
+		CIMode:                  DefaultCIMode,
 		StepQuietWarning:        DefaultStepQuietWarning,
+		StepStallTimeout:        DefaultStepStallTimeout,
 		AgentTimeout:            DefaultAgentTimeout,
 		ReviewAgentTimeout:      DefaultReviewAgentTimeout,
 		TestAgentTimeout:        DefaultTestAgentTimeout,
@@ -2497,6 +2535,11 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.WorktreeRoots = raw.WorktreeRoots
 	}
+	ciMode, err := parseCIMode(raw.CIMode)
+	if err != nil {
+		return nil, err
+	}
+	cfg.CIMode = ciMode
 	timeoutValue := raw.CITimeout
 	if timeoutValue == "" {
 		timeoutValue = raw.BabysitTimeout
@@ -2567,6 +2610,13 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	}
 	if err := validateWorkingCap("test_agent_working_timeout", "test_agent_timeout", cfg.TestAgentWorkingTimeout, cfg.TestAgentTimeout); err != nil {
 		return nil, err
+	}
+	if raw.StepStallTimeout != "" {
+		d, err := parseStepStallTimeout(raw.StepStallTimeout)
+		if err != nil {
+			return nil, err
+		}
+		cfg.StepStallTimeout = d
 	}
 	if raw.DaemonConnectTimeout != "" {
 		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)
@@ -2712,6 +2762,25 @@ func parseCITimeout(value string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return CITimeoutUnlimited, nil
+	}
+	return d, nil
+}
+
+// parseStepStallTimeout interprets the step_stall_timeout config value. The
+// keywords "off"/"none"/"never"/"unlimited", or any non-positive duration,
+// disable the dead-run watchdog's inactivity kill entirely (resolved as 0);
+// otherwise the value is parsed as a Go duration.
+func parseStepStallTimeout(value string) (time.Duration, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "unlimited", "none", "off", "never":
+		return 0, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse step_stall_timeout %q: %w", value, err)
+	}
+	if d <= 0 {
+		return 0, nil
 	}
 	return d, nil
 }
@@ -3051,6 +3120,9 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// trusted-only for the same reason no_ci is: a pushed branch must not
 		// waive the gate that certifies it.
 		effective.Test.AllowApproveOverFailure = trusted.Test.AllowApproveOverFailure
+		// test.live_evidence decides whether the gate validates the branch
+		// beyond its own test command, so it is trusted-only for the same reason.
+		effective.Test.LiveEvidence = trusted.Test.LiveEvidence
 		// pr.base_branch controls where the contributor's PR lands, so it is
 		// trusted-only unless the repository explicitly opts into pushed
 		// settings alongside commands and agent selection. TitleFormat is a
@@ -3079,6 +3151,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.Prepare = false
 		effective.Test.BaseAttribution = false
 		effective.Test.AllowApproveOverFailure = ""
+		effective.Test.LiveEvidence = nil
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
 		}
@@ -3177,6 +3250,9 @@ func testDefaults() Test {
 // The local-storage half is applied separately by applyEvidenceStorageOverrides
 // so a repository config can never reach it (see EvidenceRaw.LocalRoot).
 func applyTestOverrides(dst *Test, src *TestRaw) {
+	if src.LiveEvidence != nil {
+		dst.SkipLiveEvidence = !*src.LiveEvidence
+	}
 	if src.Evidence.StoreInRepo != nil {
 		dst.Evidence.StoreInRepo = *src.Evidence.StoreInRepo
 	}
@@ -3648,7 +3724,9 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		AgentConfig:               global.AgentConfig,
 		ReviewAgents:              global.ReviewAgents,
 		CITimeout:                 global.CITimeout,
+		CIMode:                    global.CIMode,
 		StepQuietWarning:          global.StepQuietWarning,
+		StepStallTimeout:          global.StepStallTimeout,
 		AgentTimeout:              global.AgentTimeout,
 		ReviewAgentTimeout:        global.ReviewAgentTimeout,
 		TestAgentTimeout:          global.TestAgentTimeout,

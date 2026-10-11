@@ -1161,7 +1161,7 @@ func TestBuildPRTestingSummary_SeparatesDetailsFromAdjacentAttachments(t *testin
 				"rec.mp4":  "https://github.com/user-attachments/assets/rec",
 			}
 
-			md := buildPRTestingSummary(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), "", nil, scm.ProviderUnknown, attachments)
+			md := buildPRTestingSummary(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), "", nil, scm.ProviderUnknown, attachments, false)
 
 			if !strings.Contains(md, tt.want) {
 				t.Errorf("expected %q, got:\n%s", tt.want, md)

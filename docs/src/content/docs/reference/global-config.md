@@ -36,6 +36,8 @@ agent_args_override:
     - -c
     - service_tier="priority"
 
+ci_mode: local
+
 ci_timeout: "168h"
 
 step_quiet_warning: "10m"
@@ -45,6 +47,8 @@ agent_timeout: "30m"
 review_agent_timeout: "30m"
 
 test_agent_timeout: "30m"
+
+step_stall_timeout: "1h"
 
 daemon_connect_timeout: "3s"
 
@@ -558,6 +562,23 @@ Selection happens per run, before built-in detection and forge profiles: the rem
 
 Plugins run through the same environment as built-in provider CLIs (the daemon's login-shell environment plus any forge-profile overlay) with the run worktree as the working directory. A plugin whose `status` exits non-zero (for example, not authenticated) makes the PR and CI steps skip with its message, reported under `run.automatic_skips`; a plugin that breaks the protocol (unreadable output, wrong protocol version, timeout) fails the step instead, in its `status` handshake or in any later call (a timeout during the CI step's repeated polls or log retrieval is handled like any failed read instead). `no-mistakes doctor` lists configured plugins and checks that each command resolves; it does not run the plugin, because the handshake is per repository.
 
+### ci_mode
+
+Whether the CI step monitors forge checks. This key exists only in the local fork build (its version carries a `-local.N` suffix).
+
+|         |                     |
+| ------- | ------------------- |
+| Type    | `local` or `github` |
+| Default | `local`             |
+
+- `local` skips the CI step on every run, whatever the launch path (`axi run`, `git push` to the gate, `rerun`, the TUI), with no `--skip ci`. Review, test, lint, push, and PR creation run unchanged; `axi` status shows `local_ci` with the reason, and a finished run never waits for forge checks.
+- `github` restores upstream CI monitoring: the CI step waits for the PR's checks and applies `ci_timeout` below.
+
+The mode also decides who owns broad regression in the [Test](/no-mistakes/reference/pipeline-steps/#test) step: `github` leaves it to remote CI, while `local` makes the Test step's evidence turn run the repository's complete regression suite itself.
+
+The daemon enforces the mode when it creates or recovers a run, and launch clients also request the CI skip, so local mode holds even against a daemon started by an older build.
+Upstream builds reject this key as unknown, so set it only while this build runs both the CLI and the daemon.
+
 ### ci_timeout
 
 How long the CI step monitors an open PR, including provider CI status and PR mergeability (on GitHub, GitLab, Forgejo, Azure DevOps, or a provider plugin declaring `mergeable_state`), before giving up.
@@ -740,6 +761,24 @@ The 10-minute quiet stop still applies.
 | Default | unset                  |
 
 It is global-only.
+
+### step_stall_timeout
+
+How long a running or fixing step (other than CI) can go without recorded step-log or native-agent lifecycle activity before the daemon's dead-run watchdog declares the run dead and fails it.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `1h`                   |
+
+Accepts any positive Go `time.ParseDuration` string.
+Set it to `off` (`none`, `never`, and `unlimited` are accepted aliases), `0`, or any non-positive duration to disable the inactivity kill.
+
+Unlike `step_quiet_warning`, this one acts: a run whose active step stays silent past the threshold transitions to `failed` with an error starting with `dead run:`, its agent process tree is killed, and its worktree is cleaned up.
+A running configured `commands.*` invocation counts as activity: its output is captured buffered, so the daemon heartbeats the step while it waits on the live command, and a long-but-healthy test suite is never stall-killed.
+The CI step is exempt because its monitor deliberately deduplicates unchanged poll logs and its idle lifetime is owned by [`ci_timeout`](#ci_timeout); runs parked at an approval gate are exempt because parking is agent-paced by design.
+The watchdog also fails a run whose worktree directory was removed out from under it or whose recorded agent process died without the step observing the exit, regardless of this setting.
+See [the daemon lifecycle](/no-mistakes/concepts/daemon/) for the full dead-run model.
 
 ### daemon_connect_timeout
 
