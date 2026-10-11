@@ -1597,6 +1597,21 @@ func TestAxiStatusLivenessOkForHealthyActiveRun(t *testing.T) {
 	}
 }
 
+func TestAxiStatusLivenessOkForRecordedWorktreePlacement(t *testing.T) {
+	repoDir, _, database, repo := setupAxiQueryRepo(t)
+	chdir(t, repoDir)
+	stubDaemonRunning(t, true)
+	dbRun, _ := seedLivenessRun(t, database, repo, "feature/custom-root")
+	if err := database.SetRunWorktreeDir(dbRun.ID, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+
+	got := runStatusForTest(t, dbRun.ID)
+	if !strings.Contains(got, "liveness: ok") {
+		t.Fatalf("axi status should find the run's recorded worktree:\n%s", got)
+	}
+}
+
 func TestAxiStatusLivenessCIQuietStaysOk(t *testing.T) {
 	repoDir, p, database, repo := setupAxiQueryRepo(t)
 	chdir(t, repoDir)

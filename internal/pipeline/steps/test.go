@@ -240,6 +240,8 @@ Previous test findings to address:
 			Tested:        tested,
 			TestedHeadSHA: sctx.Run.HeadSHA,
 		}
+		findings.Items = unselectedTestFindings(sctx, nil)
+		needsApproval := hasBlockingFindings(findings.Items)
 		for _, f := range newTestsFromFix {
 			findings.Items = append(findings.Items, Finding{
 				Severity:    "info",
@@ -250,8 +252,10 @@ Previous test findings to address:
 		}
 		findingsJSON, _ := json.Marshal(findings)
 		return &pipeline.StepOutcome{
-			Findings:   string(findingsJSON),
-			FixSummary: fixSummary,
+			NeedsApproval: needsApproval,
+			AutoFixable:   needsApproval,
+			Findings:      string(findingsJSON),
+			FixSummary:    fixSummary,
 		}, nil
 	}
 

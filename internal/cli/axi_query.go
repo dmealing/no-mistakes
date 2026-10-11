@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/worktrees"
 	"github.com/spf13/cobra"
 )
 
@@ -147,7 +148,7 @@ func runLiveness(env *axiEnv, run *db.Run, steps []*db.StepResult, atGate bool) 
 			"`no-mistakes daemon start` recovers it, or `no-mistakes axi abort --run " + run.ID + "` clears it"
 	}
 	if run.Status == types.RunRunning {
-		if _, err := os.Stat(env.p.WorktreeDir(run.RepoID, run.ID)); err != nil && os.IsNotExist(err) {
+		if _, err := os.Stat(worktrees.RecordedDir(env.p, run.WorktreePath(), run.RepoID, run.ID)); err != nil && os.IsNotExist(err) {
 			return runLivenessDead, "the run worktree no longer exists; the daemon's dead-run watchdog will fail this run"
 		}
 	}

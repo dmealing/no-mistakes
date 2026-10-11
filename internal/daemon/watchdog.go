@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/worktrees"
 )
 
 // The dead-run watchdog is the daemon's only in-flight liveness authority.
@@ -126,7 +127,7 @@ func (w *runWatchdog) inspect(run *db.Run) {
 	// registered, so a tracked running run whose worktree directory is gone
 	// has lost it out-of-band and can never complete its remaining steps.
 	if run.Status == types.RunRunning {
-		wtDir := w.paths.WorktreeDir(run.RepoID, run.ID)
+		wtDir := worktrees.RecordedDir(w.paths, run.WorktreePath(), run.RepoID, run.ID)
 		if _, err := os.Stat(wtDir); err != nil && os.IsNotExist(err) {
 			w.declareDead(run, fmt.Sprintf("run worktree no longer exists at %s", wtDir))
 			return

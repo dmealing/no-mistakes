@@ -193,6 +193,33 @@ func TestWatchdogSweep_FailsRunWhoseWorktreeWasRemoved(t *testing.T) {
 	}
 }
 
+// A run placed under a worktree_roots entry records its worktree directory;
+// the watchdog must check that recorded placement, not the default one.
+func TestWatchdogSweep_KeepsRunWhoseRecordedWorktreeExists(t *testing.T) {
+	started := make(chan struct{})
+	slow := &mockSlowStep{name: types.StepReview, started: started}
+	p, d, mgr := newWatchdogTestEnv(t, func() []pipeline.Step { return []pipeline.Step{slow} })
+	runID := startBlockedRun(t, p, d, mgr, "watchdog-recorded-repo", started)
+
+	if err := d.SetRunWorktreeDir(runID, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(p.WorktreeDir("watchdog-recorded-repo", runID)); err != nil {
+		t.Fatal(err)
+	}
+
+	w := newTestWatchdog(p, d, mgr, time.Hour, 0)
+	w.sweep()
+
+	run, err := d.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != types.RunRunning {
+		t.Fatalf("run status = %q, want %q (error %v)", run.Status, types.RunRunning, run.Error)
+	}
+}
+
 func TestWatchdogSweep_FailsRunWhoseAgentProcessIsGone(t *testing.T) {
 	started := make(chan struct{})
 	slow := &mockSlowStep{name: types.StepReview, started: started}

@@ -310,8 +310,7 @@ func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, erro
 // tests can shorten it.
 var configuredCommandHeartbeatInterval = 4 * time.Minute
 
-// runStepShellCommand runs a configured repo command (commands.test/lint/
-// format), heartbeating the step's activity while the command is in flight.
+// runStepShellCommand runs a repository custom gate command, heartbeating the step's activity while the command is in flight.
 // The heartbeat records what the daemon knows first-hand - it is still
 // synchronously waiting on the live command it launched - and names the
 // command plus elapsed time so `axi status` last_activity stays honest.

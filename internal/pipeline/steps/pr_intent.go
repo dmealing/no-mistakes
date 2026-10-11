@@ -31,7 +31,7 @@ func publicPRIntent(sctx *pipeline.StepContext) string {
 	if sctx != nil && sctx.Config != nil && !sctx.Config.PR.PublishesIntent() {
 		return ""
 	}
-	if runOmitsIntent(sctx) {
+	if runOmitsIntent(sctx) || isForeignOwnerPR(sctx) {
 		return ""
 	}
 	return cleanedUserIntent(sctx)

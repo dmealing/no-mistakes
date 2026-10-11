@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -74,6 +75,36 @@ func TestRunStepShellCommand_HeartbeatsStepActivityWhileCommandRuns(t *testing.T
 	go func() {
 		defer close(done)
 		if _, _, err := runStepShellCommand(sctx, "sleep 1"); err != nil {
+			t.Errorf("run command: %v", err)
+		}
+	}()
+
+	activity := waitForHeartbeatActivity(t, database, stepID)
+	if !strings.Contains(activity, "sleep 1") {
+		t.Fatalf("heartbeat should name the command it is waiting on, got %q", activity)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("command did not finish")
+	}
+}
+
+// commands.test, commands.lint, commands.format and commands.prepare all run
+// through executeRepositoryCommand, so it must heartbeat just like a custom
+// gate command does.
+func TestExecuteRepositoryCommand_HeartbeatsStepActivityWhileCommandRuns(t *testing.T) {
+	sctx, database, stepID := newHeartbeatStepContext(t)
+	sctx.Config = &config.Config{}
+	restore := configuredCommandHeartbeatInterval
+	configuredCommandHeartbeatInterval = 20 * time.Millisecond
+	t.Cleanup(func() { configuredCommandHeartbeatInterval = restore })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, _, err := executeRepositoryCommand(sctx, "test", "sleep 1"); err != nil {
 			t.Errorf("run command: %v", err)
 		}
 	}()
