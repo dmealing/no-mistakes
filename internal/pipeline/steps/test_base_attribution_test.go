@@ -396,3 +396,38 @@ func TestTestStep_BaseAttributionCommandNotFoundOnBaseIsUnavailable(t *testing.T
 		t.Fatalf("attribution = %+v, want unavailable naming exit code 127", a)
 	}
 }
+
+// The base re-run is a configured commands.test invocation like the head
+// baseline, so it must heartbeat step activity for the dead-run watchdog.
+func TestRunTestCommandOnBase_HeartbeatsStepActivity(t *testing.T) {
+	sctx, _, _ := attributionRepo(t, "", "TestBroken\n", true)
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.StartStep(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = step.ID
+	restore := configuredCommandHeartbeatInterval
+	configuredCommandHeartbeatInterval = 20 * time.Millisecond
+	t.Cleanup(func() { configuredCommandHeartbeatInterval = restore })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, _, err := runTestCommandOnBase(sctx, "sleep 1 && ./suite.sh", sctx.Run.BaseSHA); err != nil {
+			t.Errorf("run base command: %v", err)
+		}
+	}()
+
+	activity := waitForHeartbeatActivity(t, sctx.DB, step.ID)
+	if !strings.Contains(activity, "sleep 1 && ./suite.sh") {
+		t.Fatalf("heartbeat should name the base command, got %q", activity)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("base command did not finish")
+	}
+}

@@ -79,7 +79,10 @@ func writeOmitIntentScenario(t *testing.T) string {
 // controls through the real binary, daemon, gate hook, and a fork-routed PR
 // creation captured by the gh stub:
 //
-//   - a plain `axi run --intent` publishes the `## Intent` section (baseline);
+//   - a foreign-owner fork PR (fork owner differs from the parent's) omits
+//     the `## Intent` section even though no caller-side control is set;
+//   - on a same-owner fork, a plain `axi run --intent` publishes the
+//     `## Intent` section (baseline);
 //   - `axi run --intent --no-publish-intent` keeps the section and the intent
 //     text out of the PR body while the review and PR-drafting prompts still
 //     receive the full intent;
@@ -93,19 +96,22 @@ func TestOmitIntentJourney(t *testing.T) {
 	ctx := context.Background()
 
 	parentURL := "https://github.com/parent-owner/no-mistakes.git"
-	forkURL := "https://github.com/fork-owner/no-mistakes.git"
-	forkDir := filepath.Join(filepath.Dir(h.UpstreamDir), "fork.git")
-	if err := os.MkdirAll(forkDir, 0o755); err != nil {
-		t.Fatalf("mkdir fork: %v", err)
-	}
-	if out, err := h.runGit(ctx, forkDir, "init", "--bare", "--initial-branch=main"); err != nil {
-		t.Fatalf("init fork: %v\n%s", err, out)
-	}
-	if out, err := h.runGit(ctx, h.WorkDir, "push", forkDir, "main"); err != nil {
-		t.Fatalf("seed fork main: %v\n%s", err, out)
-	}
+	foreignForkURL := "https://github.com/fork-owner/no-mistakes.git"
+	sameOwnerForkURL := "https://github.com/parent-owner/no-mistakes-fork.git"
 	configureGitURLRewrite(t, h, parentURL, h.UpstreamDir)
-	configureGitURLRewrite(t, h, forkURL, forkDir)
+	for name, rawURL := range map[string]string{"fork.git": foreignForkURL, "same-owner-fork.git": sameOwnerForkURL} {
+		forkDir := filepath.Join(filepath.Dir(h.UpstreamDir), name)
+		if err := os.MkdirAll(forkDir, 0o755); err != nil {
+			t.Fatalf("mkdir fork: %v", err)
+		}
+		if out, err := h.runGit(ctx, forkDir, "init", "--bare", "--initial-branch=main"); err != nil {
+			t.Fatalf("init fork: %v\n%s", err, out)
+		}
+		if out, err := h.runGit(ctx, h.WorkDir, "push", forkDir, "main"); err != nil {
+			t.Fatalf("seed fork main: %v\n%s", err, out)
+		}
+		configureGitURLRewrite(t, h, rawURL, forkDir)
+	}
 	if out, err := h.runGit(ctx, h.WorkDir, "remote", "set-url", "origin", parentURL); err != nil {
 		t.Fatalf("set parent origin: %v\n%s", err, out)
 	}
@@ -114,7 +120,7 @@ func TestOmitIntentJourney(t *testing.T) {
 	t.Setenv("FAKEAGENT_GH_MODE", "fork-pr")
 	t.Setenv("FAKEAGENT_GH_LOG", ghLog)
 	t.Setenv("FAKEAGENT_GH_PARENT", "parent-owner/no-mistakes")
-	if out, err := h.Run("init", "--fork-url", forkURL); err != nil {
+	if out, err := h.Run("init", "--fork-url", foreignForkURL); err != nil {
 		t.Fatalf("init with fork URL: %v\n%s", err, out)
 	}
 
@@ -160,6 +166,35 @@ func TestOmitIntentJourney(t *testing.T) {
 		if !drafted {
 			t.Errorf("no PR-drafting prompt ran")
 		}
+	}
+
+	// Foreign-owner fork: the Intent section is removed from the PR body with
+	// no caller-side control set.
+	const foreignIntent = "FOREIGN-OWNER intent that stays off another owner's PR"
+	h.CommitChange("feature/omit-foreign", "feature.txt", "foreign\n", "add foreign feature")
+	foreignWT := h.AddWorktree("feature/omit-foreign")
+	if out, err := h.RunInDir(foreignWT, "axi", "run", "--intent", foreignIntent); err != nil {
+		t.Fatalf("foreign-owner axi run: %v\n%s", err, out)
+	}
+	foreign := h.WaitForRun("feature/omit-foreign", 90*time.Second)
+	if foreign.Status != types.RunCompleted {
+		t.Fatalf("foreign-owner run status = %s (error=%v)", foreign.Status, deref(foreign.Error))
+	}
+	if foreign.OmitIntent {
+		t.Fatalf("foreign-owner run recorded omit_intent without any control set")
+	}
+	foreignBody := prBodyFor(foreign)
+	if strings.Contains(foreignBody, "## Intent") || strings.Contains(foreignBody, "FOREIGN-OWNER") {
+		t.Fatalf("foreign-owner PR body published the Intent section:\n%s", foreignBody)
+	}
+	if !strings.Contains(foreignBody, "## What Changed") {
+		t.Fatalf("foreign-owner PR body lost the drafted narrative:\n%s", foreignBody)
+	}
+
+	// Every later case routes through a same-owner fork, so ownership never
+	// masks what the caller-side controls do.
+	if out, err := h.Run("init", "--fork-url", sameOwnerForkURL); err != nil {
+		t.Fatalf("re-init with same-owner fork URL: %v\n%s", err, out)
 	}
 
 	// Baseline: publication is the default.

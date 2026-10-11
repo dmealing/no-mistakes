@@ -319,3 +319,24 @@ func testDeferredAskUserFindingParksUntilAHumanDecidesIt(t *testing.T, severity,
 		t.Fatalf("run status = %s, want %s", run.Status, types.RunCompleted)
 	}
 }
+
+// test.live_evidence=false returns before the evidence turn once the repaired
+// baseline passes, and that early return must still carry the findings the
+// auto-fix round did not select.
+func TestTestStep_LiveEvidenceDisabledFixRoundKeepsUnselectedFindings(t *testing.T) {
+	t.Parallel()
+	sctx := fixRoundTestContext(t, `{"findings":[`+breachFinding+`],"summary":"no-go"}`, `[]`)
+	sctx.Config.Commands.Test = "exit 0"
+	sctx.Config.Test.SkipLiveEvidence = true
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval || !outcome.AutoFixable {
+		t.Fatalf("outcome = %+v, want the unselected finding to park", outcome)
+	}
+	if got := descriptionCount(t, outcome.Findings, breach); got != 1 {
+		t.Fatalf("unselected finding count = %d, want 1; findings = %s", got, outcome.Findings)
+	}
+}
