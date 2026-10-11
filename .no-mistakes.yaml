@@ -29,3 +29,8 @@ document:
     and regression tests. Do not duplicate generic command catalogs, but retain
     its project-specific verification sequence and other load-bearing operating
     guidance.
+
+# Public repository: keep PR bodies short and the run intent out of them.
+pr:
+  publish_intent: false
+  appendix: collapsed
