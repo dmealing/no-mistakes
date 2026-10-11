@@ -8,12 +8,12 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.live_evidence`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, core-step `auto_fix`, `commit`, `intent`, `test`, `pr.title_format`, and `providers`) are still read from the pushed branch, except `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, and `test.evidence.branch`.
+Non-executing fields (`ignore_patterns`, core-step `auto_fix`, `commit`, `intent`, `test`, `pr.title_format`, and `providers`) are still read from the pushed branch, except `test.prepare`, `test.base_attribution`, `test.instructions`, `test.live_evidence`, `test.allow_approve_over_failure`, and `test.evidence.branch`.
 
 If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -975,6 +975,17 @@ The attribution leads the Test findings summary (the failure output the PR and r
 - the base checkout, preparation, or run cannot complete (including a base command that exits 126 or 127, meaning it could not be executed or found, such as an ignored dependency the fresh clone lacks, or a base run past its deadline): the summary says attribution is unavailable and every failure stays attributed to the change.
 
 Attribution informs; it never changes the gate. The failing command still parks the Test step with the same `error` finding, an approval over it is still recorded as a configured-command override (see [`test.allow_approve_over_failure`](#testallow_approve_over_failure)), and a passing command never triggers a base run. Each failing Test execution, including after an auto-fix round, pays one extra run of the command, which is why this is off by default.
+
+### test.live_evidence
+
+Set `false` to skip the live-evidence agent when the configured [`commands.test`](#commandstest) passes.
+
+| | |
+| --- | --- |
+| Type | `bool` |
+| Default | `true` (unset keeps the agent) |
+
+When `false` and the baseline exits zero, the configured suite is the whole Test step and the evidence agent does not run. A failing baseline still gets the agent, which diagnoses it. Like `test.instructions`, this field decides whether the branch is validated at all, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.
 
 ### test.instructions
 
