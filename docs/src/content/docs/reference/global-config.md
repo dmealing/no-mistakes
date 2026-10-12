@@ -52,8 +52,6 @@ step_stall_timeout: "1h"
 
 test_slots: 2
 
-slot_run_max_hold: "2h"
-
 daemon_connect_timeout: "3s"
 
 branch_sync_remote_timeout: "60s"
@@ -795,20 +793,7 @@ Caps how many runs may be inside the Test step at the same time across every rep
 
 `0` disables the limit. A run that cannot get a slot waits and never fails for lack of one; its Test step shows `queued for a test slot` with the holders in `axi status` and the step log. Time spent waiting does not count against the step's recorded duration, agent timeouts, or [`step_stall_timeout`](#step_stall_timeout): those clocks start when the slot is acquired.
 A slot is an OS file lock under `<NM_HOME>/test-slots`, so it is released on pass, fail, abort, daemon restart, or a crashed holder. A lock that fails for any reason other than another holder fails the Test step with the cause.
-[`no-mistakes slot run -- <command>`](/no-mistakes/reference/cli/#no-mistakes-slot) runs any command inside the same pool (for a full local test suite outside a run); [`slot_run_max_hold`](#slot_run_max_hold) bounds how long such a command may keep its slot. It is global-only.
-
-Inside a Test step, which already holds a slot, `slot run` runs its command at once without taking a second slot. That holds for configured commands and for agents that start one process per turn (`claude`, `codex`, `grok`, `pi`, `copilot`, `antigravity`, and `acp:` targets). It is not supported for an agent on a managed-server adapter (`opencode`, `rovodev`): the server keeps the environment of the run's first agent turn, so a `slot run` issued by its Test agent waits for a second slot, and one issued by a later step's agent may skip the pool. Do not wrap suites in `slot run` in a repository validated with those adapters.
-
-### slot_run_max_hold
-
-Longest a `no-mistakes slot run` command may hold its test slot, so a hung or forgotten command cannot keep a slot from every Test step on the machine.
-
-|         |                        |
-| ------- | ---------------------- |
-| Type    | `string` (Go duration) |
-| Default | `2h`                   |
-
-When the limit is reached, `slot run` terminates its command's whole process group, releases the slot, and exits non-zero with one line naming the limit. The clock starts when the slot is acquired; time spent waiting for a slot does not count and has no limit. `0` disables the limit, and so does [`test_slots: 0`](#test_slots): with no slot to hold, nothing is terminated. Pipeline Test steps are not affected: their own step and agent timeouts bound them. It is global-only.
+It is global-only.
 
 ### daemon_connect_timeout
 

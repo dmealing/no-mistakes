@@ -94,7 +94,6 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newSyncCmd())
 	cmd.AddCommand(newRunsCmd())
 	cmd.AddCommand(newStatsCmd())
-	cmd.AddCommand(newSlotCmd())
 	cmd.AddCommand(newDoctorCmd())
 	cmd.AddCommand(newEvalCmd())
 	cmd.AddCommand(newAxiCmd())

@@ -3,7 +3,6 @@ package pipeline
 import (
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/testslots"
@@ -21,11 +20,6 @@ import (
 // heartbeats an activity line naming the holders, so the watchdog's stall
 // clock stays quiet and axi status shows the run as queued, not wedged. The
 // slot is released when Execute returns on any path.
-//
-// While the lease is held the step's subprocess environment carries
-// testslots.HeldEnv, so a configured command or agent that wraps its suite in
-// `no-mistakes slot run` runs inside this step's slot instead of queueing
-// behind it.
 func (e *Executor) executeWithTestSlot(step Step, sctx *StepContext) (*StepOutcome, time.Duration, error) {
 	if step.Name() != types.StepTest || e.config == nil || e.config.TestSlots <= 0 || e.paths == nil {
 		outcome, err := step.Execute(sctx)
@@ -46,24 +40,9 @@ func (e *Executor) executeWithTestSlot(step Step, sctx *StepContext) (*StepOutco
 		return nil, 0, fmt.Errorf("wait for test slot: %w", err)
 	}
 	defer lease.Release()
-	stepEnv := sctx.Env
-	sctx.Env = append(append([]string(nil), stepEnv...), testslots.HeldEnv+"=1")
-	defer func() { sctx.Env = stepEnv }()
 	if waited > 0 {
 		sctx.Log(fmt.Sprintf("acquired a test slot after waiting %s", waited.Truncate(time.Second)))
 	}
 	outcome, err := step.Execute(sctx)
 	return outcome, waited, err
-}
-
-// testSlotHeldEnv returns the slot-held marker when the step environment
-// carries it, for the agent launch seam: agents take their environment from
-// RunOpts, not from StepContext.Env.
-func testSlotHeldEnv(env []string) []string {
-	for _, entry := range env {
-		if strings.HasPrefix(entry, testslots.HeldEnv+"=") {
-			return []string{entry}
-		}
-	}
-	return nil
 }

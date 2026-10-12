@@ -19,11 +19,6 @@ import (
 	"time"
 )
 
-// HeldEnv marks a process tree that already holds a test slot, so a nested
-// `no-mistakes slot run` runs directly instead of queueing behind its own
-// parent. Only a slot holder sets it, and only for the processes it starts.
-const HeldEnv = "NM_TEST_SLOT_HELD"
-
 const (
 	// DefaultPollInterval is how often a waiter retries every slot.
 	DefaultPollInterval = 250 * time.Millisecond
@@ -103,8 +98,8 @@ func (p *Pool) slotPath(i int) string {
 // wait starts and whenever the holder set changes (changed true), and again
 // after at least DefaultNotifyInterval even when nothing changed (changed
 // false), so a caller can log on changes and heartbeat on the rest. It
-// returns the time spent waiting so the caller can start its own budget
-// clocks at acquisition.
+// returns the time spent waiting, zero when a slot was free at once, so the
+// caller can start its own budget clocks at acquisition.
 func (p *Pool) Acquire(ctx context.Context, label string, onWait func([]Holder, bool)) (*Lease, time.Duration, error) {
 	if p == nil || p.Size <= 0 {
 		return &Lease{}, 0, nil
@@ -119,7 +114,7 @@ func (p *Pool) Acquire(ctx context.Context, label string, onWait func([]Holder, 
 	start := time.Now()
 	var lastNotify time.Time
 	var lastSeen string
-	for {
+	for queued := false; ; queued = true {
 		if err := ctx.Err(); err != nil {
 			return nil, 0, err
 		}
@@ -130,6 +125,9 @@ func (p *Pool) Acquire(ctx context.Context, label string, onWait func([]Holder, 
 			return nil, 0, err
 		}
 		if lease != nil {
+			if !queued {
+				return lease, 0, nil
+			}
 			return lease, time.Since(start), nil
 		}
 		if onWait != nil {

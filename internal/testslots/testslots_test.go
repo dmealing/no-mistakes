@@ -21,13 +21,16 @@ func newTestPool(t *testing.T, size int) *Pool {
 func TestAcquireUpToSizeThenWait(t *testing.T) {
 	p := newTestPool(t, 2)
 	ctx := context.Background()
-	a, _, err := p.Acquire(ctx, "a", nil)
+	a, aWaited, err := p.Acquire(ctx, "a", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _, err := p.Acquire(ctx, "b", nil)
+	b, bWaited, err := p.Acquire(ctx, "b", nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if aWaited != 0 || bWaited != 0 {
+		t.Fatalf("free slots reported a wait: %v, %v, want 0", aWaited, bWaited)
 	}
 	if got := len(p.Holders()); got != 2 {
 		t.Fatalf("holders = %d, want 2", got)
