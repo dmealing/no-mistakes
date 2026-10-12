@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/testslots"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -15,40 +14,35 @@ import (
 // runs across all repos do heavy test work at once. A run without a slot
 // waits and never fails for lack of one.
 //
-// The step's own clocks must not count the wait: phaseStart, which feeds the
-// recorded step duration, moves forward by the time waited, and agent
-// invocation timeouts start inside Execute, after acquisition. While queued
-// the step heartbeats an activity line naming the holders, so the watchdog's
-// stall clock stays quiet and axi status shows the run as queued, not wedged.
-// The slot is released when Execute returns on any path.
-func (e *Executor) executeWithTestSlot(step Step, sctx *StepContext, stepResultID string, run *db.Run, log func(string), phaseStart *time.Time) (*StepOutcome, error) {
+// The step's own clocks must not count the wait: the returned wait duration
+// is how far the caller advances its phase clock, and agent invocation
+// timeouts start inside Execute, after acquisition. While queued the step
+// heartbeats an activity line naming the holders, so the watchdog's stall
+// clock stays quiet and axi status shows the run as queued, not wedged. The
+// slot is released when Execute returns on any path.
+func (e *Executor) executeWithTestSlot(step Step, sctx *StepContext) (*StepOutcome, time.Duration, error) {
 	if step.Name() != types.StepTest || e.config == nil || e.config.TestSlots <= 0 || e.paths == nil {
-		return step.Execute(sctx)
+		outcome, err := step.Execute(sctx)
+		return outcome, 0, err
 	}
 	pool := testslots.NewPool(e.paths.TestSlotsDir(), e.config.TestSlots)
-	lastHolders := ""
-	lease, waited, err := pool.Acquire(sctx.Ctx, fmt.Sprintf("run %s (%s)", run.ID, run.Branch), func(holders []testslots.Holder) {
+	lease, waited, err := pool.Acquire(sctx.Ctx, fmt.Sprintf("run %s (%s)", sctx.Run.ID, sctx.Run.Branch), func(holders []testslots.Holder, changed bool) {
 		msg := fmt.Sprintf("queued for a test slot (test_slots=%d); held by %s", e.config.TestSlots, testslots.DescribeHolders(holders))
-		var key string
-		for _, h := range holders {
-			key += fmt.Sprintf("%d/%s;", h.PID, h.Label)
-		}
-		if key != lastHolders {
-			lastHolders = key
-			log(msg)
+		if changed {
+			sctx.Log(msg)
 			return
 		}
-		if dbErr := e.db.TouchStepActivity(stepResultID, msg); dbErr != nil {
+		if dbErr := e.db.TouchStepActivity(sctx.StepResultID, msg); dbErr != nil {
 			slog.Warn("failed to touch step activity in db", "step", step.Name(), "error", dbErr)
 		}
 	})
 	if err != nil {
-		return nil, fmt.Errorf("wait for test slot: %w", err)
+		return nil, 0, fmt.Errorf("wait for test slot: %w", err)
 	}
 	defer lease.Release()
 	if waited > 0 {
-		*phaseStart = phaseStart.Add(waited)
-		log(fmt.Sprintf("acquired a test slot after waiting %s", waited.Truncate(time.Second)))
+		sctx.Log(fmt.Sprintf("acquired a test slot after waiting %s", waited.Truncate(time.Second)))
 	}
-	return step.Execute(sctx)
+	outcome, err := step.Execute(sctx)
+	return outcome, waited, err
 }

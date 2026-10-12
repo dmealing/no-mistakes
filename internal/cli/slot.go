@@ -70,12 +70,13 @@ func newSlotStatusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return writeSlotStatus(cmd.OutOrStdout(), testslots.NewPool(p.TestSlotsDir(), cfg.TestSlots), cfg.TestSlots)
+			return writeSlotStatus(cmd.OutOrStdout(), testslots.NewPool(p.TestSlotsDir(), cfg.TestSlots))
 		},
 	}
 }
 
-func writeSlotStatus(w io.Writer, pool *testslots.Pool, size int) error {
+func writeSlotStatus(w io.Writer, pool *testslots.Pool) error {
+	size := pool.Size
 	if size <= 0 {
 		_, err := fmt.Fprintln(w, "test_slots: unlimited (0)")
 		return err
@@ -113,9 +114,9 @@ func runInSlot(cmd *cobra.Command, args []string) error {
 	// slot of its own; queueing behind that would deadlock a full pool.
 	if os.Getenv(slotHeldEnv) == "" && !gatecontext.MarkerPresent() {
 		cwd, _ := os.Getwd()
-		label := fmt.Sprintf("slot run: %s (in %s)", truncateLabel(strings.Join(args, " "), 80), cwd)
+		label := fmt.Sprintf("slot run: %s (in %s)", truncate(strings.Join(args, " "), 80), cwd)
 		waitedLine := false
-		lease, _, err := testslots.NewPool(p.TestSlotsDir(), cfg.TestSlots).Acquire(ctx, label, func(holders []testslots.Holder) {
+		lease, _, err := testslots.NewPool(p.TestSlotsDir(), cfg.TestSlots).Acquire(ctx, label, func(holders []testslots.Holder, _ bool) {
 			if waitedLine {
 				return
 			}
@@ -158,11 +159,4 @@ func runInSlot(cmd *cobra.Command, args []string) error {
 		return &exitError{code: code}
 	}
 	return &exitError{code: 1, err: waitErr}
-}
-
-func truncateLabel(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

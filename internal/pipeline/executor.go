@@ -1282,7 +1282,8 @@ rounds:
 	for {
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
-		outcome, err := e.executeWithTestSlot(step, sctx, sr.ID, run, writeLog, &phaseStart)
+		outcome, waited, err := e.executeWithTestSlot(step, sctx)
+		phaseStart = phaseStart.Add(waited)
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}

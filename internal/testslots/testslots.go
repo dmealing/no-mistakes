@@ -66,8 +66,7 @@ type Pool struct {
 	Dir  string
 	Size int
 
-	PollInterval   time.Duration
-	NotifyInterval time.Duration
+	PollInterval time.Duration
 }
 
 // NewPool returns a pool of size slots under dir.
@@ -96,48 +95,49 @@ func (p *Pool) slotPath(i int) string {
 
 // Acquire blocks until a slot is free or ctx ends. It never fails for lack of
 // a slot. onWait, when non-nil, is called with the current holders when the
-// wait starts, whenever the holder set changes, and at least every
-// NotifyInterval. It returns the time spent waiting so the caller can start
-// its own budget clocks at acquisition.
-func (p *Pool) Acquire(ctx context.Context, label string, onWait func([]Holder)) (*Lease, time.Duration, error) {
+// wait starts and whenever the holder set changes (changed true), and again
+// after at least DefaultNotifyInterval even when nothing changed (changed
+// false), so a caller can log on changes and heartbeat on the rest. It
+// returns the time spent waiting so the caller can start its own budget
+// clocks at acquisition.
+func (p *Pool) Acquire(ctx context.Context, label string, onWait func([]Holder, bool)) (*Lease, time.Duration, error) {
 	if p == nil || p.Size <= 0 {
 		return &Lease{}, 0, nil
 	}
 	if err := os.MkdirAll(p.Dir, 0o755); err != nil {
 		return nil, 0, fmt.Errorf("create test slot dir: %w", err)
 	}
-	poll, notify := p.PollInterval, p.NotifyInterval
+	poll := p.PollInterval
 	if poll <= 0 {
 		poll = DefaultPollInterval
-	}
-	if notify <= 0 {
-		notify = DefaultNotifyInterval
 	}
 	start := time.Now()
 	var lastNotify time.Time
 	var lastSeen string
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, time.Since(start), err
+			return nil, 0, err
 		}
-		lease, err := p.tryAcquire(label)
+		// One scan per tick: a busy slot's open fd also yields its holder
+		// record, so waiting never re-walks the files a second time.
+		lease, holders, err := p.tryAcquire(label, onWait != nil)
 		if err != nil {
-			return nil, time.Since(start), err
+			return nil, 0, err
 		}
 		if lease != nil {
 			return lease, time.Since(start), nil
 		}
 		if onWait != nil {
-			holders := p.Holders()
 			seen := holderKey(holders)
-			if lastNotify.IsZero() || seen != lastSeen || time.Since(lastNotify) >= notify {
-				onWait(holders)
+			changed := lastNotify.IsZero() || seen != lastSeen
+			if changed || time.Since(lastNotify) >= DefaultNotifyInterval {
+				onWait(holders, changed)
 				lastNotify, lastSeen = time.Now(), seen
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return nil, time.Since(start), ctx.Err()
+			return nil, 0, ctx.Err()
 		case <-time.After(poll):
 		}
 	}
@@ -151,13 +151,17 @@ func holderKey(holders []Holder) string {
 	return b.String()
 }
 
-func (p *Pool) tryAcquire(label string) (*Lease, error) {
+func (p *Pool) tryAcquire(label string, wantHolders bool) (*Lease, []Holder, error) {
+	var holders []Holder
 	for i := 0; i < p.Size; i++ {
 		f, err := os.OpenFile(p.slotPath(i), os.O_CREATE|os.O_RDWR, 0o644)
 		if err != nil {
-			return nil, fmt.Errorf("open test slot %d: %w", i, err)
+			return nil, nil, fmt.Errorf("open test slot %d: %w", i, err)
 		}
 		if tryLockFile(f) != nil {
+			if wantHolders {
+				holders = append(holders, readHolder(f, i))
+			}
 			f.Close()
 			continue
 		}
@@ -166,9 +170,22 @@ func (p *Pool) tryAcquire(label string) (*Lease, error) {
 			_ = f.Truncate(0)
 			_, _ = f.WriteAt(data, 0)
 		}
-		return &Lease{file: f}, nil
+		return &Lease{file: f}, nil, nil
 	}
-	return nil, nil
+	return nil, holders, nil
+}
+
+// readHolder renders the record a live holder wrote into its lock file. The
+// caller holds the file open; the slot index comes from the scanner, never
+// from the record.
+func readHolder(f *os.File, slot int) Holder {
+	var h Holder
+	buf := make([]byte, 4096)
+	if n, _ := f.ReadAt(buf, 0); n > 0 {
+		_ = json.Unmarshal(buf[:n], &h)
+	}
+	h.Slot = slot
+	return h
 }
 
 // Holders reports the live holders of the first Size slots. A slot whose lock
@@ -188,14 +205,8 @@ func (p *Pool) Holders() []Holder {
 			f.Close()
 			continue
 		}
-		h := Holder{Slot: i}
-		buf := make([]byte, 4096)
-		if n, _ := f.ReadAt(buf, 0); n > 0 {
-			_ = json.Unmarshal(buf[:n], &h)
-		}
-		h.Slot = i
+		holders = append(holders, readHolder(f, i))
 		f.Close()
-		holders = append(holders, h)
 	}
 	return holders
 }

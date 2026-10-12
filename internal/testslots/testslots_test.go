@@ -40,7 +40,7 @@ func TestAcquireUpToSizeThenWait(t *testing.T) {
 	var waits [][]Holder
 	waitSeen := make(chan struct{}, 1)
 	go func() {
-		l, w, err := p.Acquire(ctx, "c", func(h []Holder) {
+		l, w, err := p.Acquire(ctx, "c", func(h []Holder, _ bool) {
 			waits = append(waits, h)
 			select {
 			case waitSeen <- struct{}{}:

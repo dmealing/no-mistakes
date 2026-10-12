@@ -179,6 +179,7 @@ func (p *Paths) EnsureDirs() error {
 		p.ReposDir(),
 		p.WorktreesDir(),
 		p.LogsDir(),
+		p.TestSlotsDir(),
 		p.ServerPIDsDir(),
 	}
 	for _, d := range dirs {
