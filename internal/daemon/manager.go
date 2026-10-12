@@ -35,6 +35,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
+	"github.com/kunchenguid/no-mistakes/internal/testslots"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 	"github.com/kunchenguid/no-mistakes/internal/worktrees"
@@ -76,6 +77,10 @@ type RunManager struct {
 	db              *db.DB
 	paths           *paths.Paths
 	steps           StepFactory
+
+	// testSlots is the one test-slot pool every run's executor shares, so the
+	// test_slots cap spans all runs and repositories this daemon serves.
+	testSlots *testslots.Pool
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
@@ -139,10 +144,24 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		db:              database,
 		paths:           p,
 		steps:           stepFactory,
+		testSlots:       testslots.NewPool(),
 		subscribers:     make(map[string][]*eventMailbox),
 		stateRevs:       make(map[string]int64),
 		completedRuns:   make(map[string]bool),
 	}
+}
+
+// newExecutor is the one place the daemon builds a run's executor, so every
+// run, new or recovered, gets the same CI monitor hooks and takes its Test
+// step slot from the shared pool.
+func (m *RunManager) newExecutor(cfg *config.Config, ag agent.Agent, execSteps []pipeline.Step) *pipeline.Executor {
+	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor.SetCIObservationTransition(m.transitionCIObservation)
+	executor.SetCIMonitorLifecycle(m.transitionCIMonitorLifecycle)
+	executor.SetCIWake(m.ciWake)
+	executor.SetHandoffPending(m.handoffPending)
+	executor.SetTestSlotPool(m.testSlots)
+	return executor
 }
 
 type recoveredRunPlan struct {
@@ -530,11 +549,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		return
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
-	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
-	executor.SetCIObservationTransition(m.transitionCIObservation)
-	executor.SetCIMonitorLifecycle(m.transitionCIMonitorLifecycle)
-	executor.SetCIWake(m.ciWake)
-	executor.SetHandoffPending(m.handoffPending)
+	executor := m.newExecutor(plan.cfg, plan.agent, plan.steps)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -2025,11 +2040,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())
-	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
-	executor.SetCIObservationTransition(m.transitionCIObservation)
-	executor.SetCIMonitorLifecycle(m.transitionCIMonitorLifecycle)
-	executor.SetCIWake(m.ciWake)
-	executor.SetHandoffPending(m.handoffPending)
+	executor := m.newExecutor(cfg, ag, execSteps)
 	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
 	if retry != nil {

@@ -26,6 +26,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
+	"github.com/kunchenguid/no-mistakes/internal/testslots"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -95,6 +96,9 @@ type Executor struct {
 	// retrySource is the failed run Execute continues instead of starting the
 	// pipeline from the beginning (SetRetrySource).
 	retrySource string
+	// testSlots is the pool the Test step takes its slot from; nil means the
+	// step is not capped. See SetTestSlotPool.
+	testSlots *testslots.Pool
 
 	onEvent EventFunc
 
@@ -1648,7 +1652,10 @@ rounds:
 		}
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
-		outcome, err := e.executeWithCrashRetry(step, sctx, &crashRetriesRemaining)
+		outcome, waited, err := e.executeWithTestSlot(step, sctx, func() (*StepOutcome, error) {
+			return e.executeWithCrashRetry(step, sctx, &crashRetriesRemaining)
+		})
+		phaseStart = phaseStart.Add(waited)
 		if stepName == types.StepCI && e.ciMonitorLifecycle != nil {
 			e.ciMonitorLifecycle(run.ID, false)
 		}
