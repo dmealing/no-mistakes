@@ -2,10 +2,12 @@ package pipeline
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/testslots"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -81,5 +83,69 @@ func TestExecutor_NonTestStepsIgnoreSlots(t *testing.T) {
 	defer cancel()
 	if err := exec.Execute(ctx, run, repo, t.TempDir()); err != nil {
 		t.Fatalf("lint step blocked by test slots: %v", err)
+	}
+}
+
+// envProbeStep records the subprocess environment a step hands to its
+// configured commands (StepContext.Env) and to its agent (RunOpts.Env).
+type envProbeStep struct {
+	name     types.StepName
+	stepEnv  []string
+	agentEnv []string
+}
+
+func (s *envProbeStep) Name() types.StepName { return s.name }
+
+func (s *envProbeStep) Execute(sctx *StepContext) (*StepOutcome, error) {
+	s.stepEnv = slices.Clone(sctx.Env)
+	if _, err := sctx.RunAgent(agent.RunOpts{Prompt: "probe"}); err != nil {
+		return nil, err
+	}
+	return &StepOutcome{}, nil
+}
+
+type envCaptureAgent struct{ env []string }
+
+func (a *envCaptureAgent) Name() string { return "env-capture" }
+func (a *envCaptureAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	a.env = slices.Clone(opts.Env)
+	return &agent.Result{}, nil
+}
+func (a *envCaptureAgent) Close() error { return nil }
+
+// `no-mistakes slot run` skips the pool only when testslots.HeldEnv is set.
+// A Test step holding a slot must therefore set it for everything it starts,
+// or a configured test command that wraps its suite in `slot run` queues
+// behind the slot its own step holds. A step that holds no slot must not set
+// it, or `slot run` from that step would run outside the cap.
+func TestExecutor_OnlyASlotHoldingStepMarksItsSubprocessEnvironment(t *testing.T) {
+	const marker = testslots.HeldEnv + "=1"
+	for _, tc := range []struct {
+		name      string
+		step      types.StepName
+		testSlots int
+		want      bool
+	}{
+		{name: "test step holding a slot", step: types.StepTest, testSlots: 1, want: true},
+		{name: "lint step holds no slot", step: types.StepLint, testSlots: 1, want: false},
+		{name: "unlimited pool holds no slot", step: types.StepTest, testSlots: 0, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			step := &envProbeStep{name: tc.step}
+			capture := &envCaptureAgent{}
+			exec := NewExecutor(database, p, &config.Config{TestSlots: tc.testSlots}, capture, []Step{step}, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			if err := exec.Execute(ctx, run, repo, t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(step.stepEnv, marker); got != tc.want {
+				t.Errorf("configured-command environment %v: has %s = %v, want %v", step.stepEnv, marker, got, tc.want)
+			}
+			if got := slices.Contains(capture.env, marker); got != tc.want {
+				t.Errorf("agent environment %v: has %s = %v, want %v", capture.env, marker, got, tc.want)
+			}
+		})
 	}
 }

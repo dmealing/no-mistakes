@@ -13,13 +13,22 @@ import (
 // reads fail.
 const lockByteOffset = 0xFFFFFFFF
 
-func tryLockFile(f *os.File) error {
+// tryLockFile reports (false, nil) only when another handle holds the lock;
+// any other failure is returned so an unlockable file never looks busy.
+func tryLockFile(f *os.File) (bool, error) {
 	ol := &windows.Overlapped{Offset: lockByteOffset}
-	return windows.LockFileEx(
+	err := windows.LockFileEx(
 		windows.Handle(f.Fd()),
 		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
 		0, 1, 0, ol,
 	)
+	switch err {
+	case nil:
+		return true, nil
+	case windows.ERROR_LOCK_VIOLATION, windows.ERROR_IO_PENDING:
+		return false, nil
+	}
+	return false, err
 }
 
 func unlockFile(f *os.File) error {

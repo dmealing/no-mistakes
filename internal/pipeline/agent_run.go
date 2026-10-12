@@ -96,6 +96,9 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 	}
 	if sctx != nil {
 		ag = sctx.Agent
+		if held := testSlotHeldEnv(sctx.Env); held != nil {
+			opts.Env = append(append([]string(nil), opts.Env...), held...)
+		}
 	}
 	activity := observeAgentActivity(&opts)
 	return invokeAgent(parent, timeout, working, cause, activity, func(ctx context.Context) (*agent.Result, error) {

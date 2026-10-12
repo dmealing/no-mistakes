@@ -2,31 +2,34 @@ package cli
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/testslots"
 	"github.com/spf13/cobra"
 )
 
-// slotHeldEnv marks a process tree that already holds a test slot, so a nested
-// `slot run` runs directly instead of queueing behind its own parent.
-const slotHeldEnv = "NM_TEST_SLOT_HELD"
+const (
+	// slotRunKillGrace is how long a terminated slot run command gets to
+	// exit before it is killed.
+	slotRunKillGrace = 10 * time.Second
+	// slotRunHoldExpiredExitCode is the exit code of a slot run whose command
+	// was terminated at slot_run_max_hold, following timeout(1).
+	slotRunHoldExpiredExitCode = 124
+)
 
 func newSlotCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "slot",
 		Short: "Share the host-wide test slot pool used by pipeline Test steps",
 	}
-	cmd.AddCommand(newSlotRunCmd(), newSlotStatusCmd())
+	cmd.AddCommand(newSlotRunCmd())
 	return cmd
 }
 
@@ -37,7 +40,8 @@ func newSlotRunCmd() *cobra.Command {
 		Long: "Run a command once a test slot is free, so a full local test suite started outside a pipeline " +
 			"shares the test_slots cap with pipeline Test steps. While waiting it prints one line to stderr " +
 			"naming the holders. The slot is released when the command exits for any reason, and the command's " +
-			"exit code is passed through.",
+			"exit code is passed through. A command still holding its slot after slot_run_max_hold is " +
+			"terminated and slot run exits non-zero.",
 		// The wrapped command owns its flags: `slot run go test -race` must
 		// not be parsed as slot flags.
 		DisableFlagParsing: true,
@@ -56,43 +60,6 @@ func newSlotRunCmd() *cobra.Command {
 	}
 }
 
-func newSlotStatusCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "status",
-		Short: "Show who holds the host-wide test slots",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			p, err := paths.New()
-			if err != nil {
-				return fmt.Errorf("resolve paths: %w", err)
-			}
-			cfg, err := config.LoadGlobal(p.ConfigFile())
-			if err != nil {
-				return err
-			}
-			return writeSlotStatus(cmd.OutOrStdout(), testslots.NewPool(p.TestSlotsDir(), cfg.TestSlots))
-		},
-	}
-}
-
-func writeSlotStatus(w io.Writer, pool *testslots.Pool) error {
-	size := pool.Size
-	if size <= 0 {
-		_, err := fmt.Fprintln(w, "test_slots: unlimited (0)")
-		return err
-	}
-	holders := pool.Holders()
-	if _, err := fmt.Fprintf(w, "test_slots: %d, in use: %d\n", size, len(holders)); err != nil {
-		return err
-	}
-	for _, h := range holders {
-		if _, err := fmt.Fprintf(w, "  slot %d: %s\n", h.Slot, h.Describe()); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func runInSlot(cmd *cobra.Command, args []string) error {
 	p, err := paths.New()
 	if err != nil {
@@ -103,50 +70,82 @@ func runInSlot(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	sigs := make(chan os.Signal, 2)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigs)
 
+	program := filepath.Base(args[0])
 	child := exec.Command(args[0], args[1:]...)
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, cmd.OutOrStdout(), cmd.ErrOrStderr()
-	child.Env = append(os.Environ(), slotHeldEnv+"=1")
+	child.Env = append(os.Environ(), testslots.HeldEnv+"=1")
 
-	// A pipeline step's agent (or a nested slot run) already sits inside a
-	// slot of its own; queueing behind that would deadlock a full pool.
-	if os.Getenv(slotHeldEnv) == "" && !gatecontext.MarkerPresent() {
+	// Only a process tree that already holds a slot skips the pool: queueing
+	// behind its own holder would deadlock a full pool.
+	var holdLimit <-chan time.Time
+	if os.Getenv(testslots.HeldEnv) == "" {
+		// The label reaches other runs' step logs and the state database, so
+		// it names the program only, never its arguments.
 		cwd, _ := os.Getwd()
-		label := fmt.Sprintf("slot run: %s (in %s)", truncate(strings.Join(args, " "), 80), cwd)
+		label := fmt.Sprintf("slot run: %s (in %s)", program, cwd)
 		waitedLine := false
-		lease, _, err := testslots.NewPool(p.TestSlotsDir(), cfg.TestSlots).Acquire(ctx, label, func(holders []testslots.Holder, _ bool) {
+		waitCtx, stopWait := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		lease, _, err := testslots.NewPool(p.TestSlotsDir(), cfg.TestSlots).Acquire(waitCtx, label, func(holders []testslots.Holder, _ bool) {
 			if waitedLine {
 				return
 			}
 			waitedLine = true
 			fmt.Fprintf(cmd.ErrOrStderr(), "no-mistakes: waiting for a test slot (test_slots=%d); held by %s\n", cfg.TestSlots, testslots.DescribeHolders(holders))
 		})
+		if err == nil {
+			// A signal that landed as the slot was granted still stops the run.
+			if err = waitCtx.Err(); err != nil {
+				lease.Release()
+			}
+		}
+		stopWait()
 		if err != nil {
 			return fmt.Errorf("wait for test slot: %w", err)
 		}
 		defer lease.Release()
+		if cfg.SlotRunMaxHold > 0 {
+			timer := time.NewTimer(cfg.SlotRunMaxHold)
+			defer timer.Stop()
+			holdLimit = timer.C
+		}
 	}
 
-	// Ctrl-C reaches the child directly through the shared process group; a
-	// SIGTERM sent to this process alone is forwarded.
 	if err := child.Start(); err != nil {
 		return &exitError{code: 127, err: fmt.Errorf("start %s: %w", args[0], err)}
 	}
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- child.Wait() }()
 	var waitErr error
-	select {
-	case waitErr = <-waitDone:
-	case <-ctx.Done():
-		_ = child.Process.Signal(os.Interrupt)
+	holdExpired := false
+	for running := true; running; {
 		select {
 		case waitErr = <-waitDone:
-		case <-time.After(10 * time.Second):
-			_ = child.Process.Kill()
-			waitErr = <-waitDone
+			running = false
+		case sig := <-sigs:
+			// Ctrl-C reaches the command directly through the shared
+			// process group, so an interrupt is never sent a second time;
+			// a SIGTERM is delivered to this process alone and is forwarded.
+			if sig == syscall.SIGTERM {
+				waitErr = terminateSlotCommand(child, waitDone)
+				running = false
+			}
+		case <-holdLimit:
+			holdExpired = true
+			waitErr = terminateSlotCommand(child, waitDone)
+			running = false
+		case <-cmd.Context().Done():
+			waitErr = terminateSlotCommand(child, waitDone)
+			running = false
 		}
+	}
+	if holdExpired {
+		return &exitError{code: slotRunHoldExpiredExitCode, err: fmt.Errorf(
+			"no-mistakes: slot run terminated %s and released its test slot: it ran past slot_run_max_hold (%s)",
+			program, cfg.SlotRunMaxHold)}
 	}
 	if waitErr == nil {
 		return nil
@@ -159,4 +158,20 @@ func runInSlot(cmd *cobra.Command, args []string) error {
 		return &exitError{code: code}
 	}
 	return &exitError{code: 1, err: waitErr}
+}
+
+// terminateSlotCommand asks the command to stop with SIGTERM, kills it after
+// slotRunKillGrace (or at once where SIGTERM cannot be sent), and returns its
+// wait result.
+func terminateSlotCommand(child *exec.Cmd, waitDone <-chan error) error {
+	if err := child.Process.Signal(syscall.SIGTERM); err != nil {
+		_ = child.Process.Kill()
+	}
+	select {
+	case err := <-waitDone:
+		return err
+	case <-time.After(slotRunKillGrace):
+		_ = child.Process.Kill()
+		return <-waitDone
+	}
 }

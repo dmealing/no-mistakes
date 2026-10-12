@@ -68,6 +68,10 @@ const (
 	// across all repos on the host. 0 disables the limit.
 	DefaultTestSlots = 2
 
+	// DefaultSlotRunMaxHold is the longest one `no-mistakes slot run` command
+	// may hold a test slot before it is terminated. 0 disables the limit.
+	DefaultSlotRunMaxHold = 2 * time.Hour
+
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
 	// daemon socket that exists but is not accepting connections.
 	DefaultDaemonConnectTimeout = 3 * time.Second
@@ -219,7 +223,12 @@ type GlobalConfig struct {
 	// TestSlots caps how many runs may be inside the Test step at once across
 	// every repo on the host; 0 is unlimited. Global-only: it describes this
 	// machine's CPU budget, never repository policy.
-	TestSlots                 int           `yaml:"-"`
+	TestSlots int `yaml:"-"`
+	// SlotRunMaxHold bounds how long one `no-mistakes slot run` command may
+	// hold a test slot; 0 is unlimited. Pipeline holders are bounded by their
+	// own step and agent timeouts, so this is the only bound on a holder the
+	// daemon does not own.
+	SlotRunMaxHold            time.Duration `yaml:"-"`
 	AgentTimeout              time.Duration `yaml:"-"`
 	ReviewAgentTimeout        time.Duration `yaml:"-"`
 	TestAgentTimeout          time.Duration `yaml:"-"`
@@ -297,6 +306,7 @@ type globalConfigRaw struct {
 	StepQuietWarning          string                     `yaml:"step_quiet_warning"`
 	StepStallTimeout          string                     `yaml:"step_stall_timeout"`
 	TestSlots                 *int                       `yaml:"test_slots"`
+	SlotRunMaxHold            string                     `yaml:"slot_run_max_hold"`
 	AgentTimeout              string                     `yaml:"agent_timeout"`
 	ReviewAgentTimeout        string                     `yaml:"review_agent_timeout"`
 	TestAgentTimeout          string                     `yaml:"test_agent_timeout"`
@@ -1445,6 +1455,12 @@ step_stall_timeout: "1h"
 # pipeline. 0 disables the limit.
 test_slots: 2
 
+# Longest a "no-mistakes slot run" command may hold its test slot. When it is
+# reached the command is terminated, the slot is released, and slot run exits
+# non-zero. Time spent waiting for the slot does not count. 0 disables the
+# limit.
+slot_run_max_hold: "2h"
+
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
 daemon_connect_timeout: "3s"
@@ -2313,6 +2329,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		StepQuietWarning:        DefaultStepQuietWarning,
 		StepStallTimeout:        DefaultStepStallTimeout,
 		TestSlots:               DefaultTestSlots,
+		SlotRunMaxHold:          DefaultSlotRunMaxHold,
 		AgentTimeout:            DefaultAgentTimeout,
 		ReviewAgentTimeout:      DefaultReviewAgentTimeout,
 		TestAgentTimeout:        DefaultTestAgentTimeout,
@@ -2642,6 +2659,16 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, fmt.Errorf("test_slots must be 0 (unlimited) or positive, got %d", *raw.TestSlots)
 		}
 		cfg.TestSlots = *raw.TestSlots
+	}
+	if raw.SlotRunMaxHold != "" {
+		d, err := time.ParseDuration(raw.SlotRunMaxHold)
+		if err != nil {
+			return nil, fmt.Errorf("parse slot_run_max_hold %q: %w", raw.SlotRunMaxHold, err)
+		}
+		if d < 0 {
+			return nil, fmt.Errorf("slot_run_max_hold must be 0 (unlimited) or positive, got %q", raw.SlotRunMaxHold)
+		}
+		cfg.SlotRunMaxHold = d
 	}
 	if raw.DaemonConnectTimeout != "" {
 		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)

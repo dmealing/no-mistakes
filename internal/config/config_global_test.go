@@ -435,6 +435,59 @@ func TestLoadGlobal_TestSlots(t *testing.T) {
 	}
 }
 
+func TestLoadGlobal_SlotRunMaxHold(t *testing.T) {
+	cases := []struct {
+		yaml  string
+		want  time.Duration
+		valid bool
+	}{
+		{yaml: "test_slots: 2\n", want: 2 * time.Hour, valid: true},
+		{yaml: "slot_run_max_hold: 45m\n", want: 45 * time.Minute, valid: true},
+		{yaml: "slot_run_max_hold: \"0\"\n", want: 0, valid: true},
+		{yaml: "slot_run_max_hold: 0\n", want: 0, valid: true},
+		{yaml: "slot_run_max_hold: -1s\n", valid: false},
+		{yaml: "slot_run_max_hold: soon\n", valid: false},
+	}
+	for _, tc := range cases {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(tc.yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadGlobal(path)
+		if !tc.valid {
+			if err == nil {
+				t.Fatalf("LoadGlobal accepted %q", tc.yaml)
+			}
+			continue
+		}
+		if err != nil || cfg.SlotRunMaxHold != tc.want {
+			t.Fatalf("%q: slot_run_max_hold = %v, err %v, want %v", tc.yaml, cfg.SlotRunMaxHold, err, tc.want)
+		}
+	}
+}
+
+// The generated default config file is what a new install loads, so its
+// slot_run_max_hold line must parse to the documented 2h default.
+func TestEnsureDefaultGlobalConfig_SlotRunMaxHoldIsTwoHours(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	EnsureDefaultGlobalConfig(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := raw["slot_run_max_hold"].(string); !ok || got != "2h" {
+		t.Fatalf("default config slot_run_max_hold = %v, want \"2h\"", raw["slot_run_max_hold"])
+	}
+	cfg, err := LoadGlobal(path)
+	if err != nil || cfg.SlotRunMaxHold != 2*time.Hour {
+		t.Fatalf("slot_run_max_hold = %v, err %v, want 2h", cfg.SlotRunMaxHold, err)
+	}
+}
+
 func TestEnsureDefaultGlobalConfig_DoesNotOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

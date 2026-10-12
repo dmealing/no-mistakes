@@ -674,10 +674,14 @@ Share the host-wide [`test_slots`](/no-mistakes/reference/global-config/#test_sl
 
 ```sh
 no-mistakes slot run -- <command> [args...]
-no-mistakes slot status
 ```
 
-`slot run` waits for a free slot (printing one line to stderr naming the holders), runs the command, releases the slot on any exit, and passes the command's exit code through. Use it for a full local test suite started outside a pipeline run. `slot status` lists the current holders.
+`slot run` waits for a free slot (printing one line to stderr naming the holders), runs the command, releases the slot on any exit, and passes the command's exit code through. Use it for a full local test suite started outside a pipeline run.
+
+- The wait has no time limit. The hold does: a command still running after [`slot_run_max_hold`](/no-mistakes/reference/global-config/#slot_run_max_hold) is sent `SIGTERM` (then killed if it does not exit), the slot is released, and `slot run` prints one line naming the limit and exits `124`.
+- Other runs see the holder as the command's program name and working directory. Arguments and environment are never recorded.
+- A `SIGTERM` sent to `slot run` is forwarded to the command. Ctrl-C reaches the command directly and is not sent a second time.
+- Inside a pipeline Test step, which already holds a slot, `slot run` runs the command at once and takes no second slot, so a configured test command may wrap its suite in it. Every other pipeline step holds no slot, so `slot run` there waits for one like any other caller.
 
 ## no-mistakes doctor
 

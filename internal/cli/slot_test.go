@@ -25,7 +25,7 @@ func runSlotCmd(t *testing.T, args ...string) (stdout, stderr string, err error)
 
 func TestSlotRunPassesThroughExitCodeAndOutput(t *testing.T) {
 	t.Setenv("NM_HOME", t.TempDir())
-	t.Setenv(slotHeldEnv, "")
+	t.Setenv(testslots.HeldEnv, "")
 	out, _, err := runSlotCmd(t, "run", "--", "sh", "-c", "echo hi; exit 3")
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.code != 3 {
@@ -39,7 +39,11 @@ func TestSlotRunPassesThroughExitCodeAndOutput(t *testing.T) {
 func TestSlotRunWaitsPrintsOneLineAndReleases(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("NM_HOME", home)
-	t.Setenv(slotHeldEnv, "")
+	t.Setenv(testslots.HeldEnv, "")
+	// Every gate agent carries the gate marker, and most of them (review,
+	// lint, document, CI) hold no slot: the marker alone must not skip the
+	// pool.
+	t.Setenv("NO_MISTAKES_GATE", "1")
 	p := paths.WithRoot(home)
 	pool := testslots.NewPool(p.TestSlotsDir(), 2)
 	a, _, _ := pool.Acquire(context.Background(), "run a (x)", nil)
@@ -77,7 +81,7 @@ func TestSlotRunWaitsPrintsOneLineAndReleases(t *testing.T) {
 func TestSlotRunInsideHeldSlotDoesNotQueue(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("NM_HOME", home)
-	t.Setenv(slotHeldEnv, "1")
+	t.Setenv(testslots.HeldEnv, "1")
 	pool := testslots.NewPool(paths.WithRoot(home).TestSlotsDir(), 2)
 	a, _, _ := pool.Acquire(context.Background(), "a", nil)
 	b, _, _ := pool.Acquire(context.Background(), "b", nil)
@@ -85,20 +89,5 @@ func TestSlotRunInsideHeldSlotDoesNotQueue(t *testing.T) {
 	defer b.Release()
 	if _, _, err := runSlotCmd(t, "run", "true"); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestSlotStatusListsHolders(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("NM_HOME", home)
-	pool := testslots.NewPool(paths.WithRoot(home).TestSlotsDir(), 2)
-	a, _, _ := pool.Acquire(context.Background(), "run a (x)", nil)
-	defer a.Release()
-	out, _, err := runSlotCmd(t, "status")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out, "test_slots: 2, in use: 1") || !strings.Contains(out, "run a (x)") {
-		t.Fatalf("status = %q", out)
 	}
 }

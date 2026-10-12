@@ -19,6 +19,11 @@ import (
 	"time"
 )
 
+// HeldEnv marks a process tree that already holds a test slot, so a nested
+// `no-mistakes slot run` runs directly instead of queueing behind its own
+// parent. Only a slot holder sets it, and only for the processes it starts.
+const HeldEnv = "NM_TEST_SLOT_HELD"
+
 const (
 	// DefaultPollInterval is how often a waiter retries every slot.
 	DefaultPollInterval = 250 * time.Millisecond
@@ -154,11 +159,16 @@ func holderKey(holders []Holder) string {
 func (p *Pool) tryAcquire(label string, wantHolders bool) (*Lease, []Holder, error) {
 	var holders []Holder
 	for i := 0; i < p.Size; i++ {
-		f, err := os.OpenFile(p.slotPath(i), os.O_CREATE|os.O_RDWR, 0o644)
+		f, err := os.OpenFile(p.slotPath(i), os.O_CREATE|os.O_RDWR, 0o600)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open test slot %d: %w", i, err)
 		}
-		if tryLockFile(f) != nil {
+		locked, err := tryLockFile(f)
+		if err != nil {
+			f.Close()
+			return nil, nil, fmt.Errorf("lock test slot %d: %w", i, err)
+		}
+		if !locked {
 			if wantHolders {
 				holders = append(holders, readHolder(f, i))
 			}
@@ -166,6 +176,7 @@ func (p *Pool) tryAcquire(label string, wantHolders bool) (*Lease, []Holder, err
 			continue
 		}
 		// Diagnostics only; a failed write never costs the slot.
+		_ = f.Chmod(0o600)
 		if data, err := json.Marshal(Holder{Slot: i, PID: os.Getpid(), Label: label, Since: time.Now().UTC()}); err == nil {
 			_ = f.Truncate(0)
 			_, _ = f.WriteAt(data, 0)
@@ -189,23 +200,24 @@ func readHolder(f *os.File, slot int) Holder {
 }
 
 // Holders reports the live holders of the first Size slots. A slot whose lock
-// is free is not reported, whatever record it still holds.
+// is free, or cannot be probed, is not reported, whatever record it still
+// holds.
 func (p *Pool) Holders() []Holder {
 	if p == nil || p.Size <= 0 {
 		return nil
 	}
 	var holders []Holder
 	for i := 0; i < p.Size; i++ {
-		f, err := os.OpenFile(p.slotPath(i), os.O_RDWR, 0o644)
+		f, err := os.OpenFile(p.slotPath(i), os.O_RDWR, 0)
 		if err != nil {
 			continue
 		}
-		if tryLockFile(f) == nil {
+		locked, err := tryLockFile(f)
+		if locked {
 			_ = unlockFile(f)
-			f.Close()
-			continue
+		} else if err == nil {
+			holders = append(holders, readHolder(f, i))
 		}
-		holders = append(holders, readHolder(f, i))
 		f.Close()
 	}
 	return holders
