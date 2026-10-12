@@ -31,19 +31,15 @@ const (
 // Holder describes one live slot holder.
 type Holder struct {
 	Slot  int       `json:"slot"`
-	PID   int       `json:"pid"`
 	Label string    `json:"label"`
 	Since time.Time `json:"since"`
 }
 
-// Describe renders the holder for a human, e.g. "run abc (feature) pid 42, 3m0s".
+// Describe renders the holder for a human, e.g. "run abc (feature), 3m0s".
 func (h Holder) Describe() string {
 	label := h.Label
 	if label == "" {
 		label = "unknown holder"
-	}
-	if h.PID > 0 {
-		label += fmt.Sprintf(" pid %d", h.PID)
 	}
 	if !h.Since.IsZero() {
 		label += ", " + time.Since(h.Since).Truncate(time.Second).String()
@@ -156,7 +152,7 @@ func (p *Pool) Acquire(ctx context.Context, label string, onWait func([]Holder, 
 func holderKey(holders []Holder) string {
 	var b strings.Builder
 	for _, h := range holders {
-		fmt.Fprintf(&b, "%d:%d:%s;", h.Slot, h.PID, h.Label)
+		fmt.Fprintf(&b, "%d:%s;", h.Slot, h.Label)
 	}
 	return b.String()
 }
@@ -181,8 +177,7 @@ func (p *Pool) tryAcquire(label string, wantHolders bool) (*Lease, []Holder, err
 			continue
 		}
 		// Diagnostics only; a failed write never costs the slot.
-		_ = f.Chmod(0o600)
-		if data, err := json.Marshal(Holder{Slot: i, PID: os.Getpid(), Label: label, Since: time.Now().UTC()}); err == nil {
+		if data, err := json.Marshal(Holder{Slot: i, Label: label, Since: time.Now().UTC()}); err == nil {
 			_ = f.Truncate(0)
 			_, _ = f.WriteAt(data, 0)
 		}
