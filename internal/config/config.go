@@ -64,8 +64,8 @@ const (
 	// and its monitor deliberately deduplicates unchanged poll logs).
 	DefaultStepStallTimeout = time.Hour
 
-	// DefaultTestSlots is how many runs may be inside the Test step at once
-	// across all repos on the host. 0 disables the limit.
+	// DefaultTestSlots is how many runs may be executing their Test step at
+	// once across all repos on the host. 0 disables the limit.
 	DefaultTestSlots = 2
 
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
@@ -216,9 +216,10 @@ type GlobalConfig struct {
 	CIMode           CIMode        `yaml:"-"`
 	StepQuietWarning time.Duration `yaml:"-"`
 	StepStallTimeout time.Duration `yaml:"-"`
-	// TestSlots caps how many runs may be inside the Test step at once across
-	// every repo on the host; 0 is unlimited. Global-only: it describes this
-	// machine's CPU budget, never repository policy.
+	// TestSlots caps how many runs may be executing their Test step at once
+	// across every repo on the host; 0 is unlimited. A parked Test step holds
+	// no slot. Global-only: it describes this machine's CPU budget, never
+	// repository policy.
 	TestSlots                 int           `yaml:"-"`
 	AgentTimeout              time.Duration `yaml:"-"`
 	ReviewAgentTimeout        time.Duration `yaml:"-"`
@@ -1438,10 +1439,10 @@ test_agent_timeout: "30m"
 # non-positive duration to disable the inactivity kill.
 step_stall_timeout: "1h"
 
-# Maximum number of runs inside the Test step at the same time, across every
-# repo on this machine. A run over the limit waits for a slot (its test
-# timeouts start when it gets one) and shows as queued in axi status.
-# 0 disables the limit.
+# Maximum number of runs executing their Test step at the same time, across
+# every repo on this machine. A run over the limit waits for a slot (its test
+# timeouts start when it gets one) and shows as queued in axi status. A Test
+# step waiting on a decision holds no slot. 0 disables the limit.
 test_slots: 2
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a

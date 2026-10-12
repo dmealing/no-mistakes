@@ -27,7 +27,8 @@ func (e *Executor) SetTestSlotPool(pool *testslots.Pool) {
 // timeouts start inside Execute, after acquisition. While queued the step
 // heartbeats an activity line naming the holders, so the watchdog's stall
 // clock stays quiet and axi status shows the run as queued, not wedged. The
-// slot is released when Execute returns on any path.
+// slot is released when Execute returns on any path, so a step parked at a
+// gate holds none and each fix round queues for a slot again.
 func (e *Executor) executeWithTestSlot(step Step, sctx *StepContext) (*StepOutcome, time.Duration, error) {
 	if step.Name() != types.StepTest || e.config == nil {
 		outcome, err := step.Execute(sctx)

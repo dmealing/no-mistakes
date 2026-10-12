@@ -162,7 +162,7 @@ Runs **targeted** local validation of the change and requested intent, then gath
 Who owns broad regression follows [`ci_mode`](/no-mistakes/reference/global-config/#ci_mode). Under `ci_mode: github` local Test is never a repository-wide regression-suite substitute: broad regression is owned by remote CI and remains mandatory before a PR is ready. Under `ci_mode: local` no forge checks run for the change, so the evidence turn runs the repository's complete regression suite itself, after the targeted scenarios; fix rounds stay focused in both modes, so the suite is paid once per Test step rather than once per repair.
 [`commands.test`](/no-mistakes/reference/repo-config/#commandstest) owns the configuration contract for any explicit baseline command.
 
-The Test step first takes a slot from the [`test_slots`](/no-mistakes/reference/global-config/#test_slots) pool, which every run shares, and waits, visibly queued, when none is free; its clocks start once the slot is held.
+Each time the Test step executes, including every fix round, it first takes a slot from the [`test_slots`](/no-mistakes/reference/global-config/#test_slots) pool, which every run shares, and waits, visibly queued, when none is free; its clocks start once the slot is held. The slot is released when that execution ends or parks for a decision.
 
 **Behavior:**
 
