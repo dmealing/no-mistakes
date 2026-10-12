@@ -50,6 +50,8 @@ test_agent_timeout: "30m"
 
 step_stall_timeout: "1h"
 
+test_slots: 2
+
 daemon_connect_timeout: "3s"
 
 branch_sync_remote_timeout: "60s"
@@ -779,6 +781,19 @@ A running configured `commands.*` invocation counts as activity: its output is c
 The CI step is exempt because its monitor deliberately deduplicates unchanged poll logs and its idle lifetime is owned by [`ci_timeout`](#ci_timeout); runs parked at an approval gate are exempt because parking is agent-paced by design.
 The watchdog also fails a run whose worktree directory was removed out from under it or whose recorded agent process died without the step observing the exit, regardless of this setting.
 See [the daemon lifecycle](/no-mistakes/concepts/daemon/) for the full dead-run model.
+
+### test_slots
+
+Caps how many runs may be executing their Test step at the same time across every repo on this machine, so several validation runs do not fan their test suites out together and starve each other of CPU.
+
+|         |                                  |
+| ------- | -------------------------------- |
+| Type    | `integer`                        |
+| Default | `2`                              |
+
+`0` disables the limit. A run that cannot get a slot waits and never fails for lack of one; its Test step shows `queued for a test slot` with the holders in `axi status` and the step log. Time spent waiting does not count against the step's recorded duration, agent timeouts, or [`step_stall_timeout`](#step_stall_timeout): those clocks start when the slot is acquired.
+Runs that are waiting get a slot in the order they started waiting. A run holds a slot only while its Test step is executing: the slot is released when the step passes, fails, is aborted, or parks for a decision, so a run waiting on an approval holds none. Each fix round of the Test step takes a slot again, at the back of the queue, so a `fixing` Test step can show `queued for a test slot` too. Slots are held in the daemon's memory, so a daemon restart starts with every slot free.
+It is global-only.
 
 ### daemon_connect_timeout
 

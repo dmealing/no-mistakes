@@ -1,0 +1,56 @@
+package pipeline
+
+import (
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/testslots"
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
+
+// SetTestSlotPool installs the pool the Test step takes its slot from. The
+// daemon gives every run's executor the same pool, which is what makes
+// test_slots a cap across runs and repositories. Without a pool the Test step
+// is not capped.
+func (e *Executor) SetTestSlotPool(pool *testslots.Pool) {
+	e.testSlots = pool
+}
+
+// executeWithTestSlot runs one Execute of step. The Test step takes a test
+// slot first (config test_slots), so only a bounded number of runs across all
+// repos do heavy test work at once. A run without a slot waits and never
+// fails for lack of one.
+//
+// The step's own clocks must not count the wait: the returned wait duration
+// is how far the caller advances its phase clock, and agent invocation
+// timeouts start inside Execute, after acquisition. While queued the step
+// heartbeats an activity line naming the holders, so the watchdog's stall
+// clock stays quiet and axi status shows the run as queued, not wedged. The
+// slot is released when Execute returns on any path, so a step parked at a
+// gate holds none and each fix round queues for a slot again.
+func (e *Executor) executeWithTestSlot(step Step, sctx *StepContext) (*StepOutcome, time.Duration, error) {
+	if step.Name() != types.StepTest || e.config == nil {
+		outcome, err := step.Execute(sctx)
+		return outcome, 0, err
+	}
+	lease, waited, err := e.testSlots.Acquire(sctx.Ctx, e.config.TestSlots, fmt.Sprintf("run %s (%s)", sctx.Run.ID, sctx.Run.Branch), func(holders []testslots.Holder, changed bool) {
+		msg := fmt.Sprintf("queued for a test slot (test_slots=%d); held by %s", e.config.TestSlots, testslots.DescribeHolders(holders))
+		if changed {
+			sctx.Log(msg)
+			return
+		}
+		if dbErr := e.db.TouchStepActivity(sctx.StepResultID, msg); dbErr != nil {
+			slog.Warn("failed to touch step activity in db", "step", step.Name(), "error", dbErr)
+		}
+	})
+	if err != nil {
+		return nil, waited, fmt.Errorf("wait for test slot: %w", err)
+	}
+	defer lease.Release()
+	if waited > 0 {
+		sctx.Log(fmt.Sprintf("acquired a test slot after waiting %s", waited.Truncate(time.Second)))
+	}
+	outcome, err := step.Execute(sctx)
+	return outcome, waited, err
+}
