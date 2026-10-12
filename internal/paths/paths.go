@@ -164,9 +164,6 @@ func (p *Paths) ManagedServerLog() string {
 }
 func (p *Paths) CLILog() string { return filepath.Join(p.root, "logs", "cli.log") }
 
-// TestSlotsDir holds the host-wide test slot lock files (internal/testslots).
-func (p *Paths) TestSlotsDir() string { return filepath.Join(p.root, "test-slots") }
-
 // ServerPIDsDir holds PID-tracking files for managed agent servers
 // (opencode, rovodev) so a freshly started daemon can reap orphans left
 // behind by a crashed predecessor.
@@ -179,7 +176,6 @@ func (p *Paths) EnsureDirs() error {
 		p.ReposDir(),
 		p.WorktreesDir(),
 		p.LogsDir(),
-		p.TestSlotsDir(),
 		p.ServerPIDsDir(),
 	}
 	for _, d := range dirs {

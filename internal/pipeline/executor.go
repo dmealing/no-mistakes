@@ -25,6 +25,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
+	"github.com/kunchenguid/no-mistakes/internal/testslots"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -61,6 +62,9 @@ type Executor struct {
 	// skips maps each step marked skipped without running to its recorded
 	// skip reason; an explicit per-run skip carries an empty reason.
 	skips map[types.StepName]string
+	// testSlots is the pool the Test step takes its slot from; nil means the
+	// step is not capped. See SetTestSlotPool.
+	testSlots *testslots.Pool
 
 	onEvent EventFunc
 

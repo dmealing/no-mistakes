@@ -1,50 +1,33 @@
-// Package testslots caps how many callers do heavy test work at once across
-// every repo on the machine.
+// Package testslots caps how many runs do heavy test work at once.
 //
-// A pool is Size lock files in one directory. A slot is held by holding an
-// exclusive OS file lock on one of them, so the kernel releases it when the
-// holder exits or dies for any reason; there is no counter to strand and no
-// liveness heuristic. The holder also writes a small JSON record into the
-// file so waiters and `axi status` can say who has the slots. The record is
-// diagnostics only; the lock is the authority.
+// A Pool is a counting semaphore held in the daemon's memory and shared by
+// every run's executor, so the cap spans all repositories the daemon serves.
+// Waiters are admitted in arrival order. Nothing is persisted: a slot ends
+// with its Lease, and a daemon restart starts with every slot free.
 package testslots
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
-const (
-	// DefaultPollInterval is how often a waiter retries every slot.
-	DefaultPollInterval = 250 * time.Millisecond
-	// DefaultNotifyInterval is the longest a waiter stays silent: onWait is
-	// re-invoked at least this often so a step heartbeat keeps a queued run
-	// from looking wedged.
-	DefaultNotifyInterval = 30 * time.Second
-)
+// DefaultNotifyInterval is the longest a waiter stays silent: onWait is
+// re-invoked at least this often so a step heartbeat keeps a queued run from
+// looking wedged.
+const DefaultNotifyInterval = 30 * time.Second
 
 // Holder describes one live slot holder.
 type Holder struct {
-	Slot  int       `json:"slot"`
-	Label string    `json:"label"`
-	Since time.Time `json:"since"`
+	Label string
+	Since time.Time
 }
 
 // Describe renders the holder for a human, e.g. "run abc (feature), 3m0s".
 func (h Holder) Describe() string {
-	label := h.Label
-	if label == "" {
-		label = "unknown holder"
-	}
-	if !h.Since.IsZero() {
-		label += ", " + time.Since(h.Since).Truncate(time.Second).String()
-	}
-	return label
+	return h.Label + ", " + time.Since(h.Since).Truncate(time.Second).String()
 }
 
 // DescribeHolders renders holders as one "; "-joined line.
@@ -56,169 +39,164 @@ func DescribeHolders(holders []Holder) string {
 	return strings.Join(parts, "; ")
 }
 
-// Pool is a fixed-size set of slots. Size <= 0 means unlimited: Acquire
-// returns immediately without touching the filesystem.
+// Pool is the shared set of held slots and the queue behind them. The zero
+// value is ready to use. The cap is not a property of the pool: each Acquire
+// passes the limit from its own run's config, so a config edit applies to the
+// next run without a daemon restart.
 type Pool struct {
-	Dir  string
-	Size int
+	mu      sync.Mutex
+	holders []*Lease
+	waiters []*waiter
 
-	PollInterval time.Duration
+	notifyInterval time.Duration
 }
 
-// NewPool returns a pool of size slots under dir.
-func NewPool(dir string, size int) *Pool {
-	return &Pool{Dir: dir, Size: size}
+// NewPool returns an empty pool.
+func NewPool() *Pool {
+	return &Pool{}
 }
 
 // Lease is a held slot. Release is idempotent and safe on a nil receiver.
 type Lease struct {
-	file *os.File
+	pool   *Pool
+	holder Holder
 }
 
-// Release frees the slot.
+type waiter struct {
+	limit int
+	label string
+	// lease is set under Pool.mu when the waiter is admitted.
+	lease *Lease
+	// wake is signalled when the waiter is admitted or the holder set changed.
+	wake chan struct{}
+}
+
+// Release frees the slot and admits the waiters it makes room for.
 func (l *Lease) Release() {
-	if l == nil || l.file == nil {
+	if l == nil {
 		return
 	}
-	_ = unlockFile(l.file)
-	_ = l.file.Close()
-	l.file = nil
+	p := l.pool
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	i := slices.Index(p.holders, l)
+	if i < 0 {
+		return
+	}
+	p.holders = slices.Delete(p.holders, i, i+1)
+	p.admitLocked()
+	for _, w := range p.waiters {
+		w.signal()
+	}
 }
 
-func (p *Pool) slotPath(i int) string {
-	return filepath.Join(p.Dir, fmt.Sprintf("slot-%d.lock", i))
-}
-
-// Acquire blocks until a slot is free or ctx ends. It never fails for lack of
-// a slot. onWait, when non-nil, is called with the current holders when the
-// wait starts and whenever the holder set changes (changed true), and again
-// after at least DefaultNotifyInterval even when nothing changed (changed
-// false), so a caller can log on changes and heartbeat on the rest. It
-// returns the time spent waiting, zero when a slot was free at once, so the
-// caller can start its own budget clocks at acquisition. A wait that ends
+// Acquire blocks until fewer than limit slots are held and every earlier
+// waiter has been admitted, or ctx ends. It never fails for lack of a slot.
+// A limit <= 0, or a nil pool, means unlimited: it returns at once with a nil
+// Lease.
+//
+// onWait, when non-nil, is called with the current holders when the wait
+// starts and whenever the holder set changes (changed true), and again after
+// DefaultNotifyInterval when nothing changed (changed false), so a caller can
+// log on changes and heartbeat on the rest.
+//
+// It returns the time spent waiting, zero when a slot was free at once, so
+// the caller can start its own budget clocks at acquisition. A wait that ends
 // without a slot reports its length too, so the caller never books queue
 // time as its own.
-func (p *Pool) Acquire(ctx context.Context, label string, onWait func([]Holder, bool)) (*Lease, time.Duration, error) {
-	if p == nil || p.Size <= 0 {
-		return &Lease{}, 0, nil
+func (p *Pool) Acquire(ctx context.Context, limit int, label string, onWait func([]Holder, bool)) (*Lease, time.Duration, error) {
+	if p == nil || limit <= 0 {
+		return nil, 0, nil
 	}
-	if err := os.MkdirAll(p.Dir, 0o755); err != nil {
-		return nil, 0, fmt.Errorf("create test slot dir: %w", err)
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
 	}
-	poll := p.PollInterval
-	if poll <= 0 {
-		poll = DefaultPollInterval
+	p.mu.Lock()
+	if len(p.waiters) == 0 && len(p.holders) < limit {
+		lease := p.grantLocked(label)
+		p.mu.Unlock()
+		return lease, 0, nil
 	}
+	w := &waiter{limit: limit, label: label, wake: make(chan struct{}, 1)}
+	p.waiters = append(p.waiters, w)
+	holders := p.holdersLocked()
+	interval := p.notifyInterval
+	p.mu.Unlock()
+	if interval <= 0 {
+		interval = DefaultNotifyInterval
+	}
+
 	start := time.Now()
-	queued := false
-	waited := func() time.Duration {
-		if !queued {
-			return 0
-		}
-		return time.Since(start)
-	}
-	var lastNotify time.Time
-	var lastSeen string
+	changed := true
 	for {
-		if err := ctx.Err(); err != nil {
-			return nil, waited(), err
-		}
-		// One scan per tick: a busy slot's open fd also yields its holder
-		// record, so waiting never re-walks the files a second time.
-		lease, holders, err := p.tryAcquire(label, onWait != nil)
-		if err != nil {
-			return nil, waited(), err
-		}
-		if lease != nil {
-			return lease, waited(), nil
-		}
-		queued = true
 		if onWait != nil {
-			seen := holderKey(holders)
-			changed := lastNotify.IsZero() || seen != lastSeen
-			if changed || time.Since(lastNotify) >= DefaultNotifyInterval {
-				onWait(holders, changed)
-				lastNotify, lastSeen = time.Now(), seen
-			}
+			onWait(holders, changed)
 		}
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
-			return nil, waited(), ctx.Err()
-		case <-time.After(poll):
-		}
-	}
-}
-
-func holderKey(holders []Holder) string {
-	var b strings.Builder
-	for _, h := range holders {
-		fmt.Fprintf(&b, "%d:%s;", h.Slot, h.Label)
-	}
-	return b.String()
-}
-
-func (p *Pool) tryAcquire(label string, wantHolders bool) (*Lease, []Holder, error) {
-	var holders []Holder
-	for i := 0; i < p.Size; i++ {
-		f, err := os.OpenFile(p.slotPath(i), os.O_CREATE|os.O_RDWR, 0o600)
-		if err != nil {
-			return nil, nil, fmt.Errorf("open test slot %d: %w", i, err)
-		}
-		locked, err := tryLockFile(f)
-		if err != nil {
-			f.Close()
-			return nil, nil, fmt.Errorf("lock test slot %d: %w", i, err)
-		}
-		if !locked {
-			if wantHolders {
-				holders = append(holders, readHolder(f, i))
+			timer.Stop()
+			p.mu.Lock()
+			lease := w.lease
+			if lease == nil {
+				p.waiters = slices.DeleteFunc(p.waiters, func(o *waiter) bool { return o == w })
+				if p.admitLocked() {
+					for _, o := range p.waiters {
+						o.signal()
+					}
+				}
 			}
-			f.Close()
-			continue
+			p.mu.Unlock()
+			lease.Release()
+			return nil, time.Since(start), ctx.Err()
+		case <-w.wake:
+			timer.Stop()
+			changed = true
+		case <-timer.C:
+			changed = false
 		}
-		// Diagnostics only; a failed write never costs the slot.
-		if data, err := json.Marshal(Holder{Slot: i, Label: label, Since: time.Now().UTC()}); err == nil {
-			_ = f.Truncate(0)
-			_, _ = f.WriteAt(data, 0)
+		p.mu.Lock()
+		lease := w.lease
+		holders = p.holdersLocked()
+		p.mu.Unlock()
+		if lease != nil {
+			return lease, time.Since(start), nil
 		}
-		return &Lease{file: f}, nil, nil
 	}
-	return nil, holders, nil
 }
 
-// readHolder renders the record a live holder wrote into its lock file. The
-// caller holds the file open; the slot index comes from the scanner, never
-// from the record.
-func readHolder(f *os.File, slot int) Holder {
-	var h Holder
-	buf := make([]byte, 4096)
-	if n, _ := f.ReadAt(buf, 0); n > 0 {
-		_ = json.Unmarshal(buf[:n], &h)
+func (w *waiter) signal() {
+	select {
+	case w.wake <- struct{}{}:
+	default:
 	}
-	h.Slot = slot
-	return h
 }
 
-// Holders reports the live holders of the first Size slots. A slot whose lock
-// is free, or cannot be probed, is not reported, whatever record it still
-// holds.
-func (p *Pool) Holders() []Holder {
-	if p == nil || p.Size <= 0 {
-		return nil
+func (p *Pool) grantLocked(label string) *Lease {
+	lease := &Lease{pool: p, holder: Holder{Label: label, Since: time.Now()}}
+	p.holders = append(p.holders, lease)
+	return lease
+}
+
+// admitLocked hands free slots to the waiters at the head of the queue and
+// reports whether it admitted any. It stops at the first waiter whose limit
+// is reached, so a later waiter never overtakes an earlier one.
+func (p *Pool) admitLocked() bool {
+	admitted := false
+	for len(p.waiters) > 0 && len(p.holders) < p.waiters[0].limit {
+		w := p.waiters[0]
+		p.waiters = p.waiters[1:]
+		w.lease = p.grantLocked(w.label)
+		w.signal()
+		admitted = true
 	}
-	var holders []Holder
-	for i := 0; i < p.Size; i++ {
-		f, err := os.OpenFile(p.slotPath(i), os.O_RDWR, 0)
-		if err != nil {
-			continue
-		}
-		locked, err := tryLockFile(f)
-		if locked {
-			_ = unlockFile(f)
-		} else if err == nil {
-			holders = append(holders, readHolder(f, i))
-		}
-		f.Close()
+	return admitted
+}
+
+func (p *Pool) holdersLocked() []Holder {
+	holders := make([]Holder, 0, len(p.holders))
+	for _, l := range p.holders {
+		holders = append(holders, l.holder)
 	}
 	return holders
 }

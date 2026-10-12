@@ -792,7 +792,7 @@ Caps how many runs may be inside the Test step at the same time across every rep
 | Default | `2`                              |
 
 `0` disables the limit. A run that cannot get a slot waits and never fails for lack of one; its Test step shows `queued for a test slot` with the holders in `axi status` and the step log. Time spent waiting does not count against the step's recorded duration, agent timeouts, or [`step_stall_timeout`](#step_stall_timeout): those clocks start when the slot is acquired.
-A slot is an OS file lock under `<NM_HOME>/test-slots`, so it is released on pass, fail, abort, daemon restart, or a crashed holder. A lock that fails for any reason other than another holder fails the Test step with the cause.
+Runs that are waiting get a slot in the order they started waiting. A slot is released when the Test step ends, whether it passed, failed, or was aborted. Slots are held in the daemon's memory, so a daemon restart starts with every slot free.
 It is global-only.
 
 ### daemon_connect_timeout

@@ -2,203 +2,275 @@ package testslots
 
 import (
 	"context"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func newTestPool(t *testing.T, size int) *Pool {
+// queue starts an Acquire that must wait and returns once it is in the queue,
+// so a test can line waiters up in a known order.
+func queue(t *testing.T, p *Pool, limit int, label string) <-chan *Lease {
 	t.Helper()
-	p := NewPool(t.TempDir(), size)
-	p.PollInterval = 5 * time.Millisecond
-	return p
+	queued := make(chan struct{})
+	var once sync.Once
+	got := make(chan *Lease, 1)
+	go func() {
+		lease, _, err := p.Acquire(context.Background(), limit, label, func([]Holder, bool) {
+			once.Do(func() { close(queued) })
+		})
+		if err != nil {
+			t.Errorf("waiter %s: %v", label, err)
+		}
+		got <- lease
+	}()
+	select {
+	case <-queued:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("waiter %s never queued", label)
+	}
+	return got
 }
 
-func TestAcquireUpToSizeThenWait(t *testing.T) {
-	p := newTestPool(t, 2)
-	ctx := context.Background()
-	a, aWaited, err := p.Acquire(ctx, "a", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, bWaited, err := p.Acquire(ctx, "b", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if aWaited != 0 || bWaited != 0 {
-		t.Fatalf("free slots reported a wait: %v, %v, want 0", aWaited, bWaited)
-	}
-	if got := len(p.Holders()); got != 2 {
-		t.Fatalf("holders = %d, want 2", got)
-	}
-
-	type result struct {
-		lease  *Lease
-		waited time.Duration
-		err    error
-	}
-	done := make(chan result, 1)
-	var waits [][]Holder
-	waitSeen := make(chan struct{}, 1)
-	go func() {
-		l, w, err := p.Acquire(ctx, "c", func(h []Holder, _ bool) {
-			waits = append(waits, h)
-			select {
-			case waitSeen <- struct{}{}:
-			default:
-			}
-		})
-		done <- result{l, w, err}
-	}()
-
+func requireBlocked(t *testing.T, got <-chan *Lease, label string) {
+	t.Helper()
 	select {
-	case <-waitSeen:
-	case <-time.After(5 * time.Second):
-		t.Fatal("waiter never reported waiting")
-	}
-	select {
-	case <-done:
-		t.Fatal("third acquire returned while both slots were held")
+	case <-got:
+		t.Fatalf("waiter %s got a slot while none was free", label)
 	case <-time.After(50 * time.Millisecond):
 	}
-	if len(waits[0]) != 2 || waits[0][0].Label != "a" || waits[0][1].Label != "b" {
-		t.Fatalf("wait callback holders = %v", waits[0])
-	}
+}
 
+func requireAdmitted(t *testing.T, got <-chan *Lease, label string) *Lease {
+	t.Helper()
+	select {
+	case lease := <-got:
+		return lease
+	case <-time.After(5 * time.Second):
+		t.Fatalf("waiter %s was not admitted", label)
+		return nil
+	}
+}
+
+// The cap is the point of the pool: with a limit of 2, no more than 2 of many
+// concurrent callers may hold a slot at any instant, and all of them finish.
+func TestPoolNeverAdmitsMoreThanTheLimit(t *testing.T) {
+	const limit, callers = 2, 12
+	p := NewPool()
+	var active, peak atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			lease, _, err := p.Acquire(context.Background(), limit, "caller", nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			n := active.Add(1)
+			for {
+				old := peak.Load()
+				if n <= old || peak.CompareAndSwap(old, n) {
+					break
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+			active.Add(-1)
+			lease.Release()
+		}()
+	}
+	wg.Wait()
+	if got := peak.Load(); got != limit {
+		t.Fatalf("peak concurrent holders = %d, want exactly the limit %d", got, limit)
+	}
+}
+
+func TestFreeSlotIsTakenAtOnceWithNoWait(t *testing.T) {
+	p := NewPool()
+	for _, label := range []string{"a", "b"} {
+		lease, waited, err := p.Acquire(context.Background(), 2, label, func([]Holder, bool) {
+			t.Errorf("%s: onWait called although a slot was free", label)
+		})
+		if err != nil || lease == nil || waited != 0 {
+			t.Fatalf("%s: lease %v, waited %v, err %v", label, lease, waited, err)
+		}
+	}
+}
+
+// Waiters are admitted in the order they started waiting, one per released
+// slot, so a long-queued run is never overtaken by a later one.
+func TestWaitersAreAdmittedInArrivalOrder(t *testing.T) {
+	p := NewPool()
+	held, _, _ := p.Acquire(context.Background(), 1, "holder", nil)
+	first := queue(t, p, 1, "first")
+	second := queue(t, p, 1, "second")
+	third := queue(t, p, 1, "third")
+
+	held.Release()
+	lease := requireAdmitted(t, first, "first")
+	requireBlocked(t, second, "second")
+	requireBlocked(t, third, "third")
+
+	lease.Release()
+	lease = requireAdmitted(t, second, "second")
+	requireBlocked(t, third, "third")
+
+	lease.Release()
+	requireAdmitted(t, third, "third").Release()
+}
+
+// A new caller must not take a freed slot ahead of a run already waiting.
+func TestNewCallerQueuesBehindExistingWaiters(t *testing.T) {
+	p := NewPool()
+	a, _, _ := p.Acquire(context.Background(), 2, "a", nil)
+	b, _, _ := p.Acquire(context.Background(), 2, "b", nil)
+	defer b.Release()
+	// The waiter's own limit of 1 keeps it queued after a slot frees up.
+	strict := queue(t, p, 1, "strict")
 	a.Release()
-	r := <-done
-	if r.err != nil {
-		t.Fatal(r.err)
-	}
-	if r.waited <= 0 {
-		t.Fatalf("waited = %v, want > 0", r.waited)
-	}
-	r.lease.Release()
-	b.Release()
-	if got := len(p.Holders()); got != 0 {
-		t.Fatalf("holders after release = %d, want 0", got)
-	}
+	requireBlocked(t, strict, "strict")
+
+	late := queue(t, p, 2, "late")
+	requireBlocked(t, late, "late")
 }
 
 func TestReleaseIsIdempotentAndNilSafe(t *testing.T) {
-	p := newTestPool(t, 1)
-	l, _, err := p.Acquire(context.Background(), "x", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	l.Release()
-	l.Release()
+	p := NewPool()
+	a, _, _ := p.Acquire(context.Background(), 1, "a", nil)
+	a.Release()
+	a.Release()
 	(*Lease)(nil).Release()
-	l2, _, err := p.Acquire(context.Background(), "y", nil)
+
+	// The second Release must not have freed a slot it no longer held.
+	b, _, err := p.Acquire(context.Background(), 1, "b", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	l2.Release()
+	a.Release()
+	requireBlocked(t, queue(t, p, 1, "c"), "c")
+	b.Release()
 }
 
-func TestUnlimitedPoolNeverBlocks(t *testing.T) {
-	p := newTestPool(t, 0)
-	for i := 0; i < 5; i++ {
-		l, waited, err := p.Acquire(context.Background(), "x", nil)
-		if err != nil || waited != 0 {
-			t.Fatalf("acquire %d: waited=%v err=%v", i, waited, err)
-		}
-		defer l.Release()
-	}
-	if _, err := os.Stat(p.Dir + "/slot-0.lock"); err == nil {
-		t.Fatal("unlimited pool touched the slot directory")
-	}
-}
-
-func TestAcquireWaitHonorsContext(t *testing.T) {
-	p := newTestPool(t, 1)
-	held, _, _ := p.Acquire(context.Background(), "holder", nil)
+func TestUnlimitedNeverBlocks(t *testing.T) {
+	p := NewPool()
+	held, _, _ := p.Acquire(context.Background(), 1, "holder", nil)
 	defer held.Release()
+	for _, pool := range []*Pool{p, nil} {
+		lease, waited, err := pool.Acquire(context.Background(), 0, "unlimited", nil)
+		if err != nil || waited != 0 {
+			t.Fatalf("unlimited acquire: waited %v, err %v", waited, err)
+		}
+		lease.Release()
+	}
+	// An unlimited caller takes no slot: the limited pool is exactly as full.
+	requireBlocked(t, queue(t, p, 1, "limited"), "limited")
+}
+
+func TestCancelledWaitReportsItsLengthAndLeavesTheQueue(t *testing.T) {
+	p := NewPool()
+	held, _, _ := p.Acquire(context.Background(), 1, "holder", nil)
+
 	const timeout = 50 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	_, waited, err := p.Acquire(ctx, "waiter", nil)
-	if err != context.DeadlineExceeded {
-		t.Fatalf("err = %v, want deadline exceeded", err)
+	lease, waited, err := p.Acquire(ctx, 1, "cancelled", nil)
+	if err != context.DeadlineExceeded || lease != nil {
+		t.Fatalf("lease %v, err %v, want no lease and deadline exceeded", lease, err)
 	}
 	// The caller subtracts the wait from its own clock, so a wait that ends
 	// without a slot must still report how long it lasted.
 	if waited < timeout {
 		t.Fatalf("waited = %v for a wait that lasted the whole %v timeout", waited, timeout)
 	}
+
+	// The cancelled waiter is gone: the freed slot is free for the next caller.
+	held.Release()
+	next, waited, err := p.Acquire(context.Background(), 1, "next", nil)
+	if err != nil || waited != 0 {
+		t.Fatalf("slot kept by a cancelled waiter: waited %v, err %v", waited, err)
+	}
+	next.Release()
 }
 
-// TestDeadHolderFreesSlot kills a real process that holds a slot and checks
-// the slot becomes available with no cleanup step.
-func TestDeadHolderFreesSlot(t *testing.T) {
-	if os.Getenv("TESTSLOTS_HOLD_DIR") != "" {
-		p := NewPool(os.Getenv("TESTSLOTS_HOLD_DIR"), 1)
-		if _, _, err := p.Acquire(context.Background(), "doomed holder", nil); err != nil {
-			os.Exit(2)
-		}
-		os.Stdout.WriteString("held\n")
-		select {}
-	}
+// A waiter that gives up at the head of the queue must not strand the ones
+// behind it.
+func TestCancelledHeadWaiterDoesNotBlockTheNext(t *testing.T) {
+	p := NewPool()
+	held, _, _ := p.Acquire(context.Background(), 1, "holder", nil)
 
-	p := newTestPool(t, 1)
-	cmd := exec.Command(os.Args[0], "-test.run=^TestDeadHolderFreesSlot$")
-	cmd.Env = append(os.Environ(), "TESTSLOTS_HOLD_DIR="+p.Dir)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-	buf := make([]byte, 16)
-	if n, _ := stdout.Read(buf); !strings.HasPrefix(string(buf[:n]), "held") {
-		t.Fatalf("holder did not report held: %q", buf[:n])
-	}
-	holders := p.Holders()
-	if len(holders) != 1 || holders[0].Label != "doomed holder" {
-		t.Fatalf("holders = %+v", holders)
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	headQueued := make(chan struct{})
+	var once sync.Once
+	headDone := make(chan error, 1)
+	go func() {
+		_, _, err := p.Acquire(ctx, 1, "head", func([]Holder, bool) { once.Do(func() { close(headQueued) }) })
+		headDone <- err
+	}()
+	<-headQueued
+	next := queue(t, p, 1, "next")
 
-	_ = cmd.Process.Kill() // SIGKILL: no deferred cleanup runs.
-	_, _ = cmd.Process.Wait()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	cancel()
+	if err := <-headDone; err != context.Canceled {
+		t.Fatalf("head err = %v, want canceled", err)
+	}
+	requireBlocked(t, next, "next")
+	held.Release()
+	requireAdmitted(t, next, "next").Release()
+}
+
+// The queued line a run shows must name who holds the slots, be refreshed
+// when that changes, and be repeated as a heartbeat when it does not.
+func TestOnWaitNamesHoldersOnChangeAndHeartbeats(t *testing.T) {
+	p := NewPool()
+	p.notifyInterval = 20 * time.Millisecond
+	held, _, _ := p.Acquire(context.Background(), 1, "run a (one)", nil)
+	first := queue(t, p, 1, "run b (two)")
+
+	type call struct {
+		labels  []string
+		changed bool
+	}
+	calls := make(chan call, 64)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	l, _, err := p.Acquire(ctx, "survivor", nil)
-	if err != nil {
-		t.Fatalf("slot stranded by dead holder: %v", err)
-	}
-	l.Release()
-}
-
-// Only "another holder has it" may read as a busy slot. Any other lock failure
-// must surface as an error: read as busy, it would look like a pool that is
-// full forever.
-func TestTryLockFileSeparatesAHeldSlotFromALockFailure(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "slot-0.lock")
-	holder, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer holder.Close()
-	if locked, err := tryLockFile(holder); !locked || err != nil {
-		t.Fatalf("free slot: locked=%v err=%v, want true, nil", locked, err)
-	}
-
-	contender, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if locked, err := tryLockFile(contender); locked || err != nil {
-		t.Fatalf("held slot: locked=%v err=%v, want false, nil", locked, err)
+	go func() {
+		_, _, _ = p.Acquire(ctx, 1, "run c (three)", func(holders []Holder, changed bool) {
+			labels := make([]string, 0, len(holders))
+			for _, h := range holders {
+				labels = append(labels, h.Label)
+			}
+			calls <- call{labels, changed}
+		})
+	}()
+	next := func() call {
+		t.Helper()
+		select {
+		case c := <-calls:
+			return c
+		case <-time.After(5 * time.Second):
+			t.Fatal("onWait was not called")
+			return call{}
+		}
 	}
 
-	// A closed file cannot be locked for a reason that is not a live holder.
-	contender.Close()
-	if locked, err := tryLockFile(contender); locked || err == nil {
-		t.Fatalf("unlockable file: locked=%v err=%v, want false and an error", locked, err)
+	if c := next(); !c.changed || len(c.labels) != 1 || c.labels[0] != "run a (one)" {
+		t.Fatalf("first call = %+v, want changed and naming run a (one)", c)
+	}
+	if c := next(); c.changed || len(c.labels) != 1 || c.labels[0] != "run a (one)" {
+		t.Fatalf("heartbeat = %+v, want unchanged and still naming run a (one)", c)
+	}
+
+	held.Release()
+	requireAdmitted(t, first, "run b (two)")
+	for {
+		c := next()
+		if !c.changed {
+			continue
+		}
+		if len(c.labels) != 1 || c.labels[0] != "run b (two)" {
+			t.Fatalf("after the slot changed hands = %+v, want run b (two)", c)
+		}
+		return
 	}
 }
