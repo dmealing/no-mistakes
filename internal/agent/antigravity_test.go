@@ -766,3 +766,45 @@ func TestAntigravityAgent_FailedTurnReportsTheConversationAgyServed(t *testing.T
 		t.Error("agy reported no usage; the result must not claim it did")
 	}
 }
+
+// The pipeline scopes environment to one turn through RunOpts.Env (the Test
+// step's slot-held marker travels this way), so the agy process must see it.
+func TestAntigravityAgentPassesInvocationEnvironmentToProcess(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("current test executable: %v", err)
+	}
+	observationPath := filepath.Join(t.TempDir(), "environment")
+	a := &antigravityAgent{bin: exe, extraArgs: []string{"-test.run=^TestAntigravityEnvHelper$", "--"}}
+
+	_, err = a.runOnce(context.Background(), RunOpts{
+		Prompt: "report environment",
+		CWD:    t.TempDir(),
+		Env: []string{
+			"NM_ANTIGRAVITY_ENV_HELPER=run",
+			"NM_ANTIGRAVITY_ENV_OBSERVATION=" + observationPath,
+			"NM_ANTIGRAVITY_INVOCATION_VALUE=present",
+		},
+	})
+	if err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	got, err := os.ReadFile(observationPath)
+	if err != nil {
+		t.Fatalf("read environment observation: %v", err)
+	}
+	if string(got) != "present" {
+		t.Fatalf("invocation environment = %q, want present", got)
+	}
+}
+
+func TestAntigravityEnvHelper(t *testing.T) {
+	if os.Getenv("NM_ANTIGRAVITY_ENV_HELPER") != "run" {
+		return
+	}
+	if err := os.WriteFile(os.Getenv("NM_ANTIGRAVITY_ENV_OBSERVATION"), []byte(os.Getenv("NM_ANTIGRAVITY_INVOCATION_VALUE")), 0o644); err != nil {
+		os.Exit(2)
+	}
+	_, _ = os.Stdout.WriteString(`{"event": "step_update", "step_update": {"text_delta": "done"}}` + "\n" + `{"event": "result", "result": {"status": "SUCCESS"}}` + "\n")
+	os.Exit(0)
+}

@@ -676,12 +676,13 @@ Share the host-wide [`test_slots`](/no-mistakes/reference/global-config/#test_sl
 no-mistakes slot run -- <command> [args...]
 ```
 
-`slot run` waits for a free slot (printing one line to stderr naming the holders), runs the command, releases the slot on any exit, and passes the command's exit code through. Use it for a full local test suite started outside a pipeline run.
+`slot run` waits for a free slot (printing one line to stderr naming the holders), runs the command, releases the slot on any exit, and passes the command's exit code through. Use it for a full local test suite started outside a pipeline run. A command that cannot be found fails at once with exit `127` and never waits for a slot.
 
-- The wait has no time limit. The hold does: a command still running after [`slot_run_max_hold`](/no-mistakes/reference/global-config/#slot_run_max_hold) is sent `SIGTERM` (then killed if it does not exit), the slot is released, and `slot run` prints one line naming the limit and exits `124`.
+- The command runs in its own process group, and the slot is released only after that whole group has stopped. Whatever the command leaves running in the group when it exits is terminated, so no test work continues outside the slot. Because the group is not the terminal's foreground group, the command cannot read from the terminal: pipe or redirect any input it needs.
+- The wait has no time limit. The hold does: when a command is still running after [`slot_run_max_hold`](/no-mistakes/reference/global-config/#slot_run_max_hold), its process group is sent `SIGTERM` (then killed if it does not exit), the slot is released, and `slot run` prints one line naming the limit and exits `124`. The limit applies only while a slot is held: with `test_slots: 0` there is no slot and no limit.
 - Other runs see the holder as the command's program name and working directory. Arguments and environment are never recorded.
-- A `SIGTERM` sent to `slot run` is forwarded to the command. Ctrl-C reaches the command directly and is not sent a second time.
-- Inside a pipeline Test step, which already holds a slot, `slot run` runs the command at once and takes no second slot, so a configured test command may wrap its suite in it. Every other pipeline step holds no slot, so `slot run` there waits for one like any other caller.
+- A `SIGTERM` sent to `slot run` terminates the command's process group. Ctrl-C, or a `SIGINT` sent to `slot run` alone, is forwarded once to the whole group as `SIGINT`; a command still running 10 seconds later is terminated.
+- Inside a pipeline Test step, which already holds a slot, `slot run` runs the command at once and takes no second slot, so a configured test command may wrap its suite in it. Every other pipeline step holds no slot, so `slot run` there waits for one like any other caller. An agent on a managed-server adapter is the exception; see [`test_slots`](/no-mistakes/reference/global-config/#test_slots).
 
 ## no-mistakes doctor
 

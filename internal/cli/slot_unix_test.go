@@ -16,11 +16,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/testslots"
 )
 
-// slotProbeScript is a command that reports the signals it receives and runs
-// until told to stop. $0 is a scratch directory: it creates "started" once its
-// traps are installed, appends to "signals", and exits when "stop" appears.
+// slotProbeScript is a command that reports the signal that stops it and
+// otherwise runs until told to stop. $0 is a scratch directory: it creates
+// "started" once its traps are installed, appends to "signals", and exits when
+// "stop" appears.
 const slotProbeScript = `trap 'echo term >> "$0/signals"; exit 0' TERM
-trap 'echo int >> "$0/signals"' INT
+trap 'echo int >> "$0/signals"; exit 0' INT
 : > "$0/started"
 while [ ! -e "$0/stop" ]; do sleep 0.05; done`
 
@@ -205,11 +206,11 @@ func TestSlotRunForwardsSIGTERMAsSIGTERM(t *testing.T) {
 	}
 }
 
-// Ctrl-C reaches the command through the shared process group, so slot run
-// must not send an interrupt of its own: a second one makes many test runners
-// skip teardown. Here the interrupt is sent to slot run alone, so any
-// interrupt the command sees was sent by slot run.
-func TestSlotRunNeverSendsItsCommandAnInterrupt(t *testing.T) {
+// The command is not in the terminal's foreground process group, so Ctrl-C
+// reaches it only if slot run forwards it. One interrupt must arrive as one
+// interrupt: a second makes many test runners skip teardown, and a SIGTERM in
+// its place denies the command its interrupt handling.
+func TestSlotRunForwardsAnInterruptOnceAsAnInterrupt(t *testing.T) {
 	t.Setenv("NM_HOME", t.TempDir())
 	t.Setenv(testslots.HeldEnv, "")
 	scratch, done := startSlotProbe(t)
@@ -217,10 +218,98 @@ func TestSlotRunNeverSendsItsCommandAnInterrupt(t *testing.T) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
 		t.Fatal(err)
 	}
+	if r := awaitSlotRun(t, done); r.err != nil {
+		t.Fatalf("command exits 0 from its INT trap, got %v", r.err)
+	}
+	if got := probeSignals(t, scratch); got != "int\n" {
+		t.Fatalf("command saw signals %q, want exactly one SIGINT", got)
+	}
+}
+
+// slotWrapperScript is a wrapper shell that starts a worker and waits for it,
+// the shape of `sh -c 'build && test'` or a test runner with a worker pool.
+// The wrapper neither execs nor forwards signals, so a signal sent to it alone
+// leaves the worker running. The worker appends to "beats" while it lives.
+const slotWrapperScript = `sh -c 'while :; do echo beat >> "$0/beats"; sleep 0.05; done' "$0" >/dev/null 2>&1 &
+: > "$0/started"
+wait`
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Size()
+}
+
+// A slot is released when slot run returns, so by then nothing the command
+// started may still be working: a surviving worker keeps the machine loaded
+// while the freed slot admits another suite on top of it.
+func TestSlotRunStopsTheCommandsWholeProcessTree(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(t *testing.T)
+	}{
+		{name: "hold limit", stop: func(*testing.T) {}},
+		{name: "SIGTERM", stop: func(t *testing.T) {
+			if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "SIGINT", stop: func(t *testing.T) {
+			if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("NM_HOME", home)
+			t.Setenv(testslots.HeldEnv, "")
+			hold := "1h"
+			if tc.name == "hold limit" {
+				hold = "2s"
+			}
+			if err := os.WriteFile(paths.WithRoot(home).ConfigFile(), []byte("slot_run_max_hold: \""+hold+"\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			scratch := t.TempDir()
+			done := make(chan slotRunResult, 1)
+			go func() {
+				_, stderr, err := runSlotCmd(t, "run", "--", "sh", "-c", slotWrapperScript, scratch)
+				done <- slotRunResult{stderr, err}
+			}()
+			beats := filepath.Join(scratch, "beats")
+			waitForFile(t, filepath.Join(scratch, "started"))
+			waitForFile(t, beats)
+
+			tc.stop(t)
+			awaitSlotRun(t, done)
+
+			after := fileSize(t, beats)
+			time.Sleep(500 * time.Millisecond)
+			if later := fileSize(t, beats); later != after {
+				t.Fatalf("the command's worker is still running after slot run returned (%d -> %d bytes)", after, later)
+			}
+		})
+	}
+}
+
+// slot_run_max_hold bounds how long a command may hold a slot. With
+// test_slots: 0 there is no slot, so a long command must be left alone.
+func TestSlotRunMaxHoldDoesNotApplyWithoutASlot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("NM_HOME", home)
+	t.Setenv(testslots.HeldEnv, "")
+	if err := os.WriteFile(paths.WithRoot(home).ConfigFile(), []byte("test_slots: 0\nslot_run_max_hold: \"300ms\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scratch, done := startSlotProbe(t)
 	select {
 	case r := <-done:
-		t.Fatalf("slot run stopped waiting for its command on an interrupt: %v", r.err)
-	case <-time.After(700 * time.Millisecond):
+		t.Fatalf("slot run stopped a command that held no slot: %v", r.err)
+	case <-time.After(1200 * time.Millisecond):
 	}
 	if err := os.WriteFile(filepath.Join(scratch, "stop"), nil, 0o600); err != nil {
 		t.Fatal(err)

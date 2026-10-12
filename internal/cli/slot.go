@@ -11,14 +11,15 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/testslots"
 	"github.com/spf13/cobra"
 )
 
 const (
-	// slotRunKillGrace is how long a terminated slot run command gets to
-	// exit before it is killed.
-	slotRunKillGrace = 10 * time.Second
+	// slotRunInterruptGrace is how long an interrupted slot run command gets
+	// to exit on its own before its process group is terminated.
+	slotRunInterruptGrace = 10 * time.Second
 	// slotRunHoldExpiredExitCode is the exit code of a slot run whose command
 	// was terminated at slot_run_max_hold, following timeout(1).
 	slotRunHoldExpiredExitCode = 124
@@ -40,8 +41,9 @@ func newSlotRunCmd() *cobra.Command {
 		Long: "Run a command once a test slot is free, so a full local test suite started outside a pipeline " +
 			"shares the test_slots cap with pipeline Test steps. While waiting it prints one line to stderr " +
 			"naming the holders. The slot is released when the command exits for any reason, and the command's " +
-			"exit code is passed through. A command still holding its slot after slot_run_max_hold is " +
-			"terminated and slot run exits non-zero.",
+			"exit code is passed through. The command runs in its own process group, so stopping it stops " +
+			"everything it started. A command still holding its slot after slot_run_max_hold is terminated " +
+			"and slot run exits non-zero.",
 		// The wrapped command owns its flags: `slot run go test -race` must
 		// not be parsed as slot flags.
 		DisableFlagParsing: true,
@@ -75,7 +77,14 @@ func runInSlot(cmd *cobra.Command, args []string) error {
 	defer signal.Stop(sigs)
 
 	program := filepath.Base(args[0])
-	child := exec.Command(args[0], args[1:]...)
+	if _, err := exec.LookPath(args[0]); err != nil {
+		return &exitError{code: 127, err: fmt.Errorf("start %s: %w", args[0], err)}
+	}
+	// The command leads its own process group: a wrapper shell or a test
+	// runner dies without stopping its workers, and a slot released while
+	// they run on admits more work on top of them.
+	child := exec.CommandContext(cmd.Context(), args[0], args[1:]...)
+	shellenv.ConfigureShellCommand(child)
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, cmd.OutOrStdout(), cmd.ErrOrStderr()
 	child.Env = append(os.Environ(), testslots.HeldEnv+"=1")
 
@@ -107,40 +116,28 @@ func runInSlot(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("wait for test slot: %w", err)
 		}
 		defer lease.Release()
-		if cfg.SlotRunMaxHold > 0 {
+		if cfg.TestSlots > 0 && cfg.SlotRunMaxHold > 0 {
 			timer := time.NewTimer(cfg.SlotRunMaxHold)
 			defer timer.Stop()
 			holdLimit = timer.C
 		}
 	}
 
-	if err := child.Start(); err != nil {
+	if err := shellenv.StartShellCommand(child); err != nil {
 		return &exitError{code: 127, err: fmt.Errorf("start %s: %w", args[0], err)}
 	}
+	defer shellenv.TerminateShellCommandGroup(child)
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- child.Wait() }()
 	var waitErr error
 	holdExpired := false
-	for running := true; running; {
-		select {
-		case waitErr = <-waitDone:
-			running = false
-		case sig := <-sigs:
-			// Ctrl-C reaches the command directly through the shared
-			// process group, so an interrupt is never sent a second time;
-			// a SIGTERM is delivered to this process alone and is forwarded.
-			if sig == syscall.SIGTERM {
-				waitErr = terminateSlotCommand(child, waitDone)
-				running = false
-			}
-		case <-holdLimit:
-			holdExpired = true
-			waitErr = terminateSlotCommand(child, waitDone)
-			running = false
-		case <-cmd.Context().Done():
-			waitErr = terminateSlotCommand(child, waitDone)
-			running = false
-		}
+	select {
+	case waitErr = <-waitDone:
+	case sig := <-sigs:
+		waitErr = stopSlotCommand(child, waitDone, sig)
+	case <-holdLimit:
+		holdExpired = true
+		waitErr = stopSlotCommand(child, waitDone, syscall.SIGTERM)
 	}
 	if holdExpired {
 		return &exitError{code: slotRunHoldExpiredExitCode, err: fmt.Errorf(
@@ -160,18 +157,20 @@ func runInSlot(cmd *cobra.Command, args []string) error {
 	return &exitError{code: 1, err: waitErr}
 }
 
-// terminateSlotCommand asks the command to stop with SIGTERM, kills it after
-// slotRunKillGrace (or at once where SIGTERM cannot be sent), and returns its
-// wait result.
-func terminateSlotCommand(child *exec.Cmd, waitDone <-chan error) error {
-	if err := child.Process.Signal(syscall.SIGTERM); err != nil {
-		_ = child.Process.Kill()
+// stopSlotCommand stops the command's whole process group and returns the
+// command's wait result. The group is no longer the terminal's foreground
+// group, so an interrupt reaches it only from here: it is forwarded as an
+// interrupt and the command gets slotRunInterruptGrace to finish its own
+// teardown. Every other stop, and an interrupt the command outlives or that
+// cannot be forwarded, terminates the group.
+func stopSlotCommand(child *exec.Cmd, waitDone <-chan error, sig os.Signal) error {
+	if sig == os.Interrupt && interruptSlotCommandGroup(child) == nil {
+		select {
+		case err := <-waitDone:
+			return err
+		case <-time.After(slotRunInterruptGrace):
+		}
 	}
-	select {
-	case err := <-waitDone:
-		return err
-	case <-time.After(slotRunKillGrace):
-		_ = child.Process.Kill()
-		return <-waitDone
-	}
+	shellenv.TerminateShellCommandGroup(child)
+	return <-waitDone
 }
