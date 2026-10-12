@@ -97,6 +97,41 @@ func TestExecutor_TestStepWithAFreeSlotLogsNoWait(t *testing.T) {
 	}
 }
 
+// Queue time is never Test step time (global-config.md, test_slots). A run
+// cancelled while still queued - aborted, or superseded by a new push - never
+// executed its Test step, so the failed step must not be recorded as having
+// run for as long as it waited.
+func TestExecutor_CancelledQueueWaitIsNotRecordedAsTestStepTime(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	held, _, err := testslots.NewPool(p.TestSlotsDir(), 1).Acquire(context.Background(), "run other (feature)", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
+
+	step := newPassStep(types.StepTest)
+	exec := NewExecutor(database, p, &config.Config{TestSlots: 1}, nil, []Step{step}, nil)
+	const wait = 1500 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	if err := exec.Execute(ctx, run, repo, t.TempDir()); err == nil {
+		t.Fatal("run cancelled while queued reported success")
+	}
+	if step.callCount() != 0 {
+		t.Fatal("test step executed without a slot")
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil || len(steps) != 1 {
+		t.Fatalf("steps = %v, err %v", steps, err)
+	}
+	if steps[0].Status != types.StepStatusFailed {
+		t.Fatalf("step status = %s, want failed", steps[0].Status)
+	}
+	if steps[0].DurationMS == nil || time.Duration(*steps[0].DurationMS)*time.Millisecond >= wait/2 {
+		t.Fatalf("step duration %v ms counted the %v queue wait", steps[0].DurationMS, wait)
+	}
+}
+
 func TestExecutor_TestStepReleasesSlotOnFailure(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	exec := NewExecutor(database, p, &config.Config{TestSlots: 1}, nil, []Step{newFailStep(types.StepTest, context.Canceled)}, nil)

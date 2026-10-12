@@ -118,10 +118,17 @@ func TestAcquireWaitHonorsContext(t *testing.T) {
 	p := newTestPool(t, 1)
 	held, _, _ := p.Acquire(context.Background(), "holder", nil)
 	defer held.Release()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	const timeout = 50 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if _, _, err := p.Acquire(ctx, "waiter", nil); err != context.DeadlineExceeded {
+	_, waited, err := p.Acquire(ctx, "waiter", nil)
+	if err != context.DeadlineExceeded {
 		t.Fatalf("err = %v, want deadline exceeded", err)
+	}
+	// The caller subtracts the wait from its own clock, so a wait that ends
+	// without a slot must still report how long it lasted.
+	if waited < timeout {
+		t.Fatalf("waited = %v for a wait that lasted the whole %v timeout", waited, timeout)
 	}
 }
 

@@ -37,7 +37,7 @@ func (e *Executor) executeWithTestSlot(step Step, sctx *StepContext) (*StepOutco
 		}
 	})
 	if err != nil {
-		return nil, 0, fmt.Errorf("wait for test slot: %w", err)
+		return nil, waited, fmt.Errorf("wait for test slot: %w", err)
 	}
 	defer lease.Release()
 	if waited > 0 {

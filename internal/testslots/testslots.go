@@ -99,7 +99,9 @@ func (p *Pool) slotPath(i int) string {
 // after at least DefaultNotifyInterval even when nothing changed (changed
 // false), so a caller can log on changes and heartbeat on the rest. It
 // returns the time spent waiting, zero when a slot was free at once, so the
-// caller can start its own budget clocks at acquisition.
+// caller can start its own budget clocks at acquisition. A wait that ends
+// without a slot reports its length too, so the caller never books queue
+// time as its own.
 func (p *Pool) Acquire(ctx context.Context, label string, onWait func([]Holder, bool)) (*Lease, time.Duration, error) {
 	if p == nil || p.Size <= 0 {
 		return &Lease{}, 0, nil
@@ -112,24 +114,29 @@ func (p *Pool) Acquire(ctx context.Context, label string, onWait func([]Holder, 
 		poll = DefaultPollInterval
 	}
 	start := time.Now()
+	queued := false
+	waited := func() time.Duration {
+		if !queued {
+			return 0
+		}
+		return time.Since(start)
+	}
 	var lastNotify time.Time
 	var lastSeen string
-	for queued := false; ; queued = true {
+	for {
 		if err := ctx.Err(); err != nil {
-			return nil, 0, err
+			return nil, waited(), err
 		}
 		// One scan per tick: a busy slot's open fd also yields its holder
 		// record, so waiting never re-walks the files a second time.
 		lease, holders, err := p.tryAcquire(label, onWait != nil)
 		if err != nil {
-			return nil, 0, err
+			return nil, waited(), err
 		}
 		if lease != nil {
-			if !queued {
-				return lease, 0, nil
-			}
-			return lease, time.Since(start), nil
+			return lease, waited(), nil
 		}
+		queued = true
 		if onWait != nil {
 			seen := holderKey(holders)
 			changed := lastNotify.IsZero() || seen != lastSeen
@@ -140,7 +147,7 @@ func (p *Pool) Acquire(ctx context.Context, label string, onWait func([]Holder, 
 		}
 		select {
 		case <-ctx.Done():
-			return nil, 0, ctx.Err()
+			return nil, waited(), ctx.Err()
 		case <-time.After(poll):
 		}
 	}
