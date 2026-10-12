@@ -63,6 +63,11 @@ const (
 	// kill. The CI step is exempt (its idle lifetime is owned by ci_timeout,
 	// and its monitor deliberately deduplicates unchanged poll logs).
 	DefaultStepStallTimeout = time.Hour
+
+	// DefaultTestSlots is how many runs may be inside the Test step at once
+	// across all repos on the host. 0 disables the limit.
+	DefaultTestSlots = 2
+
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
 	// daemon socket that exists but is not accepting connections.
 	DefaultDaemonConnectTimeout = 3 * time.Second
@@ -206,11 +211,15 @@ type GlobalConfig struct {
 	// survives on this machine. Global-only for the same reason as Eval: it
 	// describes local disk retention, never a repository policy, so no
 	// pushed branch may set it.
-	Worktree                  Worktree      `yaml:"-"`
-	CITimeout                 time.Duration `yaml:"-"`
-	CIMode                    CIMode        `yaml:"-"`
-	StepQuietWarning          time.Duration `yaml:"-"`
-	StepStallTimeout          time.Duration `yaml:"-"`
+	Worktree         Worktree      `yaml:"-"`
+	CITimeout        time.Duration `yaml:"-"`
+	CIMode           CIMode        `yaml:"-"`
+	StepQuietWarning time.Duration `yaml:"-"`
+	StepStallTimeout time.Duration `yaml:"-"`
+	// TestSlots caps how many runs may be inside the Test step at once across
+	// every repo on the host; 0 is unlimited. Global-only: it describes this
+	// machine's CPU budget, never repository policy.
+	TestSlots                 int           `yaml:"-"`
 	AgentTimeout              time.Duration `yaml:"-"`
 	ReviewAgentTimeout        time.Duration `yaml:"-"`
 	TestAgentTimeout          time.Duration `yaml:"-"`
@@ -287,6 +296,7 @@ type globalConfigRaw struct {
 	BabysitTimeout            string                     `yaml:"babysit_timeout"`
 	StepQuietWarning          string                     `yaml:"step_quiet_warning"`
 	StepStallTimeout          string                     `yaml:"step_stall_timeout"`
+	TestSlots                 *int                       `yaml:"test_slots"`
 	AgentTimeout              string                     `yaml:"agent_timeout"`
 	ReviewAgentTimeout        string                     `yaml:"review_agent_timeout"`
 	TestAgentTimeout          string                     `yaml:"test_agent_timeout"`
@@ -809,6 +819,7 @@ type Config struct {
 	CIMode                    CIMode
 	StepQuietWarning          time.Duration
 	StepStallTimeout          time.Duration
+	TestSlots                 int
 	AgentTimeout              time.Duration
 	ReviewAgentTimeout        time.Duration
 	TestAgentTimeout          time.Duration
@@ -1426,6 +1437,13 @@ test_agent_timeout: "30m"
 # owned by ci_timeout). Set to "off", "none", "never", "unlimited", or any
 # non-positive duration to disable the inactivity kill.
 step_stall_timeout: "1h"
+
+# Maximum number of runs inside the Test step at the same time, across every
+# repo on this machine. A run over the limit waits for a slot (its test
+# timeouts start when it gets one) and shows as queued in axi status.
+# "no-mistakes slot run -- <cmd>" takes a slot for a command run outside a
+# pipeline. 0 disables the limit.
+test_slots: 2
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
@@ -2294,6 +2312,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		CIMode:                  DefaultCIMode,
 		StepQuietWarning:        DefaultStepQuietWarning,
 		StepStallTimeout:        DefaultStepStallTimeout,
+		TestSlots:               DefaultTestSlots,
 		AgentTimeout:            DefaultAgentTimeout,
 		ReviewAgentTimeout:      DefaultReviewAgentTimeout,
 		TestAgentTimeout:        DefaultTestAgentTimeout,
@@ -2617,6 +2636,12 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.StepStallTimeout = d
+	}
+	if raw.TestSlots != nil {
+		if *raw.TestSlots < 0 {
+			return nil, fmt.Errorf("test_slots must be 0 (unlimited) or positive, got %d", *raw.TestSlots)
+		}
+		cfg.TestSlots = *raw.TestSlots
 	}
 	if raw.DaemonConnectTimeout != "" {
 		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)
@@ -3727,6 +3752,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		CIMode:                    global.CIMode,
 		StepQuietWarning:          global.StepQuietWarning,
 		StepStallTimeout:          global.StepStallTimeout,
+		TestSlots:                 global.TestSlots,
 		AgentTimeout:              global.AgentTimeout,
 		ReviewAgentTimeout:        global.ReviewAgentTimeout,
 		TestAgentTimeout:          global.TestAgentTimeout,

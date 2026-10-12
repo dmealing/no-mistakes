@@ -406,6 +406,35 @@ func TestLoadGlobal_StepStallTimeout(t *testing.T) {
 	}
 }
 
+func TestLoadGlobal_TestSlots(t *testing.T) {
+	cases := []struct {
+		yaml  string
+		want  int
+		valid bool
+	}{
+		{yaml: "step_stall_timeout: 1h\n", want: DefaultTestSlots, valid: true},
+		{yaml: "test_slots: 4\n", want: 4, valid: true},
+		{yaml: "test_slots: 0\n", want: 0, valid: true},
+		{yaml: "test_slots: -1\n", valid: false},
+	}
+	for _, tc := range cases {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(tc.yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadGlobal(path)
+		if !tc.valid {
+			if err == nil {
+				t.Fatalf("LoadGlobal accepted %q", tc.yaml)
+			}
+			continue
+		}
+		if err != nil || cfg.TestSlots != tc.want {
+			t.Fatalf("%q: test_slots = %v, err %v, want %d", tc.yaml, cfg.TestSlots, err, tc.want)
+		}
+	}
+}
+
 func TestEnsureDefaultGlobalConfig_DoesNotOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

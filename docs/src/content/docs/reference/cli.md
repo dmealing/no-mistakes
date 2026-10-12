@@ -668,6 +668,17 @@ no-mistakes stats --run <id>
 This detailed performance evidence stays local in `state.sqlite`; it is not sent to telemetry.
 The field definitions and their local/remote split are owned by [the environment reference](/reference/environment/#what-stays-local-and-what-leaves-the-machine).
 
+## no-mistakes slot
+
+Share the host-wide [`test_slots`](/no-mistakes/reference/global-config/#test_slots) pool that caps concurrent Test steps.
+
+```sh
+no-mistakes slot run -- <command> [args...]
+no-mistakes slot status
+```
+
+`slot run` waits for a free slot (printing one line to stderr naming the holders), runs the command, releases the slot on any exit, and passes the command's exit code through. Use it for a full local test suite started outside a pipeline run. `slot status` lists the current holders.
+
 ## no-mistakes doctor
 
 Check system health and dependencies.
