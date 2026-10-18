@@ -107,6 +107,7 @@ Rules:
 - Do not run tests or broader behavioral validation.
 - Focus on lint, format, and static-analysis issues only.
 - Do not report issues you already fixed.
+`+fixEstimateRule+`
 %s%s`,
 			sctx.Run.Branch,
 			baseSHA,
@@ -115,7 +116,7 @@ Rules:
 			reassessHistory,
 		)
 		if sctx.PreviousFindings != "" {
-			prompt += `
+			prompt += fixEstimatePromptSection(sctx.PreviousFindings) + `
 
 Previous lint findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
@@ -185,6 +186,7 @@ Rules:
 			fixSummaryRules(sctx, s.Name()),
 			historySection,
 		)
+		fixPrompt += fixEstimatePromptSection(sctx.PreviousFindings)
 		if sctx.PreviousFindings != "" {
 			fixPrompt += `
 

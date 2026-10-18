@@ -297,12 +297,12 @@ type GlobalConfig struct {
 	Intent GlobalIntentRaw
 	Test   TestRaw
 	// Review carries the operator's own review guidance for every gated
-	// repository. Only path_instructions exists here: like review_agents it
-	// comes from this machine, never from a pushed branch, and it can only add
-	// requirements to a review, so it sits outside the trusted-default-branch
-	// boundary. Merge renders it alongside, never instead of, the repository's
-	// trusted rules.
-	Review OperatorReviewRaw
+	// repository: path_instructions, plus the inline_fixes cost switch. Like
+	// review_agents it comes from this machine, never from a pushed branch, so
+	// it sits outside the trusted-default-branch boundary. Merge renders the
+	// path instructions alongside, never instead of, the repository's trusted
+	// rules.
+	Review GlobalReviewRaw
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
@@ -351,7 +351,7 @@ type globalConfigRaw struct {
 	PR                        GlobalPRRaw                `yaml:"pr"`
 	Intent                    GlobalIntentRaw            `yaml:"intent"`
 	Test                      TestRaw                    `yaml:"test"`
-	Review                    OperatorReviewRaw          `yaml:"review"`
+	Review                    GlobalReviewRaw            `yaml:"review"`
 	Eval                      EvalRaw                    `yaml:"eval"`
 	// Jev is the retired jev.review_assist pre-brief block. The feature was
 	// removed after the offline trial showed its candidate listing cannot
@@ -429,6 +429,17 @@ type OperatorReviewRaw struct {
 // Template and PublishIntent are deliberately not machine-wide settings.
 type GlobalPRRaw struct {
 	Appendix string `yaml:"appendix"`
+}
+
+// GlobalReviewRaw is the operator's global review block: the guidance a
+// repository_overrides entry may also add, plus machine-wide switches.
+type GlobalReviewRaw struct {
+	OperatorReviewRaw `yaml:",inline"`
+	// InlineFixes lets the reviewer apply trivial, mechanical fixes itself
+	// during a review pass instead of spending a fix round and a full
+	// re-review on them. Nil means the default (on). Global-only: neither a
+	// repository_overrides entry nor a pushed branch can set it.
+	InlineFixes *bool `yaml:"inline_fixes"`
 }
 
 // RepositoryPRRaw contains machine-local per-repository PR defaults.
@@ -1190,6 +1201,10 @@ type Review struct {
 	// reviewer session a finalize turn resumes, and `no-mistakes axi answer`.
 	Conversation     bool
 	PathInstructions []PathInstruction
+	// InlineFixes is true when the reviewer may apply trivial, mechanical
+	// fixes itself during a review pass (machine-local review.inline_fixes,
+	// default on). See ReviewStep's inline-fix handling.
+	InlineFixes bool
 	// GlobalPathInstructions come from the global config's review block.
 	GlobalPathInstructions []PathInstruction
 	// RepositoryPathInstructions come from the repository_overrides entry
@@ -1775,6 +1790,15 @@ session_reuse: true
 #   read_timeout: 15s
 #   # Executable to run. Default: quota-axi on PATH.
 #   quota_axi_path: quota-axi
+
+# Let the reviewer apply trivial, mechanical fixes itself during a review pass
+# (typos, wording, comment or documentation text, formatting, obviously dead
+# code), recording each as an applied-inline finding, instead of spending a fix
+# round and a full re-review on them. A focused verification turn reviews the
+# inline edits before the head is certified. On by default; set false to turn
+# it off.
+# review:
+#   inline_fixes: true
 
 # Log level for daemon output
 # Options: debug, info, warn, error
@@ -3111,7 +3135,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.RepositoryOverrides = overrides
 	}
-	if err := validateOperatorReview(raw.Review, cfg.RepositoryOverrides); err != nil {
+	if err := validateOperatorReview(raw.Review.OperatorReviewRaw, cfg.RepositoryOverrides); err != nil {
 		return nil, err
 	}
 	cfg.Review = raw.Review
@@ -4418,6 +4442,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 			Conversation:           repo.Review.Conversation,
 			PathInstructions:       resolvePathInstructions(repo.Review.PathInstructions),
 			GlobalPathInstructions: resolvePathInstructions(global.Review.PathInstructions),
+			InlineFixes:            global.Review.InlineFixes == nil || *global.Review.InlineFixes,
 		},
 		PR:              pr,
 		ForgeProfiles:   global.ForgeProfiles,

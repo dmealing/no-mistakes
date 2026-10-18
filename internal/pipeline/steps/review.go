@@ -160,6 +160,8 @@ Rules:
 - Return JSON with a "summary" field when you are done. Add a "verification_blocked" field, naming the missing tool and why verification could not run, only when the verification you intended could not run; otherwise omit it.
 %s%s
 
+%s
+
 Previous review findings to address:
 %s`,
 			branch,
@@ -170,6 +172,7 @@ Previous review findings to address:
 			ignorePatterns,
 			fixSummaryRules(sctx, types.StepReview),
 			historySection,
+			fixEstimatePromptLine(sctx.PreviousFindings),
 			previousFindings,
 		)
 		// Every logical agent turn owns a fresh stall budget. The fixer keeps
@@ -309,8 +312,9 @@ Previous review findings to address:
 	// fixer's removal rule has something to act on. It stays ask-user because
 	// whether extra surface is wanted is the author's call; the section
 	// deliberately adds no schema field or second reviewer.
-	prompt := fmt.Sprintf(
-		`Review the code changes and return structured findings with a risk assessment.
+	buildPrompt := func(inlineSection string) string {
+		return fmt.Sprintf(
+			`Review the code changes and return structured findings with a risk assessment.
 
 Context:
 - branch: %s
@@ -344,6 +348,7 @@ Rules:
 - Anchor every finding to a specific file and one-indexed line number in the changed code when possible.
 - When you report a defect, enumerate in that same finding every other place in the changed code where the same invariant is violated or must hold (another axis, direction, or representation; a sibling call path, command, action, or state transition; another consumer of the same input, field, or record), each as file:line with a few words. Report the class once, anchored at the primary site, instead of one site now and its siblings after the next fix. When the defect is incomplete validation of an input, response, or record, list every consumed field that is still unvalidated in that one finding.
 - Use severity "error" for problems that should absolutely not get merged, "warning" for things that are worth addressing but can be done in a follow up, and "info" for things that are nice to have.
+`+fixEstimateRule+`
 - Be concise and actionable. No generic advice like "add more tests".
 - Only comment on things that genuinely matter.
 - Do NOT report styling, formatting, linting, compilation, or type-checking issues.
@@ -370,24 +375,49 @@ Risk assessment (after listing all findings):
 - Set risk_level to "medium" if the change has room to improve but is safe to merge first with concerns addressed as follow-ups.
 - Set risk_level to "high" if the change should not be merged without explicit human approval - it is fundamental, risky, ambiguous, or has strong negative signals.
 - Provide a one-sentence risk_rationale explaining why you chose that risk level.
-- Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s%s%s%s`,
-		branch,
-		baseSHA,
-		sctx.Run.HeadSHA,
-		reviewScope,
-		baseBranch,
-		ignorePatterns,
-		reviewCoverageSection(reviewable),
-		historySection,
-		pathInstructions,
-		agent.MemoryFilesRule,
-		// LAST, so the on-prompt is the off-prompt plus this section and
-		// nothing else - the append-only property
-		// TestReviewStep_ConversationOffIsTodaysReview pins. It used to sit at
-		// the end of historySection, which upstream's later MemoryFilesRule
-		// then followed, inserting the protocol mid-prompt instead.
-		reviewQuestionProtocolSection(askDir, asked),
-	)
+- Set risk_scope to "source-or-external" when the assessment reflects source risk or enforceable external state, and to "pipeline-owned-delivery" only when it is based solely on a deferred outcome this run owns.%s%s%s%s%s`,
+			branch,
+			baseSHA,
+			sctx.Run.HeadSHA,
+			reviewScope,
+			baseBranch,
+			ignorePatterns,
+			reviewCoverageSection(reviewable),
+			historySection,
+			pathInstructions,
+			// Only the main review turn may apply inline fixes; the coverage
+			// completion turn gets the prompt without this section.
+			inlineSection,
+			agent.MemoryFilesRule,
+			// LAST, so the on-prompt is the off-prompt plus this section and
+			// nothing else - the append-only property
+			// TestReviewStep_ConversationOffIsTodaysReview pins. It used to sit at
+			// the end of historySection, which upstream's later MemoryFilesRule
+			// then followed, inserting the protocol mid-prompt instead.
+			reviewQuestionProtocolSection(askDir, asked),
+		)
+	}
+	// Inline quick fixes need a clean worktree at the start of the turn, so
+	// every edit afterwards is the reviewer's own (see review_inline.go). A
+	// coverage continuation runs no main turn - only a completion turn over the
+	// retained pass - so it never carries the inline-fix permission.
+	inlineAllowed := retained == nil && reviewInlineFixesAllowed(sctx)
+	if inlineAllowed {
+		status, err := worktreeStatus(sctx)
+		if err != nil {
+			return nil, err
+		}
+		if status != "" {
+			sctx.Log("worktree has uncommitted changes before review; inline fixes are off for this pass")
+			inlineAllowed = false
+		}
+	}
+	prompt := buildPrompt("")
+	mainPrompt := prompt
+	if inlineAllowed {
+		mainPrompt = buildPrompt(reviewInlineFixesSection(sctx.Config.ProtectedPaths))
+	}
+	inlineStartHead := sctx.Run.HeadSHA
 
 	// A review PASS keeps one session; a review ROUND never inherits another
 	// round's. Round N's fixes implement round N-1's review findings, so
@@ -413,7 +443,7 @@ Risk assessment (after listing all findings):
 	// up to reviewAnalyzerMaxAttempts. Findings come only from the attempt that
 	// validates. Every other failure returns at once, and so does a rejection
 	// from a turn its deadline or a cancellation cut short.
-	turnPrompt := prompt
+	turnPrompt := mainPrompt
 	sessionRole := pipeline.SessionRole("")
 	if convDir != "" && !sctx.Fixing {
 		// A fresh identity unless this is the finalize turn of the pass that
@@ -495,6 +525,17 @@ Risk assessment (after listing all findings):
 		findings = stripped
 	}
 
+	normalizeInlineClaims(&findings, inlineAllowed)
+	if inlineAllowed {
+		findings, err = s.applyInlineFixes(sctx, findings, inlineStartHead, baseSHA, reviewable, opts)
+		if err != nil {
+			return nil, err
+		}
+		// The verification turn reviewed the inline commit, so the round
+		// certifies the head it produced.
+		reviewTargetSHA = sctx.Run.HeadSHA
+	}
+
 	// Read the conversation the turn that just ended left behind. Answers
 	// arriving mid-turn are recorded here, once, so the next COLD reviewer -
 	// in this run or a later one - reads them as settled; open questions
@@ -531,7 +572,13 @@ Risk assessment (after listing all findings):
 		// remainder named, so a partial or fabricated record never approves.
 		completed := findings
 		if retained == nil {
-			completed, err = s.completeCoverageGaps(sctx, turnPrompt, sessionRole, opts, findings, reviewable, askDir)
+			completionPrompt := turnPrompt
+			if inlineAllowed {
+				// Same prompt minus the inline-fix permission: only the main turn
+				// may edit, so the completion turn cannot start another inline loop.
+				completionPrompt = prompt
+			}
+			completed, err = s.completeCoverageGaps(sctx, completionPrompt, sessionRole, opts, findings, reviewable, askDir)
 		}
 		if err != nil {
 			return nil, err
@@ -542,6 +589,13 @@ Risk assessment (after listing all findings):
 			sctx.Log(uncoveredReviewMessage(findings.ReviewedPaths, reviewable))
 			needsApproval = true
 		}
+	}
+	// An intent-conformance finding says the change contradicts the run's
+	// authoritative intent. It always parks here, whatever severity or action
+	// the reviewer gave it, and the executor refuses to approve it: the PR step
+	// would refuse it anyway, after Test, Document, and Push had been spent.
+	if forceIntentConformanceAskUser(&findings) {
+		needsApproval = true
 	}
 	findings.ReviewCoverageScope = currentReviewCoverageScope(sctx, baseSHA, reviewTargetSHA, reviewable)
 	findingsJSON, _ := json.Marshal(findings)
@@ -676,6 +730,10 @@ func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt
 		return findings, nil
 	}
 	completion, err := parseReviewAnalyzerOutput(result)
+	if err == nil {
+		// The completion turn may never apply inline fixes.
+		normalizeInlineClaims(&completion, false)
+	}
 	if err != nil {
 		sctx.Log(fmt.Sprintf("focused coverage pass returned invalid findings (%s); parking on the incomplete coverage record", strings.ReplaceAll(err.Error(), "\n", "; ")))
 		return findings, nil
@@ -937,6 +995,7 @@ func sanitizedPreviousFindingsForPrompt(raw string) string {
 		findings.Items[i].ReviewScope = sanitizePromptText(findings.Items[i].ReviewScope)
 		findings.Items[i].Category = sanitizePromptText(findings.Items[i].Category)
 		findings.Items[i].Check = sanitizePromptText(findings.Items[i].Check)
+		findings.Items[i].FixComplexity = types.NormalizeFixComplexity(findings.Items[i].FixComplexity)
 	}
 	findings.Summary = sanitizePromptMultilineText(findings.Summary)
 	findings.RiskLevel = sanitizePromptText(findings.RiskLevel)

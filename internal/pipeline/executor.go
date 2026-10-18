@@ -112,12 +112,11 @@ type Executor struct {
 	crashRetryBaseSHA   string
 	crashRetryRecovered bool
 
-	mu                     sync.Mutex
-	approvalCh             chan approvalResponse  // buffered channel for approval responses
-	waiting                bool                   // true when blocked on approval
-	waitingStep            types.StepName         // which step is currently awaiting approval
-	waitingApprovalRefusal string                 // non-empty: why Approve is rejected at the waiting gate
-	waitingApprovalVerify  func() (string, error) // the parked step's ApprovalOverrideVerifier, nil when it has none
+	mu                    sync.Mutex
+	approvalCh            chan approvalResponse  // buffered channel for approval responses
+	waiting               bool                   // true when blocked on approval
+	waitingStep           types.StepName         // which step is currently awaiting approval
+	waitingApprovalVerify func() (string, error) // the parked step's ApprovalOverrideVerifier, nil when it has none
 	// waitingFindings and waitingStepResultID describe the parked gate: the
 	// findings payload it showed and the step result whose rounds record what
 	// earlier rounds of this step decided. A fix response is validated against
@@ -387,8 +386,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return RespondDispositions{}, fmt.Errorf("coverage binding applies only to complete-coverage")
 	}
-	if action == types.ActionApprove && e.waitingApprovalRefusal != "" {
-		refusal := e.waitingApprovalRefusal
+	if refusal := approvalRefusal(e.waitingStep, action, e.waitingFindings); refusal != "" {
 		e.mu.Unlock()
 		return RespondDispositions{}, errors.New(refusal)
 	}
@@ -913,7 +911,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.mu.Lock()
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
-	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
 	e.waitingApprovalVerify = e.approvalVerifier(gate.step, reconcileCtx)
 	e.waitingFindings = gate.findings
 	e.waitingStepResultID = gate.stepResult.ID
@@ -1900,7 +1897,6 @@ rounds:
 			e.mu.Lock()
 			e.waiting = true
 			e.waitingStep = stepName
-			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
 			e.waitingApprovalVerify = e.approvalVerifier(step, sctx)
 			e.waitingFindings = effectiveFindings
 			e.waitingStepResultID = sr.ID

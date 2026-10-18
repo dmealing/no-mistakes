@@ -22,6 +22,10 @@ type gateFindingWire struct {
 	Line        int             `json:"line"`
 	Description string          `json:"description"`
 	Action      json.RawMessage `json:"action"`
+	// Optional fix estimate, as every finding-producing step records one.
+	FixComplexity string `json:"fix_complexity"`
+	FixLines      int    `json:"fix_lines"`
+	FixFiles      int    `json:"fix_files"`
 }
 
 type gateFindingsWire struct {
@@ -92,6 +96,12 @@ func readGateFindings(path string) ([]Finding, bool, error) {
 		if wire.Line < 0 {
 			return nil, true, fmt.Errorf("finding %q has a negative line", id)
 		}
+		if wire.FixComplexity != "" && types.NormalizeFixComplexity(wire.FixComplexity) != wire.FixComplexity {
+			return nil, true, fmt.Errorf("finding %q has an invalid fix_complexity", id)
+		}
+		if wire.FixLines < 0 || wire.FixFiles < 0 {
+			return nil, true, fmt.Errorf("finding %q has a negative fix size", id)
+		}
 		action := types.ActionAskUser
 		if len(wire.Action) > 0 {
 			var supplied string
@@ -107,6 +117,10 @@ func readGateFindings(path string) ([]Finding, bool, error) {
 			Line:        wire.Line,
 			Description: wire.Description,
 			Action:      action,
+
+			FixComplexity: wire.FixComplexity,
+			FixLines:      wire.FixLines,
+			FixFiles:      wire.FixFiles,
 		})
 	}
 	return items, true, nil

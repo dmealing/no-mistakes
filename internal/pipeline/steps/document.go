@@ -78,7 +78,7 @@ var housekeepingFindingsSchema = json.RawMessage(`{
 					"line": {"type": "integer"},
 					"description": {"type": "string"},
 					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]},
-					"category": {"type": "string", "enum": ["documentation", "lint"]}
+					"category": {"type": "string", "enum": ["documentation", "lint"]}` + fixEstimateSchemaProperties + `
 				},
 				"required": ["severity", "description", "action", "category"]
 			}
@@ -274,6 +274,7 @@ Task:
 
 Rules:
 %s
+`+fixEstimateRule+`
 %s%s`,
 		intro,
 		sctx.Run.Branch,
@@ -291,7 +292,7 @@ Rules:
 		historySection,
 	)
 	if sctx.PreviousFindings != "" {
-		prompt += `
+		prompt += fixEstimatePromptSection(sctx.PreviousFindings) + `
 
 Previous findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
