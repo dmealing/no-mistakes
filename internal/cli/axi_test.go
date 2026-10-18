@@ -365,6 +365,23 @@ func TestGateHelpForUnvalidatedTestWorkDoesNotOfferSkip(t *testing.T) {
 	}
 }
 
+func TestGateHelpForIntentConformanceReviewDoesNotOfferApprove(t *testing.T) {
+	gate := stepView{
+		Name:   "review",
+		Status: "awaiting_approval",
+		FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: "r1", Severity: "warning", Action: types.ActionAskUser, Category: types.FindingCategoryIntentConformance, Description: "intent requires the retry; the change omits it"},
+		}, "change does not match the intent"),
+	}
+	out := axiDoc(gateFields(gate)...)
+	if strings.Contains(out, "--action approve") {
+		t.Fatalf("gate help offers approve, which the executor refuses at an intent-conformance review gate:\n%s", out)
+	}
+	if !strings.Contains(out, "--action fix") || !strings.Contains(out, "corrected --intent") {
+		t.Fatalf("gate help missing the fix path or the corrected-intent path:\n%s", out)
+	}
+}
+
 func TestWriteGateShape(t *testing.T) {
 	gate := stepView{
 		Name:   "review",

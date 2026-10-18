@@ -248,6 +248,10 @@ Context:
 CI logs:
 %s`, logOutput)
 	}
+	// CI findings come from failing checks, review-bot comments, and merge
+	// conflicts, with no agent estimate, so they count as complex unless a
+	// human-added finding carries one.
+	prompt += "\n\n" + types.FixEstimateLine(targets.Findings.Items)
 	if len(targets.Findings.Items) > 0 {
 		prompt += ciSelectedFindingsPrompt(targets.Findings)
 	}

@@ -105,8 +105,20 @@ func approvalRefusal(step types.StepName, findingsJSON string) string {
 		return fmt.Sprintf("cannot approve a protected-path refusal: resolve the reported edit, then use fix to retry %s; approval would skip unfinished work", step)
 	case HasUnvalidatedWorkRefusal(findingsJSON):
 		return fmt.Sprintf("cannot approve %s: the run worktree holds work no Test turn validated and approval would publish it; inspect it as the findings describe, then use fix to validate it, or abort", step)
+	case step == types.StepReview && HasIntentConformanceRefusal(findingsJSON):
+		return "cannot approve review: an intent-conformance finding says the change does not match the run's intent, and the PR step would refuse it after Test, Document, and Push; use fix to bring the change into line with the intent, or abort and rerun with a corrected --intent"
 	}
 	return ""
+}
+
+// HasIntentConformanceRefusal identifies a review gate holding an unresolved
+// intent-conformance finding. Approving it only defers the refusal to the PR
+// step (refuseUnresolvedIntentConformance) after Test, Document, and Push have
+// run, so the executor refuses Approve at review and the automatic resolvers
+// leave the gate for an explicit fix or a corrected intent.
+func HasIntentConformanceRefusal(findingsJSON string) bool {
+	findings, _ := types.ParseFindingsJSON(findingsJSON)
+	return types.HasIntentConformanceFinding(findings.Items)
 }
 
 type ProtectedPathError struct {

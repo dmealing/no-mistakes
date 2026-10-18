@@ -75,7 +75,7 @@ var housekeepingFindingsSchema = json.RawMessage(`{
 					"line": {"type": "integer"},
 					"description": {"type": "string"},
 					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]},
-					"category": {"type": "string", "enum": ["documentation", "lint"]}
+					"category": {"type": "string", "enum": ["documentation", "lint"]}` + fixEstimateSchemaProperties + `
 				},
 				"required": ["severity", "description", "action", "category"]
 			}
@@ -247,6 +247,7 @@ Task:
 
 Rules:
 %s
+`+fixEstimateRule+`
 - The summary must be one concise sentence fragment suitable for a git commit subject.
 - Keep the summary under 10 words.%s`,
 		intro,
@@ -264,7 +265,7 @@ Rules:
 		historySection,
 	)
 	if sctx.PreviousFindings != "" {
-		prompt += `
+		prompt += fixEstimatePromptSection(sctx.PreviousFindings) + `
 
 Previous findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)

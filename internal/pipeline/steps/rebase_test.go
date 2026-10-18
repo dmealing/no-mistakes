@@ -221,7 +221,7 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Fixing = true
-	sctx.PreviousFindings = `{"findings":[{"severity":"warning","file":"other.txt","description":"merge conflict rebasing onto origin/feature"}]}`
+	sctx.PreviousFindings = `{"findings":[{"severity":"warning","file":"other.txt","description":"merge conflict rebasing onto origin/feature","fix_complexity":"moderate","fix_lines":6,"fix_files":1}]}`
 	sctx.UserIntent = "user wanted conflict resolution to preserve the extracted intent"
 
 	step := &RebaseStep{}
@@ -240,6 +240,9 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	}
 	if strings.Contains(ag.calls[0].Prompt, "other.txt") && !strings.Contains(ag.calls[0].Prompt, "Current conflicted files") {
 		t.Fatalf("expected prompt to scope fixes using current conflicted files, got: %s", ag.calls[0].Prompt)
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "\nFix complexity: moderate; estimated size: 6 lines across 1 files\n") {
+		t.Errorf("rebase fix prompt missing the fix estimate line:\n%s", ag.calls[0].Prompt)
 	}
 	if !strings.Contains(ag.calls[0].Prompt, "user wanted conflict resolution to preserve the extracted intent") {
 		t.Fatalf("expected agent prompt to include extracted user intent, got: %s", ag.calls[0].Prompt)

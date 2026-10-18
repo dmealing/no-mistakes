@@ -435,7 +435,9 @@ func baselineForRound(invocations []db.AgentInvocation, round int) BaselineMetri
 		if inv.StepName != string(types.StepReview) || inv.Round != round {
 			continue
 		}
-		if inv.Purpose != "review" && inv.Purpose != "review-coverage" {
+		// The review pass's cost: the review turn, its coverage completion
+		// turn, and the read-only turn that verifies its inline fixes.
+		if inv.Purpose != "review" && inv.Purpose != "review-coverage" && inv.Purpose != "review-inline-verify" {
 			continue
 		}
 		seen = true

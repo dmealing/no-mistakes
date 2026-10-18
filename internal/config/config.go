@@ -262,11 +262,11 @@ type GlobalConfig struct {
 	Intent GlobalIntentRaw
 	Test   TestRaw
 	// Review carries the operator's own review guidance for every gated
-	// repository. Only path_instructions exists here: like review_agents it
-	// comes from this machine, never from a pushed branch, and it can only add
-	// requirements to a review, so it sits outside the trusted-default-branch
-	// boundary. Merge renders it alongside, never instead of, the repository's
-	// trusted rules.
+	// repository: path_instructions, plus the inline_fixes cost switch. Like
+	// review_agents it comes from this machine, never from a pushed branch, so
+	// it sits outside the trusted-default-branch boundary. Merge renders the
+	// path instructions alongside, never instead of, the repository's trusted
+	// rules.
 	Review OperatorReviewRaw
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
@@ -358,6 +358,11 @@ type RepositoryOverride struct {
 // one parks the gate for a human and stays the repository's decision.
 type OperatorReviewRaw struct {
 	PathInstructions []PathInstruction `yaml:"path_instructions"`
+	// InlineFixes lets the reviewer apply trivial, mechanical fixes itself
+	// during a review pass instead of spending a fix round and a full
+	// re-review on them. Nil means the default (on); a per-repository value
+	// overrides the global one. Operator-only: a pushed branch can never set it.
+	InlineFixes *bool `yaml:"inline_fixes"`
 }
 
 // RepositoryPRRaw contains machine-local per-repository PR title settings.
@@ -971,6 +976,10 @@ type Review struct {
 	// reviewer session a finalize turn resumes, and `no-mistakes axi answer`.
 	Conversation     bool
 	PathInstructions []PathInstruction
+	// InlineFixes is true when the reviewer may apply trivial, mechanical
+	// fixes itself during a review pass (machine-local review.inline_fixes,
+	// default on). See ReviewStep's inline-fix handling.
+	InlineFixes bool
 	// GlobalPathInstructions come from the global config's review block.
 	GlobalPathInstructions []PathInstruction
 	// RepositoryPathInstructions come from the repository_overrides entry
@@ -1465,6 +1474,15 @@ gate_reconcile_timeout: "30s"
 # its fixes. Supported for claude, codex, grok, and pi; other agents run cold.
 # Set false to force every agent invocation cold.
 session_reuse: true
+
+# Let the reviewer apply trivial, mechanical fixes itself during a review pass
+# (typos, wording, comment or documentation text, formatting, obviously dead
+# code), recording each as an applied-inline finding, instead of spending a fix
+# round and a full re-review on them. A focused verification turn reviews the
+# inline edits before the head is certified. On by default; set false to turn
+# it off. A repository_overrides entry may set its own review.inline_fixes.
+# review:
+#   inline_fixes: true
 
 # Log level for daemon output
 # Options: debug, info, warn, error
@@ -3787,6 +3805,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 			Conversation:           repo.Review.Conversation,
 			PathInstructions:       resolvePathInstructions(repo.Review.PathInstructions),
 			GlobalPathInstructions: resolvePathInstructions(global.Review.PathInstructions),
+			InlineFixes:            global.Review.InlineFixes == nil || *global.Review.InlineFixes,
 		},
 		PR:              pr,
 		ForgeProfiles:   global.ForgeProfiles,
@@ -3801,6 +3820,9 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	if override != nil {
 		cfg.CommandOverrides = copyCommandOverrides(override.Commands)
 		cfg.Review.RepositoryPathInstructions = resolvePathInstructions(override.Review.PathInstructions)
+		if override.Review.InlineFixes != nil {
+			cfg.Review.InlineFixes = *override.Review.InlineFixes
+		}
 		cfg.Document.RepositoryInstructions = strings.TrimSpace(override.Document.Instructions)
 	}
 

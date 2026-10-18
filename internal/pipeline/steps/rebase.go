@@ -464,7 +464,7 @@ Instructions:
 	)
 	prompt += "\n" + agent.MemoryFilesConflictRule
 	if sctx.PreviousFindings != "" {
-		prompt += "\n\nPrevious findings:\n" + sctx.PreviousFindings
+		prompt += fixEstimatePromptSection(sctx.PreviousFindings) + "\n\nPrevious findings:\n" + sctx.PreviousFindings
 	}
 	prompt += userIntentPromptSection(sctx)
 	prompt += executionContextPromptSection(sctx.WorkDir)
@@ -607,7 +607,7 @@ Instructions:
 	)
 	prompt += "\n" + agent.MemoryFilesConflictRule
 	if sctx.PreviousFindings != "" {
-		prompt += "\n\nPrevious findings:\n" + sctx.PreviousFindings
+		prompt += fixEstimatePromptSection(sctx.PreviousFindings) + "\n\nPrevious findings:\n" + sctx.PreviousFindings
 	}
 	prompt += userIntentPromptSection(sctx)
 	prompt += executionContextPromptSection(sctx.WorkDir)

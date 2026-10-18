@@ -176,3 +176,21 @@ func TestReviewRolesWithoutOverlaysIgnoreRounds(t *testing.T) {
 		t.Fatal("overlay without a takeover round served a turn")
 	}
 }
+
+// The inline-fix verification turn is a review turn: it goes to the reviewer
+// chain without a session, never to the fixer that the inline edit bypassed.
+func TestReviewAgentsRouteInlineVerificationToReviewer(t *testing.T) {
+	primary := &roleRecorder{name: "codex"}
+	reviewer := &roleRecorder{name: "claude"}
+	fixer := &roleRecorder{name: "pi", resumable: true}
+	ag := WithReviewAgents(primary, reviewer, fixer)
+	if _, err := ag.Run(context.Background(), RunOpts{Purpose: "review-inline-verify", Session: &SessionRef{ID: "prior", Agent: "pi"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(reviewer.calls) != 1 || len(fixer.calls) != 0 || len(primary.calls) != 0 {
+		t.Fatalf("inline verification routed to reviewer=%d fixer=%d primary=%d", len(reviewer.calls), len(fixer.calls), len(primary.calls))
+	}
+	if reviewer.calls[0].Session != nil {
+		t.Fatal("inline verification inherited a session")
+	}
+}

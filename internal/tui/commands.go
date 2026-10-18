@@ -128,6 +128,11 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	if pipeline.HasUnreadableReviewQuestionHistory(m.stepFindings[step.StepName]) {
 		return nil
 	}
+	// An intent-conformance finding at review needs a human decision between
+	// fixing the scope and a corrected intent, and Approve is refused there.
+	if step.StepName == types.StepReview && pipeline.HasIntentConformanceRefusal(m.stepFindings[step.StepName]) {
+		return nil
+	}
 	if !m.approvalReady(step) {
 		return nil
 	}

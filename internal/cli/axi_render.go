@@ -604,6 +604,12 @@ func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 		}
 	}
 	skip := "Run `" + respond + " --action skip` to skip this step"
+	if gate.Name == string(types.StepReview) && pipeline.HasIntentConformanceRefusal(gate.FindingsJSON) {
+		help = []string{
+			"Approve is rejected: an intent-conformance finding says the change does not match the run's intent, and the PR step would refuse it after Test, Document, and Push.",
+			"Run `" + respond + " --action fix --findings <ids> [--ignore <ids>]` to bring the change into line with the intent (do not edit files yourself), or `no-mistakes axi abort" + runFlag(runID) + "` and start a new run with a corrected --intent",
+		}
+	}
 	if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
 		help = []string{
 			"Approve is rejected: the run worktree holds work a timed-out Test agent left that no Test turn validated, and approval would publish it. The findings name that work and how to inspect it.",

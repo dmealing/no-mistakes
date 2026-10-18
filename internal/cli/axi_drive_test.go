@@ -408,6 +408,9 @@ func TestDriveRun_YesLeavesRefusalGatesAwaitingResponse(t *testing.T) {
 		{ID: types.FindingIDTestAgentTimeout, Severity: "warning", Action: types.ActionAskUser, Description: "budget cut"},
 		{ID: types.FindingIDTestAgentUnvalidatedWork, Severity: "error", Action: types.ActionAskUser, Description: "uncommitted changes to fix_test.go"},
 	}, "Test agent exceeded its invocation budget")
+	intentMismatch := findingsJSON(t, []types.Finding{
+		{ID: "r1", Severity: "warning", Action: types.ActionAskUser, Category: types.FindingCategoryIntentConformance, File: "api.go", Description: "intent requires the retry; the change omits it"},
+	}, "change does not match the intent")
 	for _, refusal := range []struct {
 		step     types.StepName
 		findings string
@@ -416,6 +419,7 @@ func TestDriveRun_YesLeavesRefusalGatesAwaitingResponse(t *testing.T) {
 	}{
 		{types.StepCI, protectedPath, "1 awaiting", "package.lock"},
 		{types.StepTest, unvalidatedWork, "2 awaiting", "fix_test.go"},
+		{types.StepReview, intentMismatch, "1 awaiting", "corrected --intent"},
 	} {
 		for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
 			t.Run(string(refusal.step)+"/"+string(status), func(t *testing.T) {

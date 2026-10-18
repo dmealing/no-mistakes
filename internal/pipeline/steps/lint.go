@@ -107,6 +107,7 @@ Rules:
 - Do not run tests or broader behavioral validation.
 - Focus on lint, format, and static-analysis issues only.
 - Do not report issues you already fixed.
+`+fixEstimateRule+`
 - The summary must be one concise sentence fragment suitable for a git commit subject.
 - Keep the summary under 10 words.%s`,
 			sctx.Run.Branch,
@@ -115,7 +116,7 @@ Rules:
 			reassessHistory,
 		)
 		if sctx.PreviousFindings != "" {
-			prompt += `
+			prompt += fixEstimatePromptSection(sctx.PreviousFindings) + `
 
 Previous lint findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
@@ -185,6 +186,7 @@ Rules:
 			sctx.Run.HeadSHA,
 			historySection,
 		)
+		fixPrompt += fixEstimatePromptSection(sctx.PreviousFindings)
 		if sctx.PreviousFindings != "" {
 			fixPrompt += `
 

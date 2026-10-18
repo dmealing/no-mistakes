@@ -98,6 +98,7 @@ rebase:
 
 review:
   path_instructions: []
+  inline_fixes: true
 
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
@@ -1040,8 +1041,25 @@ This global list together with each `repository_overrides` list is checked when 
 The repository's trusted list changes independently, so the combined set is checked again when each run starts and when a run is recovered after a daemon restart: a run whose combined rules exceed a limit fails before any step runs or resumes, with an error naming each source's entry count, rather than silently dropping a rule.
 Shorten or remove your machine-local entries to fix it.
 
-Only `path_instructions` is accepted under this block. `review.conversation` stays a repository decision, because an open question parks the gate.
+Only `path_instructions` and [`inline_fixes`](#reviewinline_fixes) are accepted under this block. `review.conversation` stays a repository decision, because an open question parks the gate.
 Changes apply to the next run, and to a run recovered after a daemon restart, which re-reads this file.
+
+### review.inline_fixes
+
+Lets the reviewer apply trivial, mechanical fixes itself instead of handing them to a fix round.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+
+```yaml
+review:
+  inline_fixes: false
+```
+
+When on, each full review pass may fix typos, wording, comment or documentation text, formatting, and obviously dead code in the files the change touches, and records each one as an `info` finding marked `applied_inline`. Anything that changes behaviour, logic, tests, or data stays an ordinary finding. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns how inline edits are committed and verified.
+Set `false` to keep every review pass read-only, as before this setting existed. A matching [`repository_overrides`](#repository_overrides) entry can set it for one repository; a repository's own `.no-mistakes.yaml` cannot.
 
 ### commit.fix_message
 
@@ -1195,7 +1213,7 @@ repository_overrides:
 `review.path_instructions` behaves like the [global list](#reviewpath_instructions): its rules render in their own labeled section after the global rules and before the repository's trusted rules, and they count toward the same combined limits.
 `document.instructions` is added to the document step's prompt in a labeled section before the repository's trusted [`document.instructions`](/no-mistakes/reference/repo-config/#documentinstructions), and like that field it augments the built-in placement policy and cannot weaken it.
 Both are additive only: the repository's trusted values still apply in full.
-Under `review` only `path_instructions` is accepted, and under `document` only `instructions`; settings that could weaken a gate, such as `no_ci`, `allow_repo_commands`, or `pr.base_branch`, are not accepted here.
+Under `review` only `path_instructions` and [`inline_fixes`](#reviewinline_fixes) are accepted, and under `document` only `instructions`; settings that could weaken a gate, such as `no_ci`, `allow_repo_commands`, or `pr.base_branch`, are not accepted here.
 
 Eval replay cases store no remote URL, so a replay does not apply a matching entry's review or documentation guidance.
 

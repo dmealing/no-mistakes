@@ -6,6 +6,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // userIntentPromptSection returns a prompt fragment describing the user intent
@@ -106,4 +107,23 @@ func cleanedUserIntent(sctx *pipeline.StepContext) string {
 		return ""
 	}
 	return intent.RedactSecrets(intent.StripAdversarial(sanitizePromptMultilineText(raw)))
+}
+
+// forceIntentConformanceAskUser makes every intent-conformance finding an
+// ask-user finding and reports whether there was one. Such a finding can only
+// be settled by fixing the change or by rerunning with a corrected intent, so
+// it must park the review whatever severity or action the reviewer chose.
+func forceIntentConformanceAskUser(findings *Findings) bool {
+	found := false
+	for i := range findings.Items {
+		if findings.Items[i].Category != types.FindingCategoryIntentConformance {
+			continue
+		}
+		found = true
+		findings.Items[i].Action = types.ActionAskUser
+		if findings.Items[i].Severity == types.FindingSeverityInfo {
+			findings.Items[i].Severity = types.FindingSeverityWarning
+		}
+	}
+	return found
 }

@@ -1,7 +1,9 @@
 package pipeline
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -100,4 +102,57 @@ func TestExecutor_AutoFixContradictingIntentParksForApproval(t *testing.T) {
 		t.Fatalf("approve fix review: %v", err)
 	}
 	waitExecutorDone(t, done)
+}
+
+// Approving a review gate that holds an intent-conformance finding only moves
+// the refusal to the PR step after Test, Document, and Push have run, so the
+// executor rejects Approve at review and keeps the gate open for fix or abort.
+func TestExecutor_RefusesApproveAtReviewWithIntentConformanceFinding(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			return &StepOutcome{
+				NeedsApproval: true,
+				Findings: `{"findings":[{"id":"r1","severity":"warning","action":"ask-user","category":"intent-conformance",` +
+					`"description":"intent requires X; the change omits it"}],"risk_level":"medium"}`,
+			}, nil
+		},
+	}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+
+	err := exec.Respond(types.StepReview, types.ActionApprove, nil)
+	if err == nil || !strings.Contains(err.Error(), "corrected --intent") {
+		t.Fatalf("approve at a review gate with an intent-conformance finding = %v, want a refusal naming the corrected intent", err)
+	}
+	got, _ := database.GetRun(run.ID)
+	if got.AwaitingAgentSince == nil {
+		t.Fatal("refused approval must leave the review gate parked")
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("executor did not stop after abort")
+	}
+}
+
+func TestApprovalRefusal_IntentConformanceOnlyAtReview(t *testing.T) {
+	findings := `{"findings":[{"id":"r1","severity":"warning","action":"ask-user","category":"intent-conformance","description":"d"}]}`
+	if approvalRefusal(types.StepReview, findings) == "" {
+		t.Fatal("review gate with an intent-conformance finding must refuse approve")
+	}
+	if approvalRefusal(types.StepTest, findings) != "" {
+		t.Fatal("the intent-conformance refusal applies only to the review gate")
+	}
+	if approvalRefusal(types.StepReview, `{"findings":[{"id":"r1","severity":"warning","action":"ask-user","description":"d"}]}`) != "" {
+		t.Fatal("an ordinary ask-user review finding must stay approvable")
+	}
 }
