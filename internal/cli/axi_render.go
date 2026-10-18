@@ -604,6 +604,13 @@ func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 		}
 	}
 	skip := "Run `" + respond + " --action skip` to skip this step"
+	if gate.Name == string(types.StepReview) && pipeline.HasIntentConformanceRefusal(gate.FindingsJSON) {
+		help = []string{
+			"Approve and Skip are rejected: an intent-conformance finding says the change does not match the run's intent, and the PR step would refuse it after Test, Document, and Push.",
+			"Run `" + respond + " --action fix --findings <ids> [--ignore <ids>]` to bring the change into line with the intent (do not edit files yourself), or `no-mistakes axi abort" + runFlag(runID) + "` and start a new run with a corrected --intent",
+		}
+		skip = ""
+	}
 	if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
 		help = []string{
 			"Approve is rejected: the run worktree holds work a timed-out Test agent left that no Test turn validated, and approval would publish it. The findings name that work and how to inspect it.",
@@ -611,8 +618,10 @@ func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 		}
 		skip = "Do not skip this step: the steps after Test would commit and publish the unvalidated work, so skipping needs the operator's explicit decision"
 	}
+	if skip != "" {
+		help = append(help, skip)
+	}
 	return gateFieldsWithHelp(gate, append(help,
-		skip,
 		fmt.Sprintf("Run `%s` to read the complete step summary and log", axiLogsFullCommand(gate.Name, runID)),
 		"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
 		preserveGateFixCommitsGuidance,

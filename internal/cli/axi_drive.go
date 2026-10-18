@@ -1139,6 +1139,13 @@ func driveRunScoped(ctx context.Context, progress io.Writer, client *ipc.Client,
 				fmt.Fprintf(progress, "%s: unvalidated work in the run worktree requires an explicit response; --yes leaves this gate awaiting a response\n", gate.Name)
 				return run, false, nil
 			}
+			// The change contradicts the run's intent: only a decision between
+			// fixing the scope and a corrected --intent settles it, and Approve is
+			// refused at review, so --yes has nothing it may send.
+			if gate.Name == string(types.StepReview) && pipeline.HasIntentConformanceRefusal(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: an intent-conformance finding requires an explicit response (fix the change, or abort and rerun with a corrected --intent); --yes leaves this gate awaiting a response\n", gate.Name)
+				return run, false, nil
+			}
 			gateKey := gate.Name + "\x00" + gate.Status
 			if pendingGate == gateKey {
 				// Duplicate or delayed events can race persistence after a response.

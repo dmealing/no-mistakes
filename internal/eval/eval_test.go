@@ -375,6 +375,18 @@ func TestBaselineForRoundIncludesOnlyCompleteReviewInvocationMetrics(t *testing.
 	}
 }
 
+func TestBaselineForRoundIncludesInlineFixVerification(t *testing.T) {
+	input, output, cache := 100, 20, 30
+	invocations := []db.AgentInvocation{
+		{StepName: string(types.StepReview), Round: 1, Purpose: "review", DurationMS: 100, DeltaInputTokens: &input, DeltaOutputTokens: &output, DeltaCacheReadTokens: &cache},
+		{StepName: string(types.StepReview), Round: 1, Purpose: "review-inline-verify", DurationMS: 40, DeltaInputTokens: &input, DeltaOutputTokens: &output, DeltaCacheReadTokens: &cache},
+	}
+	baseline := baselineForRound(invocations, 1)
+	if baseline.DurationMS != 140 || baseline.InputTokens != 200 {
+		t.Fatalf("review baseline = %#v, want the inline-fix verification turn counted as part of the review pass", baseline)
+	}
+}
+
 func TestScoreCandidateMatchesSameFindingID(t *testing.T) {
 	labels := Labels{Findings: []FindingGold{{
 		ID:          "error-handling",

@@ -97,16 +97,39 @@ func HasUnreadableReviewQuestionHistory(findingsJSON string) bool {
 	return false
 }
 
-// approvalRefusal reports why Approve is rejected at a gate, or "" when it is
-// accepted.
-func approvalRefusal(step types.StepName, findingsJSON string) string {
+// approvalRefusal reports why action is rejected at a gate, or "" when it is
+// accepted. Approve is refused at every gate below; Skip only at the review
+// gate holding an intent-conformance finding.
+func approvalRefusal(step types.StepName, action types.ApprovalAction, findingsJSON string) string {
+	if action == types.ActionSkip {
+		if step == types.StepReview && HasIntentConformanceRefusal(findingsJSON) {
+			return "cannot skip review: an intent-conformance finding says the change does not match the run's intent, and skipping review would publish it unresolved; use fix to bring the change into line with the intent, or abort and rerun with a corrected --intent"
+		}
+		return ""
+	}
+	if action != types.ActionApprove {
+		return ""
+	}
 	switch {
 	case HasProtectedPathRefusal(findingsJSON):
 		return fmt.Sprintf("cannot approve a protected-path refusal: resolve the reported edit, then use fix to retry %s; approval would skip unfinished work", step)
 	case HasUnvalidatedWorkRefusal(findingsJSON):
 		return fmt.Sprintf("cannot approve %s: the run worktree holds work no Test turn validated and approval would publish it; inspect it as the findings describe, then use fix to validate it, or abort", step)
+	case step == types.StepReview && HasIntentConformanceRefusal(findingsJSON):
+		return "cannot approve review: an intent-conformance finding says the change does not match the run's intent, and the PR step would refuse it after Test, Document, and Push; use fix to bring the change into line with the intent, or abort and rerun with a corrected --intent"
 	}
 	return ""
+}
+
+// HasIntentConformanceRefusal identifies a review gate holding an unresolved
+// intent-conformance finding. Approving it only defers the refusal to the PR
+// step (refuseUnresolvedIntentConformance) after Test, Document, and Push have
+// run, and skipping it reaches the PR step with no completed review for that
+// refusal to read, so the executor refuses Approve and Skip at review and the
+// automatic resolvers leave the gate for an explicit fix or a corrected intent.
+func HasIntentConformanceRefusal(findingsJSON string) bool {
+	findings, _ := types.ParseFindingsJSON(findingsJSON)
+	return types.HasIntentConformanceFinding(findings.Items)
 }
 
 type ProtectedPathError struct {

@@ -98,6 +98,7 @@ rebase:
 
 review:
   path_instructions: []
+  inline_fixes: true
 
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
@@ -1042,6 +1043,23 @@ Shorten or remove your machine-local entries to fix it.
 
 Only `path_instructions` is accepted under this block. `review.conversation` stays a repository decision, because an open question parks the gate.
 Changes apply to the next run, and to a run recovered after a daemon restart, which re-reads this file.
+
+### review.inline_fixes
+
+Lets the reviewer apply trivial, mechanical fixes itself instead of handing them to a fix round.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+
+```yaml
+review:
+  inline_fixes: false
+```
+
+When on, each full review pass may fix typos, wording, comment or documentation text, formatting, and obviously dead code in the files the change touches, and records each one as an `info` finding marked `applied_inline`. Anything that changes behaviour, logic, tests, or data stays an ordinary finding. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns how inline edits are committed and verified.
+Set `false` to keep every review pass read-only, as before this setting existed. It is global-only: neither a [`repository_overrides`](#repository_overrides) entry nor a repository's own `.no-mistakes.yaml` can set it.
 
 ### commit.fix_message
 

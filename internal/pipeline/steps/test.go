@@ -151,7 +151,9 @@ Rules:
 			scope.fixOverrideRule,
 			historySection,
 		)
-		if repair := testRepairFindings(sctx.PreviousFindings); repair != "" {
+		repair := testRepairFindings(sctx.PreviousFindings)
+		fixPrompt += fixEstimatePromptSection(repair)
+		if repair != "" {
 			fixPrompt += `
 
 Previous test findings to address:
@@ -369,7 +371,8 @@ Rules:
 - Only report actionable findings: scenario or test failures, unfixable setup issues, flaky tests you identified, or missing evidence that prevents you from demonstrating the user intent at all.
 - Do NOT report passing tests (whether existing or new), test counts, coverage summaries, or other non-actionable information.
 - If every scenario passes and there are no issues, return an empty findings array.
-- Set action to "ask-user" when a test failure seems desired and you question the author's intent of having the test in the first place. Set action to "auto-fix" for objective failures that can be safely fixed. Set action to "no-op" for informational notes.%s%s`,
+- Set action to "ask-user" when a test failure seems desired and you question the author's intent of having the test in the first place. Set action to "auto-fix" for objective failures that can be safely fixed. Set action to "no-op" for informational notes.
+`+fixEstimateRule+`%s%s`,
 		sctx.Run.Branch,
 		baseSHA,
 		sctx.Run.HeadSHA,

@@ -315,6 +315,7 @@ func runHappyPath(t *testing.T, agentName string) {
 		assertReviewWarningRun(t, h)
 		assertTestAgentNewTestFileRun(t, h)
 		assertTestAgentStagedNewTestFileRun(t, h)
+		assertReviewInlineFixRun(t, h)
 	}
 	assertRunsDefaultLimit(t, h)
 	assertGateRefDeletionDoesNotCreateRun(t, h, "configured-commands")
@@ -357,6 +358,41 @@ func cleanReviewScenario(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "scenario.yaml")
 	content := `actions:
+  - match: "Verify the trivial fixes a reviewer applied inline"
+    text: "inline fixes verified"
+    structured:
+      findings: []
+      summary: "inline fixes verified"
+      risk_level: low
+      risk_rationale: "inline edits are comment-only"
+      risk_scope: source-or-external
+  - match: "Review the code changes and return structured findings with a risk assessment.\n\nContext:\n- branch: inline-fix\n"
+    text: "fixed a typo inline"
+    edits:
+      - path: "inline-fix.txt"
+        old: "recieve"
+        new: "receive"
+    structured:
+      findings:
+        - severity: info
+          file: "inline-fix.txt"
+          line: 1
+          description: "fixed typo recieve -> receive"
+          action: no-op
+          review_scope: source
+          applied_inline: true
+      summary: "fixed one typo inline"
+      risk_level: low
+      risk_rationale: "comment-only change"
+      risk_scope: source-or-external
+  - match: "Review the code changes and return structured findings with a risk assessment.\n\nContext:\n- branch: agent-edits\n"
+    text: "no issues found"
+    structured:
+      findings: []
+      summary: "no issues found"
+      risk_level: low
+      risk_rationale: "agent edit is deterministic"
+      risk_scope: source-or-external
   - match: "report only what you could not resolve.\n\nContext:\n- branch: document-agent-error"
     text: "document agent error"
     edits:
@@ -1181,6 +1217,37 @@ func assertAgentEditCommitRun(t *testing.T, h *Harness) {
 	}
 	if string(formatted) != "formatted" {
 		t.Fatalf("formatted-by-push.txt contents = %q", string(formatted))
+	}
+}
+
+// assertReviewInlineFixRun drives a review turn that fixes a typo inline: the
+// pipeline commits the edit, verifies it in one read-only review turn, and the
+// run completes without a fix round, pushing the inline commit.
+func assertReviewInlineFixRun(t *testing.T, h *Harness) {
+	t.Helper()
+	h.CommitChange("inline-fix", "inline-fix.txt", "# we recieve events here\n", "add inline-fix branch")
+	h.PushToGate("inline-fix")
+	run := h.WaitForRun("inline-fix", 60*time.Second)
+	if run.Status != types.RunCompleted {
+		t.Fatalf("inline-fix run did not complete: status=%s error=%v", run.Status, deref(run.Error))
+	}
+	assertPushedHead(t, run.HeadSHA, h.UpstreamBranchSHA("inline-fix"))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	contents, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/inline-fix:inline-fix.txt")
+	if err != nil || string(contents) != "# we receive events here\n" {
+		t.Fatalf("inline fix not pushed: %q err=%v", contents, err)
+	}
+	log, err := h.runGit(ctx, h.UpstreamDir, "log", "--format=%s", "refs/heads/inline-fix")
+	if err != nil || !strings.Contains(string(log), "apply reviewer inline fixes") {
+		t.Fatalf("inline fix commit missing from upstream history: %s err=%v", log, err)
+	}
+	invs := h.AgentInvocations()
+	if !sawPromptContainingAll(invs, "Verify the trivial fixes a reviewer applied inline", "branch: inline-fix") {
+		t.Fatal("inline fix was not verified by a review turn")
+	}
+	if sawPromptContainingAll(invs, "Previous review findings to address", "branch: inline-fix") {
+		t.Fatal("an inline-only review round must not start a fix round")
 	}
 }
 

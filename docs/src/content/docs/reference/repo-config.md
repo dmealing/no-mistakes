@@ -544,7 +544,7 @@ Before each command execution, including a re-check after a fix, no-mistakes cre
 }
 ```
 
-This uses the existing pipeline finding shape. Each finding needs a non-empty `id`, unique within the file and stable across executions, a `severity` of `error`, `warning`, or `info`, and a non-empty `description`. IDs cannot contain commas or reuse IDs reserved by the pipeline. `file` and `line` are optional; a supplied line cannot be negative. `action` is optional and defaults to `ask-user`; accepted values are `auto-fix`, `ask-user`, and `no-op`. Enum values use these exact spellings. The report and each finding reject fields outside this schema.
+This uses the existing pipeline finding shape. Each finding needs a non-empty `id`, unique within the file and stable across executions, a `severity` of `error`, `warning`, or `info`, and a non-empty `description`. IDs cannot contain commas or reuse IDs reserved by the pipeline. `file` and `line` are optional; a supplied line cannot be negative. `action` is optional and defaults to `ask-user`; accepted values are `auto-fix`, `ask-user`, and `no-op`. The optional [fix estimate](/no-mistakes/concepts/auto-fix/#fix-estimates) fields are `fix_complexity` (`simple`, `moderate`, or `complex`) and non-negative integers `fix_lines` and `fix_files`. Enum values use these exact spellings. The report and each finding reject fields outside this schema.
 
 | Command exit | File | Gate verdict |
 |---|---|---|
