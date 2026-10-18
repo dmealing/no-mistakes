@@ -105,9 +105,11 @@ func TestExecutor_AutoFixContradictingIntentParksForApproval(t *testing.T) {
 }
 
 // Approving a review gate that holds an intent-conformance finding only moves
-// the refusal to the PR step after Test, Document, and Push have run, so the
-// executor rejects Approve at review and keeps the gate open for fix or abort.
-func TestExecutor_RefusesApproveAtReviewWithIntentConformanceFinding(t *testing.T) {
+// the refusal to the PR step after Test, Document, and Push have run, and
+// skipping it reaches the PR step with no completed review to refuse, so the
+// executor rejects Approve and Skip at review and keeps the gate open for fix
+// or abort.
+func TestExecutor_RefusesApproveAndSkipAtReviewWithIntentConformanceFinding(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
 
@@ -125,13 +127,15 @@ func TestExecutor_RefusesApproveAtReviewWithIntentConformanceFinding(t *testing.
 	done, _ := startExecutor(t, exec, run, repo, workDir)
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 
-	err := exec.Respond(types.StepReview, types.ActionApprove, nil)
-	if err == nil || !strings.Contains(err.Error(), "corrected --intent") {
-		t.Fatalf("approve at a review gate with an intent-conformance finding = %v, want a refusal naming the corrected intent", err)
-	}
-	got, _ := database.GetRun(run.ID)
-	if got.AwaitingAgentSince == nil {
-		t.Fatal("refused approval must leave the review gate parked")
+	for _, action := range []types.ApprovalAction{types.ActionApprove, types.ActionSkip} {
+		err := exec.Respond(types.StepReview, action, nil)
+		if err == nil || !strings.Contains(err.Error(), "corrected --intent") {
+			t.Fatalf("%s at a review gate with an intent-conformance finding = %v, want a refusal naming the corrected intent", action, err)
+		}
+		got, _ := database.GetRun(run.ID)
+		if got.AwaitingAgentSince == nil {
+			t.Fatalf("refused %s must leave the review gate parked", action)
+		}
 	}
 
 	if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
@@ -146,13 +150,31 @@ func TestExecutor_RefusesApproveAtReviewWithIntentConformanceFinding(t *testing.
 
 func TestApprovalRefusal_IntentConformanceOnlyAtReview(t *testing.T) {
 	findings := `{"findings":[{"id":"r1","severity":"warning","action":"ask-user","category":"intent-conformance","description":"d"}]}`
-	if approvalRefusal(types.StepReview, findings) == "" {
-		t.Fatal("review gate with an intent-conformance finding must refuse approve")
+	ordinary := `{"findings":[{"id":"r1","severity":"warning","action":"ask-user","description":"d"}]}`
+	for _, action := range []types.ApprovalAction{types.ActionApprove, types.ActionSkip} {
+		if approvalRefusal(types.StepReview, action, findings) == "" {
+			t.Fatalf("review gate with an intent-conformance finding must refuse %s", action)
+		}
+		if approvalRefusal(types.StepTest, action, findings) != "" {
+			t.Fatalf("the intent-conformance %s refusal applies only to the review gate", action)
+		}
+		if approvalRefusal(types.StepReview, action, ordinary) != "" {
+			t.Fatalf("an ordinary ask-user review finding must still accept %s", action)
+		}
 	}
-	if approvalRefusal(types.StepTest, findings) != "" {
-		t.Fatal("the intent-conformance refusal applies only to the review gate")
+	for _, action := range []types.ApprovalAction{types.ActionFix, types.ActionAbort} {
+		if approvalRefusal(types.StepReview, action, findings) != "" {
+			t.Fatalf("an intent-conformance review gate must still accept %s", action)
+		}
 	}
-	if approvalRefusal(types.StepReview, `{"findings":[{"id":"r1","severity":"warning","action":"ask-user","description":"d"}]}`) != "" {
-		t.Fatal("an ordinary ask-user review finding must stay approvable")
+}
+
+func TestApprovalRefusal_ProtectedPathStillAllowsSkip(t *testing.T) {
+	findings := `{"findings":[{"id":"` + protectedPathFindingID + `","severity":"error","action":"ask-user","description":"d"}]}`
+	if approvalRefusal(types.StepDocument, types.ActionApprove, findings) == "" {
+		t.Fatal("a protected-path refusal must refuse approve")
+	}
+	if approvalRefusal(types.StepDocument, types.ActionSkip, findings) != "" {
+		t.Fatal("a protected-path refusal never refused skip; the intent-conformance skip refusal must not widen it")
 	}
 }

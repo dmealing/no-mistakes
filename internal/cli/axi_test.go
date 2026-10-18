@@ -365,7 +365,7 @@ func TestGateHelpForUnvalidatedTestWorkDoesNotOfferSkip(t *testing.T) {
 	}
 }
 
-func TestGateHelpForIntentConformanceReviewDoesNotOfferApprove(t *testing.T) {
+func TestGateHelpForIntentConformanceReviewDoesNotOfferApproveOrSkip(t *testing.T) {
 	gate := stepView{
 		Name:   "review",
 		Status: "awaiting_approval",
@@ -374,8 +374,8 @@ func TestGateHelpForIntentConformanceReviewDoesNotOfferApprove(t *testing.T) {
 		}, "change does not match the intent"),
 	}
 	out := axiDoc(gateFields(gate)...)
-	if strings.Contains(out, "--action approve") {
-		t.Fatalf("gate help offers approve, which the executor refuses at an intent-conformance review gate:\n%s", out)
+	if strings.Contains(out, "--action approve") || strings.Contains(out, "--action skip") {
+		t.Fatalf("gate help offers approve or skip, which the executor refuses at an intent-conformance review gate:\n%s", out)
 	}
 	if !strings.Contains(out, "--action fix") || !strings.Contains(out, "corrected --intent") {
 		t.Fatalf("gate help missing the fix path or the corrected-intent path:\n%s", out)

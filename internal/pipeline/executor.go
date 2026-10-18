@@ -74,11 +74,10 @@ type Executor struct {
 	shared   *RunShared
 	workDir  string
 
-	mu                     sync.Mutex
-	approvalCh             chan approvalResponse // buffered channel for approval responses
-	waiting                bool                  // true when blocked on approval
-	waitingStep            types.StepName        // which step is currently awaiting approval
-	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	mu          sync.Mutex
+	approvalCh  chan approvalResponse // buffered channel for approval responses
+	waiting     bool                  // true when blocked on approval
+	waitingStep types.StepName        // which step is currently awaiting approval
 	// waitingFindings and waitingStepResultID describe the parked gate: the
 	// findings payload it showed and the step result whose rounds record what
 	// earlier rounds of this step decided. A fix response is validated against
@@ -257,8 +256,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return RespondDispositions{}, fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
 	}
-	if action == types.ActionApprove && e.waitingApprovalRefusal != "" {
-		refusal := e.waitingApprovalRefusal
+	if refusal := approvalRefusal(e.waitingStep, action, e.waitingFindings); refusal != "" {
 		e.mu.Unlock()
 		return RespondDispositions{}, errors.New(refusal)
 	}
@@ -669,7 +667,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.mu.Lock()
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
-	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
 	e.waitingFindings = gate.findings
 	e.waitingStepResultID = gate.stepResult.ID
 	e.waitingRoundID = gate.lastRoundID
@@ -1491,7 +1488,6 @@ rounds:
 			e.mu.Lock()
 			e.waiting = true
 			e.waitingStep = stepName
-			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
 			e.waitingFindings = effectiveFindings
 			e.waitingStepResultID = sr.ID
 			e.waitingRoundID = currentRoundID

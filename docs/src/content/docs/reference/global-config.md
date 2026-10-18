@@ -1059,7 +1059,7 @@ review:
 ```
 
 When on, each full review pass may fix typos, wording, comment or documentation text, formatting, and obviously dead code in the files the change touches, and records each one as an `info` finding marked `applied_inline`. Anything that changes behaviour, logic, tests, or data stays an ordinary finding. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns how inline edits are committed and verified.
-Set `false` to keep every review pass read-only, as before this setting existed. A matching [`repository_overrides`](#repository_overrides) entry can set it for one repository; a repository's own `.no-mistakes.yaml` cannot.
+Set `false` to keep every review pass read-only, as before this setting existed. It is global-only: neither a [`repository_overrides`](#repository_overrides) entry nor a repository's own `.no-mistakes.yaml` can set it.
 
 ### commit.fix_message
 
@@ -1213,7 +1213,7 @@ repository_overrides:
 `review.path_instructions` behaves like the [global list](#reviewpath_instructions): its rules render in their own labeled section after the global rules and before the repository's trusted rules, and they count toward the same combined limits.
 `document.instructions` is added to the document step's prompt in a labeled section before the repository's trusted [`document.instructions`](/no-mistakes/reference/repo-config/#documentinstructions), and like that field it augments the built-in placement policy and cannot weaken it.
 Both are additive only: the repository's trusted values still apply in full.
-Under `review` only `path_instructions` and [`inline_fixes`](#reviewinline_fixes) are accepted, and under `document` only `instructions`; settings that could weaken a gate, such as `no_ci`, `allow_repo_commands`, or `pr.base_branch`, are not accepted here.
+Under `review` only `path_instructions` is accepted, and under `document` only `instructions`; settings that could weaken a gate, such as `no_ci`, `allow_repo_commands`, or `pr.base_branch`, are not accepted here.
 
 Eval replay cases store no remote URL, so a replay does not apply a matching entry's review or documentation guidance.
 

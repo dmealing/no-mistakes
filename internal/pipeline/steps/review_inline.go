@@ -2,6 +2,7 @@ package steps
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -58,13 +59,21 @@ func reviewInlineFixesAllowed(sctx *pipeline.StepContext) bool {
 // reviewInlineFixesSection is the main review turn's permission to apply
 // trivial fixes itself. It is appended only when inline fixes are allowed for
 // the turn, and never to the coverage completion or verification turns.
-func reviewInlineFixesSection() string {
+func reviewInlineFixesSection(protectedPaths []string) string {
+	protected := ""
+	if len(protectedPaths) > 0 {
+		quoted := make([]string, len(protectedPaths))
+		for i, pattern := range protectedPaths {
+			quoted[i] = "`" + sanitizePromptText(pattern) + "`"
+		}
+		protected = "\n- Never edit a file matching these protected_paths patterns, even when it is in the changed-file list; report its findings as normal findings: " + strings.Join(quoted, ", ") + "."
+	}
 	return `
 
 Inline quick fixes (enabled for this pass):
 - You MAY fix a finding yourself during this pass only when the fix is trivial and mechanical: a typo, wording, comment or documentation text, formatting, or obviously dead code (unreferenced and with no behavioural effect).
 - Never apply inline a change that touches behaviour, logic, control flow, error handling, tests, configuration, data, schemas, or public interfaces. Report those as normal findings for the fixer. When in doubt, report the finding instead of fixing it.
-- Edit only files in the changed-file list above. Do not create, delete, or rename files, and do not commit; the pipeline commits your edits.
+- Edit only files in the changed-file list above. Do not create, delete, or rename files, and do not commit; the pipeline commits your edits.` + protected + `
 - Record every inline fix as a finding with applied_inline set to true, severity "info", action "no-op", fix_complexity "simple", anchored to the file and line you edited, with a description of what you changed. Every edit you make must be recorded this way.
 - Inline fixes do not shorten the review: complete the full review pass and report every other finding as usual. The pipeline verifies your inline edits separately before the head is certified.`
 }
@@ -106,9 +115,8 @@ func normalizeInlineClaims(findings *Findings, allowed bool) {
 }
 
 // revokeInlineClaims turns every applied-inline claim back into a finding the
-// fixer must handle. It is used when the turn made no edit at all, so a claim
-// has nothing behind it.
-func revokeInlineClaims(findings *Findings) int {
+// fixer must handle, prefixing each description with why no edit backs it.
+func revokeInlineClaims(findings *Findings, reason string) int {
 	revoked := 0
 	for i := range findings.Items {
 		item := &findings.Items[i]
@@ -118,7 +126,7 @@ func revokeInlineClaims(findings *Findings) int {
 		item.AppliedInline = false
 		item.Severity = types.FindingSeverityWarning
 		item.Action = types.ActionAutoFix
-		item.Description = "The reviewer recorded this as fixed inline but made no edit; fix it: " + item.Description
+		item.Description = reason + "; fix it: " + item.Description
 		revoked++
 	}
 	return revoked
@@ -143,12 +151,28 @@ func (s *ReviewStep) applyInlineFixes(sctx *pipeline.StepContext, findings Findi
 		return findings, err
 	}
 	if status == "" {
-		if n := revokeInlineClaims(&findings); n > 0 {
+		if n := revokeInlineClaims(&findings, "The reviewer recorded this as fixed inline but made no edit"); n > 0 {
 			sctx.Log(fmt.Sprintf("reviewer recorded %d inline fix(es) but made no edit; returned them to the fixer", n))
 		}
 		return findings, nil
 	}
 	committed, err := commitAgentFixesWithResult(sctx, types.StepReview, "apply reviewer inline fixes", "", nil)
+	var protectedErr *pipeline.ProtectedPathError
+	if errors.As(err, &protectedErr) {
+		// The worktree was clean at preHead before the turn, so every change
+		// is the reviewer's own and staging refused before touching the index.
+		// Revert all of it rather than park the run on a pipeline commit.
+		if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "reset", "--hard", preHead); err != nil {
+			return findings, fmt.Errorf("revert reviewer inline edits: %w", err)
+		}
+		if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "clean", "-fd"); err != nil {
+			return findings, fmt.Errorf("revert reviewer inline edits: %w", err)
+		}
+		reason := fmt.Sprintf("The reviewer fixed this inline, but its edits touched protected path %s (protected_paths rule %q) and were reverted", coveragePathLine(protectedErr.Path), protectedErr.Rule)
+		n := revokeInlineClaims(&findings, reason)
+		sctx.Log(fmt.Sprintf("reviewer inline edits touched protected path %s; reverted them and returned %d inline fix(es) to the fixer", protectedErr.Path, n))
+		return findings, nil
+	}
 	if err != nil {
 		return findings, err
 	}
@@ -157,7 +181,7 @@ func (s *ReviewStep) applyInlineFixes(sctx *pipeline.StepContext, findings Findi
 		// Dirty but nothing staged (for example a submodule pointer git add
 		// cannot record): nothing new reached the head, so there is nothing to
 		// verify and no claim is backed by a commit.
-		if n := revokeInlineClaims(&findings); n > 0 {
+		if n := revokeInlineClaims(&findings, "The reviewer recorded this as fixed inline but its edits produced no commit"); n > 0 {
 			sctx.Log(fmt.Sprintf("reviewer inline edits produced no commit; returned %d inline fix(es) to the fixer", n))
 		}
 		return findings, nil

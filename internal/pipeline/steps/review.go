@@ -420,7 +420,7 @@ Risk assessment (after listing all findings):
 	prompt := buildPrompt("")
 	mainPrompt := prompt
 	if inlineAllowed {
-		mainPrompt = buildPrompt(reviewInlineFixesSection())
+		mainPrompt = buildPrompt(reviewInlineFixesSection(sctx.Config.ProtectedPaths))
 	}
 	inlineStartHead := sctx.Run.HeadSHA
 
@@ -967,10 +967,6 @@ func approvedReviewOutcome(reviewTargetSHA string, outcome *pipeline.StepOutcome
 	outcome.ReviewApprovedHeadSHA = reviewTargetSHA
 	return outcome, nil
 }
-
-// reviewFixEstimateLine renders the fix round's one stable routing line (see
-// types.FixEstimateLine) from the findings the fixer is handed. An unreadable
-// payload has no estimate, which reads as complex.
 
 func sanitizedPreviousFindingsForPrompt(raw string) string {
 	findings, err := types.ParseFindingsJSON(raw)

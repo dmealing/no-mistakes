@@ -1,20 +1,20 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMerge_ReviewInlineFixes(t *testing.T) {
 	t.Parallel()
 
-	const remote = "https://github.com/acme/widget.git"
 	for name, tc := range map[string]struct {
 		source string
 		want   bool
-		other  bool
 	}{
-		"default on":        {source: "log_level: info\n", want: true, other: true},
-		"global off":        {source: "review:\n  inline_fixes: false\n", want: false, other: false},
-		"override off wins": {source: "repository_overrides:\n  " + remote + ":\n    review:\n      inline_fixes: false\n", want: false, other: true},
-		"override on wins":  {source: "review:\n  inline_fixes: false\nrepository_overrides:\n  " + remote + ":\n    review:\n      inline_fixes: true\n", want: true, other: false},
+		"default on": {source: "log_level: info\n", want: true},
+		"global off": {source: "review:\n  inline_fixes: false\n", want: false},
+		"global on":  {source: "review:\n  inline_fixes: true\n", want: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -22,13 +22,20 @@ func TestMerge_ReviewInlineFixes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadGlobalFromBytes() = %v", err)
 			}
-			if got := MergeForRemote(global, &RepoConfig{}, remote).Review.InlineFixes; got != tc.want {
+			if got := MergeForRemote(global, &RepoConfig{}, "https://github.com/acme/widget.git").Review.InlineFixes; got != tc.want {
 				t.Fatalf("InlineFixes = %v, want %v", got, tc.want)
 			}
-			if got := MergeForRemote(global, &RepoConfig{}, "https://github.com/acme/other.git").Review.InlineFixes; got != tc.other {
-				t.Fatalf("non-matching remote InlineFixes = %v, want %v", got, tc.other)
-			}
 		})
+	}
+}
+
+// inline_fixes is global-only: a repository_overrides entry cannot set it, and
+// the strict decoder rejects the key there like any other unaccepted field.
+func TestLoadGlobal_RepositoryOverrideRejectsReviewInlineFixes(t *testing.T) {
+	t.Parallel()
+	source := "repository_overrides:\n  https://github.com/acme/widget.git:\n    review:\n      inline_fixes: false\n"
+	if _, err := LoadGlobalFromBytes([]byte(source)); err == nil || !strings.Contains(err.Error(), "inline_fixes") {
+		t.Fatalf("LoadGlobalFromBytes() = %v, want a rejection naming inline_fixes", err)
 	}
 }
 

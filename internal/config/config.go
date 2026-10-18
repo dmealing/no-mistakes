@@ -267,7 +267,7 @@ type GlobalConfig struct {
 	// it sits outside the trusted-default-branch boundary. Merge renders the
 	// path instructions alongside, never instead of, the repository's trusted
 	// rules.
-	Review OperatorReviewRaw
+	Review GlobalReviewRaw
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
@@ -312,7 +312,7 @@ type globalConfigRaw struct {
 	Commit                    GlobalCommitRaw            `yaml:"commit"`
 	Intent                    GlobalIntentRaw            `yaml:"intent"`
 	Test                      TestRaw                    `yaml:"test"`
-	Review                    OperatorReviewRaw          `yaml:"review"`
+	Review                    GlobalReviewRaw            `yaml:"review"`
 	Eval                      EvalRaw                    `yaml:"eval"`
 	// Jev is the retired jev.review_assist pre-brief block. The feature was
 	// removed after the offline trial showed its candidate listing cannot
@@ -358,10 +358,16 @@ type RepositoryOverride struct {
 // one parks the gate for a human and stays the repository's decision.
 type OperatorReviewRaw struct {
 	PathInstructions []PathInstruction `yaml:"path_instructions"`
+}
+
+// GlobalReviewRaw is the operator's global review block: the guidance a
+// repository_overrides entry may also add, plus machine-wide switches.
+type GlobalReviewRaw struct {
+	OperatorReviewRaw `yaml:",inline"`
 	// InlineFixes lets the reviewer apply trivial, mechanical fixes itself
 	// during a review pass instead of spending a fix round and a full
-	// re-review on them. Nil means the default (on); a per-repository value
-	// overrides the global one. Operator-only: a pushed branch can never set it.
+	// re-review on them. Nil means the default (on). Global-only: neither a
+	// repository_overrides entry nor a pushed branch can set it.
 	InlineFixes *bool `yaml:"inline_fixes"`
 }
 
@@ -1480,7 +1486,7 @@ session_reuse: true
 # code), recording each as an applied-inline finding, instead of spending a fix
 # round and a full re-review on them. A focused verification turn reviews the
 # inline edits before the head is certified. On by default; set false to turn
-# it off. A repository_overrides entry may set its own review.inline_fixes.
+# it off.
 # review:
 #   inline_fixes: true
 
@@ -2717,7 +2723,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.RepositoryOverrides = overrides
 	}
-	if err := validateOperatorReview(raw.Review, cfg.RepositoryOverrides); err != nil {
+	if err := validateOperatorReview(raw.Review.OperatorReviewRaw, cfg.RepositoryOverrides); err != nil {
 		return nil, err
 	}
 	cfg.Review = raw.Review
@@ -3820,9 +3826,6 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	if override != nil {
 		cfg.CommandOverrides = copyCommandOverrides(override.Commands)
 		cfg.Review.RepositoryPathInstructions = resolvePathInstructions(override.Review.PathInstructions)
-		if override.Review.InlineFixes != nil {
-			cfg.Review.InlineFixes = *override.Review.InlineFixes
-		}
 		cfg.Document.RepositoryInstructions = strings.TrimSpace(override.Document.Instructions)
 	}
 

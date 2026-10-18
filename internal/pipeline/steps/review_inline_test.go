@@ -201,6 +201,60 @@ func TestReviewStep_InlineClaimWithoutEditReturnsToTheFixer(t *testing.T) {
 	}
 }
 
+// An inline edit to a protected path cannot be committed by the pipeline, so
+// the pass reverts its inline edits and hands every claim back to the fixer
+// instead of failing the step into a protected-path park.
+func TestReviewStep_InlineEditToProtectedPathIsRevertedAndReturnedToTheFixer(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	original, err := os.ReadFile(filepath.Join(dir, "feature.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if opts.Purpose != "review" {
+			t.Fatalf("unexpected agent purpose %q", opts.Purpose)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature code, typo fixed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return reviewJSON(t, Findings{Items: []Finding{inlineFixClaim()}, ReviewedPaths: []string{"feature.txt"}}), nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Review.InlineFixes = true
+	sctx.Config.ProtectedPaths = []string{"feature.*"}
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("a protected inline edit must not fail the review step: %v", err)
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "`feature.*`") {
+		t.Error("inline-fix permission must name the protected_paths patterns it may not edit")
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("a reverted inline edit has nothing to verify, got %d calls", len(ag.calls))
+	}
+	if sctx.Run.HeadSHA != headSHA {
+		t.Fatal("a protected inline edit must not be committed")
+	}
+	if status := gitStatusPorcelain(t, dir); status != "" {
+		t.Fatalf("protected inline edit left in the worktree: %q", status)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "feature.txt")); string(got) != string(original) {
+		t.Fatalf("feature.txt = %q, want the pre-review content %q", got, original)
+	}
+	if !outcome.NeedsApproval {
+		t.Fatal("a reverted inline claim must become a blocking finding")
+	}
+	findings, _ := types.ParseFindingsJSON(outcome.Findings)
+	if len(findings.Items) != 1 || findings.Items[0].AppliedInline || findings.Items[0].Action != types.ActionAutoFix ||
+		!strings.Contains(findings.Items[0].Description, "protected path") {
+		t.Fatalf("expected the claim returned as an auto-fix finding naming the protected path, got %+v", findings.Items)
+	}
+}
+
 // With inline fixes off the prompt carries no permission, nothing is
 // committed, and a stray applied_inline field is ignored.
 func TestReviewStep_InlineFixesOffKeepsTodaysReview(t *testing.T) {
