@@ -1041,7 +1041,7 @@ This global list together with each `repository_overrides` list is checked when 
 The repository's trusted list changes independently, so the combined set is checked again when each run starts and when a run is recovered after a daemon restart: a run whose combined rules exceed a limit fails before any step runs or resumes, with an error naming each source's entry count, rather than silently dropping a rule.
 Shorten or remove your machine-local entries to fix it.
 
-Only `path_instructions` and [`inline_fixes`](#reviewinline_fixes) are accepted under this block. `review.conversation` stays a repository decision, because an open question parks the gate.
+Only `path_instructions` is accepted under this block. `review.conversation` stays a repository decision, because an open question parks the gate.
 Changes apply to the next run, and to a run recovered after a daemon restart, which re-reads this file.
 
 ### review.inline_fixes
