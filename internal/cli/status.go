@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/spf13/cobra"
@@ -41,6 +42,11 @@ func newStatusCmd() *cobra.Command {
 				fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  fork:"), safeurl.Redact(repo.ForkURL))
 			}
 			fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  gate:"), p.RepoDir(repo.ID))
+			ciText := "github (forge checks monitored)"
+			if config.ConfiguredCIMode().Local() {
+				ciText = config.LocalCISkipReason
+			}
+			fmt.Fprintf(w, "  %s  %s\n", sDim.Render("    ci:"), ciText)
 
 			// Check daemon status.
 			alive, _ := daemon.IsRunning(p)

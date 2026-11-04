@@ -6,6 +6,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // userIntentPromptSection returns a prompt fragment describing the user intent
@@ -91,7 +92,7 @@ func intentConformanceReviewClause(sctx *pipeline.StepContext) string {
 	// Pipeline-owned delivery outcomes (push, PR open/update, CI) are owned by
 	// later steps; review must not treat their absence as an intent
 	// contradiction. Source-verifiable required/forbidden behavior stays hard.
-	return "\n\nIntent conformance (required): the User intent above is authoritative acceptance criteria, not a hint. Later recorded human decisions amend and supersede conflicting original intent. If the change contradicts it - it removes or omits a source-verifiable behavior the criteria mark as REQUIRED, or adds a behavior they mark as FORBIDDEN - you MUST emit an \"ask-user\" finding that quotes the specific criterion and the contradicting diff hunk (or, for a removed required behavior, notes what the criteria require that is now absent from the change), even if the change is otherwise risk-clean. Do not resolve such a contradiction yourself and do not classify it \"auto-fix\". Do not treat deferred pipeline-owned delivery outcomes (remote branch not yet pushed, pull request not yet opened or updated, CI not yet observed for this run) as contradictions at this phase; later pipeline steps own those. Conformance does not replace correctness review: an authoritative intent obliges flagging contradictions but never substitutes for checking that the algorithm is correct. An implementation that satisfies every required constraint can still compute a wrong value, label, or set; flag those as ordinary source findings."
+	return "\n\nIntent conformance (required): the User intent above is authoritative acceptance criteria, not a hint. Later recorded human decisions amend and supersede conflicting original intent. If the change contradicts it - it removes or omits a source-verifiable behavior the criteria mark as REQUIRED, or adds a behavior they mark as FORBIDDEN - you MUST emit an \"ask-user\" finding with category \"intent-conformance\" that quotes the specific criterion and the contradicting diff hunk (or, for a removed required behavior, notes what the criteria require that is now absent from the change), even if the change is otherwise risk-clean. Do not resolve such a contradiction yourself and do not classify it \"auto-fix\". Set category \"intent-conformance\" only on such contradictions and omit category on every other finding. Do not treat deferred pipeline-owned delivery outcomes (remote branch not yet pushed, pull request not yet opened or updated, CI not yet observed for this run) as contradictions at this phase; later pipeline steps own those. Conformance does not replace correctness review: an authoritative intent obliges flagging contradictions but never substitutes for checking that the algorithm is correct. An implementation that satisfies every required constraint can still compute a wrong value, label, or set; flag those as ordinary source findings."
 }
 
 // cleanedUserIntent returns the trimmed, secret-redacted, adversarial-stripped
@@ -106,4 +107,23 @@ func cleanedUserIntent(sctx *pipeline.StepContext) string {
 		return ""
 	}
 	return intent.RedactSecrets(intent.StripAdversarial(sanitizePromptMultilineText(raw)))
+}
+
+// forceIntentConformanceAskUser makes every intent-conformance finding an
+// ask-user finding and reports whether there was one. Such a finding can only
+// be settled by fixing the change or by rerunning with a corrected intent, so
+// it must park the review whatever severity or action the reviewer chose.
+func forceIntentConformanceAskUser(findings *Findings) bool {
+	found := false
+	for i := range findings.Items {
+		if findings.Items[i].Category != types.FindingCategoryIntentConformance {
+			continue
+		}
+		found = true
+		findings.Items[i].Action = types.ActionAskUser
+		if findings.Items[i].Severity == types.FindingSeverityInfo {
+			findings.Items[i].Severity = types.FindingSeverityWarning
+		}
+	}
+	return found
 }

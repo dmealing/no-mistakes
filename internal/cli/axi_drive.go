@@ -19,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/closingissues"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
@@ -910,7 +911,7 @@ func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, s
 	}
 	var result ipc.StartFreshRunResult
 	if err := env.client.Call(ipc.MethodStartFreshRun, &ipc.StartFreshRunParams{
-		RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, SkipSteps: skipSteps,
+		RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, SkipSteps: config.LaunchSkipSteps(skipSteps),
 		Intent: intent, LaunchNonce: launchNonce, ValidationGeneration: validationGeneration, PRBaseBranch: baseBranch, OmitIntent: omitIntent, PiProfile: profile, VerificationPlanID: planID,
 		ClosingIssueRefs: closesIssues,
 	}, &result); err != nil {
@@ -1021,7 +1022,7 @@ func activeRunLookupParams(repoID, branch string) *ipc.GetActiveRunParams {
 }
 
 func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, baseBranch string) *ipc.RerunParams {
-	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: skipSteps, Intent: intent, PRBaseBranch: baseBranch}
+	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: config.LaunchSkipSteps(skipSteps), Intent: intent, PRBaseBranch: baseBranch}
 }
 
 // conflictingActiveRunOmitIntent reports when --no-publish-intent would be
@@ -1155,6 +1156,13 @@ func driveRunScoped(ctx context.Context, progress io.Writer, client *ipc.Client,
 			}
 			if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
 				fmt.Fprintf(progress, "%s: unvalidated work in the run worktree requires an explicit response; --yes leaves this gate awaiting a response\n", gate.Name)
+				return run, false, nil
+			}
+			// The change contradicts the run's intent: only a decision between
+			// fixing the scope and a corrected --intent settles it, and Approve is
+			// refused at review, so --yes has nothing it may send.
+			if gate.Name == string(types.StepReview) && pipeline.HasIntentConformanceRefusal(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: an intent-conformance finding requires an explicit response (fix the change, or abort and rerun with a corrected --intent); --yes leaves this gate awaiting a response\n", gate.Name)
 				return run, false, nil
 			}
 			gateKey := gate.Name + "\x00" + gate.Status
@@ -1469,6 +1477,9 @@ func renderDriveResultForRun(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool,
 		}
 		if len(rv.automaticSkips()) > 0 {
 			help = append(help, "Publication or CI verification did not run (see `run.automatic_skips` and `run.head_sha`). Report the missing evidence and its cause; this outcome does not establish CI readiness or a code failure.")
+		}
+		if rv.LocalCI {
+			help = append(help, localCICompletedGuidance)
 		}
 		if rv.PRURL != "" {
 			help = append(help, fmt.Sprintf("Open the PR: %s", rv.PRURL))

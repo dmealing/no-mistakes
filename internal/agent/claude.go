@@ -489,6 +489,9 @@ type claudeEvent struct {
 	IsError          bool            `json:"is_error,omitempty"`
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
 	Usage            *claudeUsage    `json:"usage,omitempty"`
+	ModelUsage       map[string]struct {
+		CostUSD float64 `json:"costUSD"`
+	} `json:"modelUsage,omitempty"`
 
 	// rate_limit_event fields
 	RateLimitInfo *claudeRateLimitInfo `json:"rate_limit_info,omitempty"`
@@ -557,7 +560,12 @@ type claudeContent struct {
 const claudeStructuredOutputTool = "StructuredOutput"
 
 // parseClaudeEvents reads JSONL from the reader and dispatches events.
-// It accumulates token usage and captures the final result event.
+// It captures the final result event and reports token usage from it. The
+// result event's usage is the invocation total, whereas per-message usage on
+// assistant events is partial and repeated across events of one message, so
+// summing it undercounts output and double-counts cache reads. The summed
+// assistant usage is only the fallback when no result event carries non-zero
+// usage. Per-model modelUsage costUSD on the result event is summed into CostUSD.
 // onResult, when set, is called with each result event as it is parsed.
 func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, result **claudeResult, onResult func(*claudeResult)) error {
 	scanner := bufio.NewScanner(r)
@@ -572,6 +580,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	// and used when the result event has no structured payload of its own.
 	pendingSubmissions := make(map[string]json.RawMessage)
 	var lastSubmission json.RawMessage
+	var resultCost float64
 
 	for scanner.Scan() {
 		select {
@@ -642,9 +651,14 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			}
 
 		case "result":
-			// The invocation total includes usage absent from assistant events.
-			if event.Usage != nil {
+			// The invocation total includes usage absent from assistant events. An
+			// all-zero result usage (an errored invocation) keeps the assistant sum.
+			if event.Usage != nil && *event.Usage != (claudeUsage{}) {
 				*usage = event.Usage.tokenUsage()
+			}
+			resultCost = 0
+			for _, mu := range event.ModelUsage {
+				resultCost += mu.CostUSD
 			}
 			if result != nil {
 				raw := make(json.RawMessage, len(line))
@@ -673,5 +687,9 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 		}
 	}
 
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	usage.CostUSD = resultCost
+	return nil
 }

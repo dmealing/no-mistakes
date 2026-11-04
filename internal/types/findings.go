@@ -141,6 +141,23 @@ const FindingIDTestAgentUnvalidatedWork = "test-agent-unvalidated-work"
 // records an operator's budget, not a code mistake.
 const FindingIDReviewFixRoundsExhausted = "review-fix-rounds-exhausted"
 
+// FindingCategoryIntentConformance marks a review finding that the change
+// contradicts the run's authoritative intent (see the review prompt's intent
+// conformance clause). The PR step refuses to open or update a pull request
+// while a completed review still holds one: it was approved, not fixed.
+const FindingCategoryIntentConformance = "intent-conformance"
+
+// HasIntentConformanceFinding reports whether items hold an intent-conformance
+// finding. Key on the category, never on finding prose.
+func HasIntentConformanceFinding(items []Finding) bool {
+	for _, item := range items {
+		if item.Category == FindingCategoryIntentConformance {
+			return true
+		}
+	}
+	return false
+}
+
 // Test scenario result constants: the vocabulary the test step's evidence
 // prompt instructs the agent to use for each derived scenario.
 //
@@ -214,8 +231,9 @@ type Finding struct {
 	DriverInstructions string `json:"driver_instructions,omitempty"`
 	ReviewScope        string `json:"review_scope,omitempty"`
 	// Category separates the combined document+lint housekeeping pass's
-	// findings into their owning gates and the CI step's findings by kind
-	// (see the FindingCategoryCI* constants). Empty everywhere else.
+	// findings into their owning gates, the CI step's findings by kind (see
+	// the FindingCategoryCI* constants), and flags review intent-conformance
+	// findings (FindingCategoryIntentConformance). Empty everywhere else.
 	Category string `json:"category,omitempty"`
 	// Check is the provider check name a CI finding was derived from. CheckID
 	// is the provider's opaque identity for that exact check, so same-named
@@ -223,6 +241,20 @@ type Finding struct {
 	// every non-CI finding.
 	Check   string `json:"check,omitempty"`
 	CheckID string `json:"check_id,omitempty"`
+	// FixComplexity, FixLines, and FixFiles are the reviewer's estimate of
+	// what fixing a review finding takes: complexity by the reasoning it needs
+	// (FixComplexitySimple/Moderate/Complex), and size as changed lines across
+	// files. The review fix prompt summarizes them in one stable line
+	// (FixEstimateLine) so an external agent wrapper can pick a model for the
+	// fix round. Zero values mean "not estimated". Empty on non-review findings.
+	FixComplexity string `json:"fix_complexity,omitempty"`
+	FixLines      int    `json:"fix_lines,omitempty"`
+	FixFiles      int    `json:"fix_files,omitempty"`
+	// AppliedInline records a trivial, mechanical fix the reviewer applied
+	// itself during the review pass (review.inline_fixes). Such a finding is
+	// always info/no-op: it needs no fix round, and its edit is verified by the
+	// review step's inline-fix verification turn.
+	AppliedInline bool `json:"applied_inline,omitempty"`
 }
 
 // TestScenario is one named end-to-end scenario the test step derived from the
@@ -294,6 +326,10 @@ type findingWire struct {
 	Category            string `json:"category,omitempty"`
 	Check               string `json:"check,omitempty"`
 	CheckID             string `json:"check_id,omitempty"`
+	FixComplexity       string `json:"fix_complexity,omitempty"`
+	FixLines            int    `json:"fix_lines,omitempty"`
+	FixFiles            int    `json:"fix_files,omitempty"`
+	AppliedInline       bool   `json:"applied_inline,omitempty"`
 	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
 }
 
@@ -682,6 +718,10 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Category = wire.Category
 	f.Check = wire.Check
 	f.CheckID = wire.CheckID
+	f.FixComplexity = wire.FixComplexity
+	f.FixLines = wire.FixLines
+	f.FixFiles = wire.FixFiles
+	f.AppliedInline = wire.AppliedInline
 	if f.Action == "" && wire.RequiresHumanReview != nil {
 		if *wire.RequiresHumanReview {
 			f.Action = ActionAskUser

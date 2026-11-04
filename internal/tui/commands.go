@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -75,7 +76,7 @@ func (m Model) rerunCmd(requestID uint64) tea.Cmd {
 	previousRunID := m.run.ID
 	return func() tea.Msg {
 		var rerun ipc.RerunResult
-		if err := m.client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repoID, Branch: branch, PreviousRunID: previousRunID}, &rerun); err != nil {
+		if err := m.client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repoID, Branch: branch, PreviousRunID: previousRunID, SkipSteps: config.LaunchSkipSteps(nil)}, &rerun); err != nil {
 			return rerunErrMsg{err: err, requestID: requestID}
 		}
 		var result ipc.GetRunResult
@@ -128,6 +129,11 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	// gate yourself". Keyed on the finding ID, which is the one predicate every
 	// automatic path reads.
 	if pipeline.HasUnreadableReviewQuestionHistory(m.stepFindings[step.StepName]) {
+		return nil
+	}
+	// An intent-conformance finding at review needs a human decision between
+	// fixing the scope and a corrected intent, and Approve is refused there.
+	if step.StepName == types.StepReview && pipeline.HasIntentConformanceRefusal(m.stepFindings[step.StepName]) {
 		return nil
 	}
 	if !m.approvalReady(step) {

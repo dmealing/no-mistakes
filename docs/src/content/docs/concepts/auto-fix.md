@@ -81,6 +81,24 @@ When `commands.lint` is empty, the combined housekeeping pass routes documentati
 
 Documentation findings use the same approval UI, but the `document` step treats any finding as an unresolved documentation gap or judgment call that should pause for approval.
 
+## Fix estimates
+
+The step that finds a problem also rates what fixing it takes, when it records the finding: the review, its coverage completion and inline-fix verification turns, the test agent, the lint agent, and the document pass each set `fix_complexity` on every finding they report. They judge it by the reasoning the fix needs, not by severity:
+- `simple`: a local, mechanical change whose correct form is obvious.
+- `moderate`: some reasoning about surrounding code, a few call sites, or one invariant.
+- `complex`: cross-file design, root-cause analysis, concurrency, security, or data or migration reasoning.
+
+They also set `fix_lines` and `fix_files` as a size estimate.
+The estimate travels with the finding. Every fix prompt that hands findings to an agent (Review, Test, Lint, Document, CI, rebase conflicts, and repository gates) carries the same single line:
+
+```text
+Fix complexity: <simple|moderate|complex>; estimated size: <N> lines across <M> files
+```
+
+The complexity is the highest among the handed-over findings; the size is their summed estimate. An external agent wrapper that reads the prompt can use the line to pick a model for that fix turn. no-mistakes itself never switches models on it.
+
+Some findings are recorded without any agent judgement: a failing configured command (`commands.test`, `commands.lint`, a repository gate command), a failing CI check or review-bot comment, a merge conflict, or a finding a user adds at a gate. These carry no estimate, and they count as `complex`. Sending a hard fix to a weaker model usually costs a whole extra fix round, while sending an easy fix to a stronger model costs only the price difference for one turn. Their size counts as zero, so a line reading `0 lines across 0 files` means nothing was estimated. A repository gate command can set the three fields on the findings it writes.
+
 ## User-triggered fixes
 
 When the pipeline pauses for approval, you can manually trigger a fix from the TUI or AXI interface:

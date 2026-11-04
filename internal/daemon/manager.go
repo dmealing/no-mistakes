@@ -35,6 +35,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
+	"github.com/kunchenguid/no-mistakes/internal/testslots"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 	"github.com/kunchenguid/no-mistakes/internal/worktrees"
@@ -62,6 +63,7 @@ type RunManager struct {
 	handoffRequests map[string]*handoffRequest         // runID → pending monitor request
 	ciMonitorActive map[string]bool                    // runID → CI monitor accepts observations
 	ciWakes         map[string]chan struct{}           // runID → CI poll wake signal
+	settingUp       map[string]struct{}                // runID → startRun setup in progress (row exists, executor not yet registered)
 	// runQueue holds submissions waiting for setup or an execution slot under
 	// the max_concurrent_runs cap, in submission order. Guarded by mu; see
 	// run_queue.go.
@@ -75,6 +77,10 @@ type RunManager struct {
 	db              *db.DB
 	paths           *paths.Paths
 	steps           StepFactory
+
+	// testSlots is the one test-slot pool every run's executor shares, so the
+	// test_slots cap spans all runs and repositories this daemon serves.
+	testSlots *testslots.Pool
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
@@ -134,13 +140,28 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		handoffRequests: make(map[string]*handoffRequest),
 		ciMonitorActive: make(map[string]bool),
 		ciWakes:         make(map[string]chan struct{}),
+		settingUp:       make(map[string]struct{}),
 		db:              database,
 		paths:           p,
 		steps:           stepFactory,
+		testSlots:       testslots.NewPool(),
 		subscribers:     make(map[string][]*eventMailbox),
 		stateRevs:       make(map[string]int64),
 		completedRuns:   make(map[string]bool),
 	}
+}
+
+// newExecutor is the one place the daemon builds a run's executor, so every
+// run, new or recovered, gets the same CI monitor hooks and takes its Test
+// step slot from the shared pool.
+func (m *RunManager) newExecutor(cfg *config.Config, ag agent.Agent, execSteps []pipeline.Step) *pipeline.Executor {
+	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor.SetCIObservationTransition(m.transitionCIObservation)
+	executor.SetCIMonitorLifecycle(m.transitionCIMonitorLifecycle)
+	executor.SetCIWake(m.ciWake)
+	executor.SetHandoffPending(m.handoffPending)
+	executor.SetTestSlotPool(m.testSlots)
+	return executor
 }
 
 type recoveredRunPlan struct {
@@ -528,11 +549,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		return
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
-	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
-	executor.SetCIObservationTransition(m.transitionCIObservation)
-	executor.SetCIMonitorLifecycle(m.transitionCIMonitorLifecycle)
-	executor.SetCIWake(m.ciWake)
-	executor.SetHandoffPending(m.handoffPending)
+	executor := m.newExecutor(plan.cfg, plan.agent, plan.steps)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -541,6 +558,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		}()
 	})
 	executor.SetForgeContext(plan.forge)
+	applyCIMode(executor, plan.cfg.CIMode)
 	done := make(chan struct{})
 	spawn := func() {
 		m.wg.Add(1)
@@ -1736,6 +1754,14 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
+	// Shield the fresh row from the dead-run watchdog for the rest of setup:
+	// worktree checkout and the trusted default-branch fetch can legitimately
+	// take minutes on a large repo, and the row has no executor yet. On the
+	// success path the executor is registered before this defer runs; every
+	// failure path finalizes the row via UpdateRunError; a mid-setup panic
+	// leaves a pending row the watchdog then rightly finalizes after its grace.
+	m.beginRunSetup(run.ID)
+	defer m.endRunSetup(run.ID)
 	if intentCheckJSON != "" {
 		if err := m.db.SetRunIntentCheck(run.ID, intentCheckJSON); err != nil {
 			m.db.UpdateRunError(run.ID, fmt.Sprintf("pin intent check: %s", err))
@@ -2014,16 +2040,13 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())
-	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
-	executor.SetCIObservationTransition(m.transitionCIObservation)
-	executor.SetCIMonitorLifecycle(m.transitionCIMonitorLifecycle)
-	executor.SetCIWake(m.ciWake)
-	executor.SetHandoffPending(m.handoffPending)
+	executor := m.newExecutor(cfg, ag, execSteps)
 	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
 	if retry != nil {
 		executor.SetRetrySource(retry.source.ID)
 	}
+	applyCIMode(executor, cfg.CIMode)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -2535,6 +2558,56 @@ func (m *RunManager) Shutdown() {
 	case <-time.After(30 * time.Second):
 		slog.Warn("timed out waiting for runs to finish during shutdown")
 	}
+}
+
+// tracksRun reports whether this daemon currently owns the run: a live
+// executor goroutine, a startRun setup still in progress (the run row exists
+// before the executor is registered), or a run waiting in the
+// max_concurrent_runs queue for an execution slot.
+func (m *RunManager) tracksRun(runID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.cancels[runID]; ok {
+		return true
+	}
+	if _, ok := m.settingUp[runID]; ok {
+		return true
+	}
+	for _, qe := range m.runQueue {
+		if qe.spawn != nil && qe.runID == runID {
+			return true
+		}
+	}
+	return false
+}
+
+// beginRunSetup marks a run row as owned by an in-progress startRun, so the
+// dead-run watchdog does not mistake a long (but attended) setup for an
+// orphaned row. endRunSetup releases the mark.
+func (m *RunManager) beginRunSetup(runID string) {
+	m.mu.Lock()
+	m.settingUp[runID] = struct{}{}
+	m.mu.Unlock()
+}
+
+func (m *RunManager) endRunSetup(runID string) {
+	m.mu.Lock()
+	delete(m.settingUp, runID)
+	m.mu.Unlock()
+}
+
+// cancelRunWithCause cancels a tracked run's context with the given cause; the
+// executor persists the cause as the run's terminal error. Returns false when
+// the run has no live executor in this daemon.
+func (m *RunManager) cancelRunWithCause(runID string, cause error) bool {
+	m.mu.Lock()
+	cancel, ok := m.cancels[runID]
+	m.mu.Unlock()
+	if !ok {
+		return false
+	}
+	cancel(cause)
+	return true
 }
 
 // HandleCancel stops an active run and propagates cancellation to the executor.

@@ -86,6 +86,7 @@ Rules:
 		fixSummaryRules(sctx, s.Name()),
 		executionContextPromptSection(sctx.WorkDir)+roundHistoryPromptSection(sctx)+userIntentPromptSection(sctx),
 	)
+	prompt += fixEstimatePromptSection(sctx.PreviousFindings)
 	if sctx.PreviousFindings != "" {
 		prompt += `
 

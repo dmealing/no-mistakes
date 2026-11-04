@@ -223,7 +223,14 @@ auto_fix:
   document: 0
   ci: 0
 `, h.agentName, h.agentName, binLink)
-	if extra := strings.TrimSpace(h.globalConfigExtra); extra != "" {
+	// The local fork build defaults to ci_mode: local, which skips the CI step;
+	// these journeys exercise the upstream pipeline, so they run in github mode
+	// unless a test sets ci_mode itself.
+	extra := strings.TrimSpace(h.globalConfigExtra)
+	if !strings.Contains(extra, "ci_mode:") {
+		cfg += "ci_mode: github\n"
+	}
+	if extra != "" {
 		cfg += extra + "\n"
 	}
 	if err := os.WriteFile(configPath, []byte(cfg), 0o644); err != nil {

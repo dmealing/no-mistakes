@@ -468,3 +468,33 @@ func TestCustomGateStep_EachCommandGetsAFreshFile(t *testing.T) {
 		t.Fatalf("second execution = %+v, %v, want legacy clean pass", outcome, err)
 	}
 }
+
+// A gate command is the finder of what it reports, so it may rate each fix;
+// the rating must use the shared vocabulary and non-negative sizes.
+func TestReadGateFindings_FixEstimates(t *testing.T) {
+	t.Parallel()
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "findings.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	items, explicit, err := readGateFindings(write(t, `{"findings":[{"id":"g1","severity":"error","description":"d","fix_complexity":"moderate","fix_lines":12,"fix_files":2}]}`))
+	if err != nil || !explicit {
+		t.Fatalf("readGateFindings() = %v, explicit=%v", err, explicit)
+	}
+	if got := items[0]; got.FixComplexity != types.FixComplexityModerate || got.FixLines != 12 || got.FixFiles != 2 {
+		t.Fatalf("estimate lost: %+v", got)
+	}
+	for name, body := range map[string]string{
+		"unknown complexity": `{"findings":[{"id":"g1","severity":"error","description":"d","fix_complexity":"trivial"}]}`,
+		"negative lines":     `{"findings":[{"id":"g1","severity":"error","description":"d","fix_lines":-1}]}`,
+		"negative files":     `{"findings":[{"id":"g1","severity":"error","description":"d","fix_files":-1}]}`,
+	} {
+		if _, _, err := readGateFindings(write(t, body)); err == nil {
+			t.Errorf("%s: readGateFindings() accepted an invalid estimate", name)
+		}
+	}
+}

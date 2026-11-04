@@ -215,7 +215,7 @@ var findingsSchema = json.RawMessage(`{
 					"file": {"type": "string"},
 					"line": {"type": "integer"},
 					"description": {"type": "string"},
-					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]}
+					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]}` + fixEstimateSchemaProperties + `
 				},
 				"required": ["severity", "description", "action"]
 			}
@@ -245,7 +245,7 @@ var testFindingsSchema = json.RawMessage(`{
 					"file": {"type": "string"},
 					"line": {"type": "integer"},
 					"description": {"type": "string"},
-					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]}
+					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]}` + fixEstimateSchemaProperties + `
 				},
 				"required": ["severity", "description", "action"]
 			}
@@ -312,7 +312,9 @@ var reviewFindingsSchema = json.RawMessage(`{
 					"line": {"type": "integer"},
 					"description": {"type": "string"},
 					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]},
-					"review_scope": {"type": "string", "enum": ["source", "pipeline-owned-delivery", "external-delivery"]}
+					"review_scope": {"type": "string", "enum": ["source", "pipeline-owned-delivery", "external-delivery"]},
+					"category": {"type": "string", "enum": ["intent-conformance"]}` + fixEstimateSchemaProperties + `,
+					"applied_inline": {"type": "boolean", "description": "True only when the reviewer already applied this trivial fix itself during the pass"}
 				},
 				"required": ["severity", "description", "action", "review_scope"]
 			}

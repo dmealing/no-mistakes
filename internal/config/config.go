@@ -56,6 +56,18 @@ const (
 	// invocation, including the post-test evidence-gathering turn and a
 	// Test-repair turn, so a silent agent cannot leave a run active forever.
 	DefaultTestAgentTimeout = 30 * time.Minute
+	// DefaultStepStallTimeout is how long a running/fixing non-CI step can go
+	// without any log or agent lifecycle activity before the daemon's dead-run
+	// watchdog declares the run dead and fails it. It is deliberately much
+	// longer than step_quiet_warning: quiet is a display hint, stall is a
+	// kill. The CI step is exempt (its idle lifetime is owned by ci_timeout,
+	// and its monitor deliberately deduplicates unchanged poll logs).
+	DefaultStepStallTimeout = time.Hour
+
+	// DefaultTestSlots is how many runs may be executing their Test step at
+	// once across all repos on the host. 0 disables the limit.
+	DefaultTestSlots = 2
+
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
 	// daemon socket that exists but is not accepting connections.
 	DefaultDaemonConnectTimeout = 3 * time.Second
@@ -225,9 +237,16 @@ type GlobalConfig struct {
 	// survives on this machine. Global-only for the same reason as Eval: it
 	// describes local disk retention, never a repository policy, so no
 	// pushed branch may set it.
-	Worktree          Worktree      `yaml:"-"`
-	CITimeout         time.Duration `yaml:"-"`
-	StepQuietWarning  time.Duration `yaml:"-"`
+	Worktree         Worktree      `yaml:"-"`
+	CITimeout        time.Duration `yaml:"-"`
+	CIMode           CIMode        `yaml:"-"`
+	StepQuietWarning time.Duration `yaml:"-"`
+	StepStallTimeout time.Duration `yaml:"-"`
+	// TestSlots caps how many runs may be executing their Test step at once
+	// across every repo on the host; 0 is unlimited. A parked Test step holds
+	// no slot. Global-only: it describes this machine's CPU budget, never
+	// repository policy.
+	TestSlots         int           `yaml:"-"`
 	AgentTimeout      time.Duration `yaml:"-"`
 	AgentCrashRetries int           `yaml:"-"`
 	// MaxConcurrentRuns caps how many pipeline runs may execute at once on
@@ -278,12 +297,12 @@ type GlobalConfig struct {
 	Intent GlobalIntentRaw
 	Test   TestRaw
 	// Review carries the operator's own review guidance for every gated
-	// repository. Only path_instructions exists here: like review_agents it
-	// comes from this machine, never from a pushed branch, and it can only add
-	// requirements to a review, so it sits outside the trusted-default-branch
-	// boundary. Merge renders it alongside, never instead of, the repository's
-	// trusted rules.
-	Review OperatorReviewRaw
+	// repository: path_instructions, plus the inline_fixes cost switch. Like
+	// review_agents it comes from this machine, never from a pushed branch, so
+	// it sits outside the trusted-default-branch boundary. Merge renders the
+	// path instructions alongside, never instead of, the repository's trusted
+	// rules.
+	Review GlobalReviewRaw
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
@@ -306,12 +325,15 @@ type globalConfigRaw struct {
 	WorktreeRoots             map[string]string          `yaml:"worktree_roots"`
 	Worktree                  WorktreeRaw                `yaml:"worktree"`
 	CITimeout                 string                     `yaml:"ci_timeout"`
+	CIMode                    string                     `yaml:"ci_mode"`
 	DaemonConnectTimeout      string                     `yaml:"daemon_connect_timeout"`
 	BranchSyncRemoteTimeout   string                     `yaml:"branch_sync_remote_timeout"`
 	GateReconcileInterval     string                     `yaml:"gate_reconcile_interval"`
 	GateReconcileTimeout      string                     `yaml:"gate_reconcile_timeout"`
 	BabysitTimeout            string                     `yaml:"babysit_timeout"`
 	StepQuietWarning          string                     `yaml:"step_quiet_warning"`
+	StepStallTimeout          string                     `yaml:"step_stall_timeout"`
+	TestSlots                 *int                       `yaml:"test_slots"`
 	AgentTimeout              string                     `yaml:"agent_timeout"`
 	AgentCrashRetries         int                        `yaml:"agent_crash_retries"`
 	MaxConcurrentRuns         int                        `yaml:"max_concurrent_runs"`
@@ -329,7 +351,7 @@ type globalConfigRaw struct {
 	PR                        GlobalPRRaw                `yaml:"pr"`
 	Intent                    GlobalIntentRaw            `yaml:"intent"`
 	Test                      TestRaw                    `yaml:"test"`
-	Review                    OperatorReviewRaw          `yaml:"review"`
+	Review                    GlobalReviewRaw            `yaml:"review"`
 	Eval                      EvalRaw                    `yaml:"eval"`
 	// Jev is the retired jev.review_assist pre-brief block. The feature was
 	// removed after the offline trial showed its candidate listing cannot
@@ -407,6 +429,17 @@ type OperatorReviewRaw struct {
 // Template and PublishIntent are deliberately not machine-wide settings.
 type GlobalPRRaw struct {
 	Appendix string `yaml:"appendix"`
+}
+
+// GlobalReviewRaw is the operator's global review block: the guidance a
+// repository_overrides entry may also add, plus machine-wide switches.
+type GlobalReviewRaw struct {
+	OperatorReviewRaw `yaml:",inline"`
+	// InlineFixes lets the reviewer apply trivial, mechanical fixes itself
+	// during a review pass instead of spending a fix round and a full
+	// re-review on them. Nil means the default (on). Global-only: neither a
+	// repository_overrides entry nor a pushed branch can set it.
+	InlineFixes *bool `yaml:"inline_fixes"`
 }
 
 // RepositoryPRRaw contains machine-local per-repository PR defaults.
@@ -981,7 +1014,10 @@ type Config struct {
 	QuotaProviders            map[string]string
 	ReviewAgents              map[string]ReviewAgent
 	CITimeout                 time.Duration
+	CIMode                    CIMode
 	StepQuietWarning          time.Duration
+	StepStallTimeout          time.Duration
+	TestSlots                 int
 	AgentTimeout              time.Duration
 	AgentCrashRetries         int
 	AgentTimeoutsConfigured   bool
@@ -1165,6 +1201,10 @@ type Review struct {
 	// reviewer session a finalize turn resumes, and `no-mistakes axi answer`.
 	Conversation     bool
 	PathInstructions []PathInstruction
+	// InlineFixes is true when the reviewer may apply trivial, mechanical
+	// fixes itself during a review pass (machine-local review.inline_fixes,
+	// default on). See ReviewStep's inline-fix handling.
+	InlineFixes bool
 	// GlobalPathInstructions come from the global config's review block.
 	GlobalPathInstructions []PathInstruction
 	// RepositoryPathInstructions come from the repository_overrides entry
@@ -1279,6 +1319,12 @@ type TestRaw struct {
 	// (see EffectiveRepoConfig): a contributor's pushed branch must not be able
 	// to waive the configured-test gate that validates it.
 	AllowApproveOverFailure string `yaml:"allow_approve_over_failure"`
+	// LiveEvidence, when explicitly false, skips the live-evidence agent when
+	// commands.test ran and passed: the configured suite is then the whole
+	// test step. A failing baseline still gets the agent, which diagnoses it.
+	// Like instructions it is trusted-only (see EffectiveRepoConfig): a pushed
+	// branch must not be able to switch off the validation of itself.
+	LiveEvidence *bool `yaml:"live_evidence"`
 }
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
@@ -1332,6 +1378,9 @@ type Test struct {
 	// the repository's remote and are rendered before, never instead of,
 	// Instructions.
 	RepositoryInstructions string
+	// SkipLiveEvidence is true only when test.live_evidence is explicitly
+	// false, so a zero-value Test keeps the live-evidence agent.
+	SkipLiveEvidence bool
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -1633,6 +1682,13 @@ forgejo_axi_path: forgejo-axi
 # See docs/src/content/docs/reference/global-config.md#ci_timeout.
 ci_timeout: "168h"
 
+# CI mode (this fork build). "local" (the default when the key is absent) skips
+# the CI step on every run: validation is the local pipeline, pull requests are
+# still opened, and no-mistakes never waits for forge checks. "github" restores
+# upstream forge check monitoring. Left commented so this file stays readable
+# by upstream builds, which reject unknown keys.
+# ci_mode: local
+
 # AXI status marks a running/fixing step as quiet when no step log or native
 # agent lifecycle activity has appeared for this long. This is observability
 # only; it never cancels work.
@@ -1676,6 +1732,19 @@ test_agent_timeout: "30m"
 # Optional still-working cap for Test. Unset means no extension past
 # test_agent_timeout. Must be at least test_agent_timeout.
 # test_agent_working_timeout: "1h"
+
+# The daemon's dead-run watchdog fails a run whose running/fixing step has
+# produced no log or agent lifecycle activity for this long, so a wedged run
+# cannot stay "running" forever. The CI step is exempt (its idle lifetime is
+# owned by ci_timeout). Set to "off", "none", "never", "unlimited", or any
+# non-positive duration to disable the inactivity kill.
+step_stall_timeout: "1h"
+
+# Maximum number of runs executing their Test step at the same time, across
+# every repo on this machine. A run over the limit waits for a slot (its test
+# timeouts start when it gets one) and shows as queued in axi status. A Test
+# step waiting on a decision holds no slot. 0 disables the limit.
+test_slots: 2
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
@@ -1721,6 +1790,15 @@ session_reuse: true
 #   read_timeout: 15s
 #   # Executable to run. Default: quota-axi on PATH.
 #   quota_axi_path: quota-axi
+
+# Let the reviewer apply trivial, mechanical fixes itself during a review pass
+# (typos, wording, comment or documentation text, formatting, obviously dead
+# code), recording each as an applied-inline finding, instead of spending a fix
+# round and a full re-review on them. A focused verification turn reviews the
+# inline edits before the head is certified. On by default; set false to turn
+# it off.
+# review:
+#   inline_fixes: true
 
 # Log level for daemon output
 # Options: debug, info, warn, error
@@ -2625,7 +2703,10 @@ func DefaultGlobalConfig() *GlobalConfig {
 		Agents:                  []types.AgentName{types.AgentAuto},
 		ForgejoAXIPath:          "forgejo-axi",
 		CITimeout:               DefaultCITimeout,
+		CIMode:                  DefaultCIMode,
 		StepQuietWarning:        DefaultStepQuietWarning,
+		StepStallTimeout:        DefaultStepStallTimeout,
+		TestSlots:               DefaultTestSlots,
 		AgentTimeout:            DefaultAgentTimeout,
 		ReviewAgentTimeout:      DefaultReviewAgentTimeout,
 		TestAgentTimeout:        DefaultTestAgentTimeout,
@@ -2890,6 +2971,11 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.WorktreeRoots = raw.WorktreeRoots
 	}
+	ciMode, err := parseCIMode(raw.CIMode)
+	if err != nil {
+		return nil, err
+	}
+	cfg.CIMode = ciMode
 	timeoutValue := raw.CITimeout
 	if timeoutValue == "" {
 		timeoutValue = raw.BabysitTimeout
@@ -2977,6 +3063,19 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateWorkingCap("test_agent_working_timeout", "test_agent_timeout", cfg.TestAgentWorkingTimeout, cfg.TestAgentTimeout); err != nil {
 		return nil, err
 	}
+	if raw.StepStallTimeout != "" {
+		d, err := parseStepStallTimeout(raw.StepStallTimeout)
+		if err != nil {
+			return nil, err
+		}
+		cfg.StepStallTimeout = d
+	}
+	if raw.TestSlots != nil {
+		if *raw.TestSlots < 0 {
+			return nil, fmt.Errorf("test_slots must be 0 (unlimited) or positive, got %d", *raw.TestSlots)
+		}
+		cfg.TestSlots = *raw.TestSlots
+	}
 	if raw.DaemonConnectTimeout != "" {
 		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)
 		if err != nil {
@@ -3036,7 +3135,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.RepositoryOverrides = overrides
 	}
-	if err := validateOperatorReview(raw.Review, cfg.RepositoryOverrides); err != nil {
+	if err := validateOperatorReview(raw.Review.OperatorReviewRaw, cfg.RepositoryOverrides); err != nil {
 		return nil, err
 	}
 	cfg.Review = raw.Review
@@ -3164,6 +3263,25 @@ func parseCITimeout(value string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return CITimeoutUnlimited, nil
+	}
+	return d, nil
+}
+
+// parseStepStallTimeout interprets the step_stall_timeout config value. The
+// keywords "off"/"none"/"never"/"unlimited", or any non-positive duration,
+// disable the dead-run watchdog's inactivity kill entirely (resolved as 0);
+// otherwise the value is parsed as a Go duration.
+func parseStepStallTimeout(value string) (time.Duration, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "unlimited", "none", "off", "never":
+		return 0, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse step_stall_timeout %q: %w", value, err)
+	}
+	if d <= 0 {
+		return 0, nil
 	}
 	return d, nil
 }
@@ -3583,6 +3701,9 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// trusted-only for the same reason no_ci is: a pushed branch must not
 		// waive the gate that certifies it.
 		effective.Test.AllowApproveOverFailure = trusted.Test.AllowApproveOverFailure
+		// test.live_evidence decides whether the gate validates the branch
+		// beyond its own test command, so it is trusted-only for the same reason.
+		effective.Test.LiveEvidence = trusted.Test.LiveEvidence
 		// pr.base_branch controls where the contributor's PR lands, so it is
 		// trusted-only unless the repository explicitly opts into pushed
 		// settings alongside commands and agent selection. TitleFormat is a
@@ -3613,6 +3734,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.Prepare = false
 		effective.Test.BaseAttribution = false
 		effective.Test.AllowApproveOverFailure = ""
+		effective.Test.LiveEvidence = nil
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
 		}
@@ -3717,6 +3839,9 @@ func testDefaults() Test {
 func applyTestOverrides(dst *Test, src *TestRaw) {
 	if src.Evidence.Compact != nil {
 		dst.Evidence.Compact = *src.Evidence.Compact
+	}
+	if src.LiveEvidence != nil {
+		dst.SkipLiveEvidence = !*src.LiveEvidence
 	}
 	if src.Evidence.StoreInRepo != nil {
 		dst.Evidence.StoreInRepo = *src.Evidence.StoreInRepo
@@ -4276,7 +4401,10 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		QuotaProviders:            global.QuotaProviders,
 		ReviewAgents:              global.ReviewAgents,
 		CITimeout:                 global.CITimeout,
+		CIMode:                    global.CIMode,
 		StepQuietWarning:          global.StepQuietWarning,
+		StepStallTimeout:          global.StepStallTimeout,
+		TestSlots:                 global.TestSlots,
 		AgentTimeout:              global.AgentTimeout,
 		AgentCrashRetries:         global.AgentCrashRetries,
 		AgentTimeoutsConfigured:   global.AgentTimeoutsConfigured,
@@ -4314,6 +4442,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 			Conversation:           repo.Review.Conversation,
 			PathInstructions:       resolvePathInstructions(repo.Review.PathInstructions),
 			GlobalPathInstructions: resolvePathInstructions(global.Review.PathInstructions),
+			InlineFixes:            global.Review.InlineFixes == nil || *global.Review.InlineFixes,
 		},
 		PR:              pr,
 		ForgeProfiles:   global.ForgeProfiles,

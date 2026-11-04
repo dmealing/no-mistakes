@@ -36,6 +36,8 @@ agent_args_override:
     - -c
     - service_tier="priority"
 
+ci_mode: local
+
 ci_timeout: "168h"
 
 step_quiet_warning: "10m"
@@ -45,6 +47,10 @@ agent_timeout: "30m"
 review_agent_timeout: "30m"
 
 test_agent_timeout: "30m"
+
+step_stall_timeout: "1h"
+
+test_slots: 2
 
 daemon_connect_timeout: "3s"
 
@@ -96,6 +102,7 @@ rebase:
 
 review:
   path_instructions: []
+  inline_fixes: true
 
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
@@ -629,6 +636,23 @@ Selection happens per run, before built-in detection and forge profiles: the rem
 
 Plugins run through the same environment as built-in provider CLIs (the daemon's login-shell environment plus any forge-profile overlay) with the run worktree as the working directory. A plugin whose `status` exits non-zero (for example, not authenticated) makes the PR and CI steps skip with its message, reported under `run.automatic_skips`; a plugin that breaks the protocol (unreadable output, wrong protocol version, timeout) fails the step instead, in its `status` handshake or in any later call (a timeout during the CI step's repeated polls or log retrieval is handled like any failed read instead). `no-mistakes doctor` lists configured plugins and checks that each command resolves; it does not run the plugin, because the handshake is per repository.
 
+### ci_mode
+
+Whether the CI step monitors forge checks. This key exists only in the local fork build (its version carries a `-local.N` suffix).
+
+|         |                     |
+| ------- | ------------------- |
+| Type    | `local` or `github` |
+| Default | `local`             |
+
+- `local` skips the CI step on every run, whatever the launch path (`axi run`, `git push` to the gate, `rerun`, the TUI), with no `--skip ci`. Review, test, lint, push, and PR creation run unchanged; `axi` status shows `local_ci` with the reason, and a finished run never waits for forge checks.
+- `github` restores upstream CI monitoring: the CI step waits for the PR's checks and applies `ci_timeout` below.
+
+The mode also decides who owns broad regression in the [Test](/no-mistakes/reference/pipeline-steps/#test) step: `github` leaves it to remote CI, while `local` makes the Test step's evidence turn run the repository's complete regression suite itself.
+
+The daemon enforces the mode when it creates or recovers a run, and launch clients also request the CI skip, so local mode holds even against a daemon started by an older build.
+Upstream builds reject this key as unknown, so set it only while this build runs both the CLI and the daemon.
+
 ### ci_timeout
 
 How long the CI step waits for provider CI status to settle before giving up, and how long it keeps monitoring an open PR after every check is green.
@@ -846,6 +870,39 @@ The 10-minute quiet stop still applies.
 | Type    | `string` (Go duration) |
 | Default | unset                  |
 
+It is global-only.
+
+### step_stall_timeout
+
+How long a running or fixing step (other than CI) can go without recorded step-log or native-agent lifecycle activity before the daemon's dead-run watchdog declares the run dead and fails it.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `1h`                   |
+
+Accepts any positive Go `time.ParseDuration` string.
+Set it to `off` (`none`, `never`, and `unlimited` are accepted aliases), `0`, or any non-positive duration to disable the inactivity kill.
+
+Unlike `step_quiet_warning`, this one acts: a run whose active step stays silent past the threshold transitions to `failed` with an error starting with `dead run:`, its agent process tree is killed, and its worktree is cleaned up.
+A running configured `commands.*` invocation counts as activity: its output is captured buffered, so the daemon heartbeats the step while it waits on the live command, and a long-but-healthy test suite is never stall-killed.
+The CI step is exempt because its monitor deliberately deduplicates unchanged poll logs and its idle lifetime is owned by [`ci_timeout`](#ci_timeout); runs parked at an approval gate are exempt because parking is agent-paced by design, and runs waiting in the [`max_concurrent_runs`](#max_concurrent_runs) queue are exempt because they have not started.
+The watchdog also fails a run whose worktree directory was removed out from under it or whose recorded agent process died without the step observing the exit, regardless of this setting.
+See [the daemon lifecycle](/no-mistakes/concepts/daemon/) for the full dead-run model.
+
+### test_slots
+
+Caps how many runs may be executing their Test step at the same time across every repo on this machine, so several validation runs do not fan their test suites out together and starve each other of CPU.
+
+|         |                                  |
+| ------- | -------------------------------- |
+| Type    | `integer`                        |
+| Default | `2`                              |
+
+`0` disables the limit. A run that cannot get a slot waits and never fails for lack of one; its Test step shows `queued for a test slot` with the holders in `axi status` and the step log. Time spent waiting does not count against the step's recorded duration, agent timeouts, or [`step_stall_timeout`](#step_stall_timeout): those clocks start when the slot is acquired.
+Runs that are waiting get a slot in the order they started waiting. A run holds a slot only while its Test step is executing: the slot is released when the step passes, fails, is aborted, or parks for a decision, so a run waiting on an approval holds none. Each fix round of the Test step takes a slot again, at the back of the queue, so a `fixing` Test step can show `queued for a test slot` too. Slots are held in the daemon's memory, so a daemon restart starts with every slot free.
+A same-run [`agent_crash_retries`](#agent_crash_retries) retry of the Test step stays inside the slot it already holds.
+It is separate from [`max_concurrent_runs`](#max_concurrent_runs), which admits whole runs and keeps a run's slot while it is parked at an approval gate; `test_slots` limits only the Test phase that is executing, so parked runs never hold back another run's tests.
 It is global-only.
 
 ### daemon_connect_timeout
@@ -1183,6 +1240,23 @@ Shorten or remove your machine-local entries to fix it.
 
 Only `path_instructions` is accepted under this block. `review.conversation` stays a repository decision, because an open question parks the gate.
 Changes apply to the next run, and to a run recovered after a daemon restart, which re-reads this file.
+
+### review.inline_fixes
+
+Lets the reviewer apply trivial, mechanical fixes itself instead of handing them to a fix round.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+
+```yaml
+review:
+  inline_fixes: false
+```
+
+When on, each full review pass may fix typos, wording, comment or documentation text, formatting, and obviously dead code in the files the change touches, and records each one as an `info` finding marked `applied_inline`. Anything that changes behaviour, logic, tests, or data stays an ordinary finding. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns how inline edits are committed and verified.
+Set `false` to keep every review pass read-only, as before this setting existed. It is global-only: neither a [`repository_overrides`](#repository_overrides) entry nor a repository's own `.no-mistakes.yaml` can set it.
 
 ### commit.fix_message
 
