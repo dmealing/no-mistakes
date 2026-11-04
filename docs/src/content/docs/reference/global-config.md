@@ -886,7 +886,7 @@ Set it to `off` (`none`, `never`, and `unlimited` are accepted aliases), `0`, or
 
 Unlike `step_quiet_warning`, this one acts: a run whose active step stays silent past the threshold transitions to `failed` with an error starting with `dead run:`, its agent process tree is killed, and its worktree is cleaned up.
 A running configured `commands.*` invocation counts as activity: its output is captured buffered, so the daemon heartbeats the step while it waits on the live command, and a long-but-healthy test suite is never stall-killed.
-The CI step is exempt because its monitor deliberately deduplicates unchanged poll logs and its idle lifetime is owned by [`ci_timeout`](#ci_timeout); runs parked at an approval gate are exempt because parking is agent-paced by design.
+The CI step is exempt because its monitor deliberately deduplicates unchanged poll logs and its idle lifetime is owned by [`ci_timeout`](#ci_timeout); runs parked at an approval gate are exempt because parking is agent-paced by design, and runs waiting in the [`max_concurrent_runs`](#max_concurrent_runs) queue are exempt because they have not started.
 The watchdog also fails a run whose worktree directory was removed out from under it or whose recorded agent process died without the step observing the exit, regardless of this setting.
 See [the daemon lifecycle](/no-mistakes/concepts/daemon/) for the full dead-run model.
 
@@ -901,6 +901,8 @@ Caps how many runs may be executing their Test step at the same time across ever
 
 `0` disables the limit. A run that cannot get a slot waits and never fails for lack of one; its Test step shows `queued for a test slot` with the holders in `axi status` and the step log. Time spent waiting does not count against the step's recorded duration, agent timeouts, or [`step_stall_timeout`](#step_stall_timeout): those clocks start when the slot is acquired.
 Runs that are waiting get a slot in the order they started waiting. A run holds a slot only while its Test step is executing: the slot is released when the step passes, fails, is aborted, or parks for a decision, so a run waiting on an approval holds none. Each fix round of the Test step takes a slot again, at the back of the queue, so a `fixing` Test step can show `queued for a test slot` too. Slots are held in the daemon's memory, so a daemon restart starts with every slot free.
+A same-run [`agent_crash_retries`](#agent_crash_retries) retry of the Test step stays inside the slot it already holds.
+It is separate from [`max_concurrent_runs`](#max_concurrent_runs), which admits whole runs and keeps a run's slot while it is parked at an approval gate; `test_slots` limits only the Test phase that is executing, so parked runs never hold back another run's tests.
 It is global-only.
 
 ### daemon_connect_timeout
