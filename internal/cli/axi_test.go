@@ -407,6 +407,50 @@ func TestGateHelpForIntentConformanceReviewDoesNotOfferApproveOrSkip(t *testing.
 	}
 }
 
+// The intent-conformance refusal removes only Approve and Skip from the gate
+// help. The other conditions on the same gate keep their guidance: an
+// exhausted fix-round budget also refuses fix, so only abort remains, and an
+// open review question still leads with answering it.
+func TestGateHelpForIntentConformanceReviewKeepsTheOtherGateGuidance(t *testing.T) {
+	intent := types.Finding{ID: "r1", Severity: "warning", Action: types.ActionAskUser, Category: types.FindingCategoryIntentConformance, Description: "intent requires the retry; the change omits it"}
+	exhausted := types.Finding{ID: "review-fix-rounds-exhausted", Severity: "warning", Action: types.ActionAskUser, Description: "Review used 1/1 fix rounds"}
+	question := types.Finding{ID: "question-q1", Severity: "warning", Action: types.ActionAskUser, Category: types.FindingCategoryReviewQuestion, Description: "Review question awaiting an answer: keep the legacy route?"}
+	for _, tc := range []struct {
+		name     string
+		findings []types.Finding
+		want     []string
+		refused  []string
+	}{
+		{
+			name:     "fix-round budget exhausted",
+			findings: []types.Finding{intent, exhausted},
+			want:     []string{"fix-round budget is exhausted", "only `no-mistakes axi abort`", "corrected --intent"},
+			refused:  []string{"--action approve", "--action skip", "--action fix"},
+		},
+		{
+			name:     "open review question",
+			findings: []types.Finding{intent, question},
+			want:     []string{"no-mistakes axi answer --question <id>", "Do not approve or fix to get past a review question", "corrected --intent"},
+			refused:  []string{"--action approve", "--action skip"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := stepView{Name: "review", Status: "awaiting_approval", FindingsJSON: findingsJSON(t, tc.findings, "change does not match the intent")}
+			out := axiDoc(gateFields(gate)...)
+			for _, refused := range tc.refused {
+				if strings.Contains(out, refused) {
+					t.Errorf("gate help offers %q, which the executor refuses here:\n%s", refused, out)
+				}
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("gate help missing %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
 func TestWriteGateShape(t *testing.T) {
 	gate := stepView{
 		Name:   "review",

@@ -312,3 +312,52 @@ func TestExecutor_RetryFailsClosedWhenTheSourceNoLongerMatchesThePipeline(t *tes
 		t.Fatalf("refused continuation recorded %d steps", len(rows))
 	}
 }
+
+// Local CI mode's CI skip is recorded on the failed run, but it belongs to the
+// CI mode, not to the run's own skip list. A retry follows the CI mode in force
+// when it starts: under local mode the daemon skips CI again with the local
+// reason, and under github mode the retry runs CI as upstream does.
+func TestExecutor_RetryFollowsTheCurrentCIModeNotTheSourcesLocalSkip(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		localMode  bool
+		wantCICall int
+	}{
+		{name: "local", localMode: true, wantCICall: 0},
+		{name: "github", localMode: false, wantCICall: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database, p, _, repo := setupTest(t)
+			names := []types.StepName{types.StepReview, types.StepTest, types.StepCI}
+			source := failedSourceRun(t, database, repo, names, types.StepTest, types.StepCI)
+			sourceSteps, err := database.GetStepsByRun(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CompleteSkippedStep(sourceSteps[2].ID, 0, 0, "", config.LocalCISkipReason); err != nil {
+				t.Fatal(err)
+			}
+
+			continuation, err := database.InsertRun(repo.ID, "feature", "abc123", "def456")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ci := newPassStep(types.StepCI)
+			exec := NewExecutor(database, p, &config.Config{}, nil, []Step{newPassStep(types.StepReview), newPassStep(types.StepTest), ci}, nil)
+			if tc.localMode {
+				exec.SkipStepWithReason(types.StepCI, config.LocalCISkipReason)
+			}
+			exec.SetRetrySource(source.ID)
+			if err := exec.Execute(context.Background(), continuation, repo, t.TempDir()); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+
+			if got := ci.callCount(); got != tc.wantCICall {
+				t.Fatalf("ci executed %d times, want %d", got, tc.wantCICall)
+			}
+			if tc.localMode {
+				assertSkippedWithReason(t, database, continuation.ID, types.StepCI, config.LocalCISkipReason)
+			}
+		})
+	}
+}

@@ -681,12 +681,16 @@ func (e *Executor) planRetry(run *db.Run) (*RetryCheckpoint, error) {
 		return nil, fmt.Errorf("retry run %s: %w", e.retrySource, err)
 	}
 	for _, row := range checkpoint.Steps[checkpoint.Index+1:] {
-		if row.Status == types.StepStatusSkipped {
-			// Keep a reason this executor already holds (local CI mode's
-			// skip) rather than blanking it with the source's bare skip.
-			if !e.skipsStep(row.StepName) {
-				e.SkipStepWithReason(row.StepName, "")
-			}
+		if row.Status != types.StepStatusSkipped {
+			continue
+		}
+		if row.SkipReason != nil && *row.SkipReason == config.LocalCISkipReason {
+			continue
+		}
+		// Keep a reason this executor already holds (local CI mode's
+		// skip) rather than blanking it with the source's bare skip.
+		if !e.skipsStep(row.StepName) {
+			e.SkipStepWithReason(row.StepName, "")
 		}
 	}
 	for _, row := range checkpoint.Steps[:checkpoint.Index] {

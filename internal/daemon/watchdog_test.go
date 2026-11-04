@@ -307,3 +307,67 @@ func TestWatchdogSweep_FinalizesUntrackedActiveRowAfterGrace(t *testing.T) {
 		t.Fatalf("run error = %v, want %q prefix", got.Error, types.RunDeadReasonPrefix)
 	}
 }
+
+// A run waiting in the max_concurrent_runs queue has no executor yet, but the
+// daemon still owns it: it starts when a slot frees. The watchdog must not
+// fail it as an orphan, however long it waits.
+func TestWatchdogSweep_LeavesARunWaitingForAnExecutionSlot(t *testing.T) {
+	started := make(chan struct{})
+	slow := &mockSlowStep{name: types.StepReview, started: started}
+	p, d, mgr := newWatchdogTestEnv(t, func() []pipeline.Step { return []pipeline.Step{slow} })
+	cfg, err := os.ReadFile(p.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.ConfigFile(), append(cfg, []byte("max_concurrent_runs: 1\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const repoID = "watchdog-queued-repo"
+	startBlockedRun(t, p, d, mgr, repoID, started)
+
+	head, err := d.GetRunsByRepo(repoID)
+	if err != nil || len(head) != 1 {
+		t.Fatalf("runs = %v (err %v), want the one running run", head, err)
+	}
+	queuedID, err := mgr.HandlePushReceived(context.Background(), &ipc.PushReceivedParams{
+		Gate: p.RepoDir(repoID),
+		Ref:  "refs/heads/feature/queued",
+		Old:  zeroSHA,
+		New:  head[0].HeadSHA,
+	})
+	if err != nil {
+		t.Fatalf("push received: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for !runWaitsForSlot(mgr, queuedID) {
+		if time.Now().After(deadline) {
+			t.Fatal("second run never reached the execution queue")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	w := newTestWatchdog(p, d, mgr, time.Hour, 2*watchdogOrphanRowGrace)
+	w.sweep()
+
+	run, err := d.GetRun(queuedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != types.RunPending {
+		t.Fatalf("queued run status = %q, want %q (error %v)", run.Status, types.RunPending, run.Error)
+	}
+}
+
+func runWaitsForSlot(mgr *RunManager, runID string) bool {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if _, setup := mgr.settingUp[runID]; setup {
+		return false
+	}
+	for _, qe := range mgr.runQueue {
+		if qe.runID == runID && qe.spawn != nil {
+			return true
+		}
+	}
+	return false
+}

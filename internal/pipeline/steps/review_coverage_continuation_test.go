@@ -44,6 +44,16 @@ func testRetainedCoverageContinuation(t *testing.T, recovered bool) {
 	testRetainedCoverageCase(t, recovered, "complete")
 }
 
+// review.inline_fixes covers only a pass's main review turn. A coverage
+// continuation runs no main turn, only a completion turn over the retained
+// pass, so the continuation never carries the inline-fix permission.
+func TestReviewStep_ContinuationNeverCarriesTheInlineFixPermission(t *testing.T) {
+	t.Parallel()
+	testRetainedCoverageCase(t, false, inlineFixesContinuationMode)
+}
+
+const inlineFixesContinuationMode = "complete with inline fixes"
+
 func TestReviewStep_ContinuationDoesNotWaiveMissingCoverageOrNewFindings(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{"partial", "new finding", "new question", "out-of-scope output"} {
@@ -66,6 +76,10 @@ func TestReviewStep_ContinuationCannotCertifySourceChangedDuringItsTurn(t *testi
 }
 
 func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
+	inlineFixes := mode == inlineFixesContinuationMode
+	if inlineFixes {
+		mode = "complete"
+	}
 	dir, base, _ := twoFileRepo(t)
 	if err := os.WriteFile(filepath.Join(dir, "feature3.txt"), []byte("third changed file\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -97,10 +111,16 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		t.Logf("ACTUAL_REVIEW_AGENT %s", capture)
 		switch n {
 		case 1:
+			if inlineFixes && !strings.Contains(opts.Prompt, "Inline quick fixes (enabled for this pass)") {
+				return nil, fmt.Errorf("the first pass's main review turn lacks the inline-fix permission")
+			}
 			return &agent.Result{Output: json.RawMessage(coverageFindingJSON([]string{"feature.txt"}))}, nil
 		case 2:
 			return &agent.Result{Output: json.RawMessage(coverageFindingJSON([]string{"feature2.txt"}))}, nil
 		case 3:
+			if inlineFixes && strings.Contains(opts.Prompt, "Inline quick fixes (enabled for this pass)") {
+				return nil, fmt.Errorf("coverage continuation carried the inline-fix permission")
+			}
 			if opts.Purpose != "review-coverage" || !strings.Contains(opts.Prompt, coverageCompletionMarker) {
 				return nil, fmt.Errorf("retained coverage was forgotten: expected missing-path completion, got purpose %q", opts.Purpose)
 			}
@@ -151,6 +171,7 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		t.Fatal(err)
 	}
 	sctx := &pipeline.StepContext{DB: database, Run: run, Repo: repo, WorkDir: dir, EvidenceDir: p.RunEvidenceDir("", run.ID), Config: &config.Config{Agent: types.AgentClaude, TrustedConfigSHA: base}}
+	sctx.Config.Review.InlineFixes = inlineFixes
 	if mode == "new question" {
 		withReviewConversation(sctx)
 		conversationDir = reviewConversationDir(sctx)

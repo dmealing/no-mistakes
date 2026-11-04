@@ -684,14 +684,23 @@ func gateFields(gate stepView) []toon.Field {
 func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 	respond := "no-mistakes axi respond" + runFlag(runID)
 	coverageHelp := "Run `" + respond + " --action complete-coverage` to review only the remaining paths using stored coverage for this source"
+	abort := "`no-mistakes axi abort" + runFlag(runID) + "`"
+	intentRefusal := gate.Name == string(types.StepReview) && pipeline.HasIntentConformanceRefusal(gate.FindingsJSON)
 	help := []string{
 		"Run `" + respond + " --action approve` to accept this step and continue",
 		"Run `" + respond + " --action fix --findings <ids> [--ignore <ids>]` to have the pipeline fix the selected findings (do not edit files yourself); list every finding below in `--findings` or `--ignore`, unless an earlier round of this step already decided it, and a finding that round chose to fix cannot be declined by a later response",
 	}
+	if intentRefusal {
+		help[0] = "Approve and Skip are rejected: an intent-conformance finding says the change does not match the run's intent, and the PR step would refuse it after Test, Document, and Push. Fix the change to bring it into line with the intent, or run " + abort + " and start a new run with a corrected --intent"
+	}
 	if pipeline.HasReviewFixRoundLimit(gate.FindingsJSON) {
+		next := "Inspect the remaining findings, then explicitly run `" + respond + " --action approve` to accept them, or abort the run. A new run gets a new budget; changing config does not extend this run."
+		if intentRefusal {
+			next = "Approve and Skip are rejected by the intent-conformance finding, so only " + abort + " remains; start a new run with a corrected --intent. A new run gets a new budget; changing config does not extend this run."
+		}
 		help = []string{
 			"The total Review fix-round budget is exhausted; further fix requests are refused and automatic resolvers leave this gate parked. Remaining findings are unchanged.",
-			"Inspect the remaining findings, then explicitly run `" + respond + " --action approve` to accept them, or abort the run. A new run gets a new budget; changing config does not extend this run.",
+			next,
 		}
 	}
 	if pipeline.CanContinueReviewCoverage(types.StepName(gate.Name), gate.FindingsJSON) {
@@ -717,22 +726,22 @@ func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 	if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {
 		next := "Have the operator inspect and resolve the reported protected-path edit through the repository's authorized workflow, then run `" + respond + " --action fix` to retry the refused step, including its commit and publication."
 		if pipeline.HasReviewFixRoundLimit(gate.FindingsJSON) {
-			next = "The total Review fix-round budget is exhausted, so a fix request is refused and cannot retry the refused step. Skip this step or run `no-mistakes axi abort" + runFlag(runID) + "` to stop the run. A new run gets a new budget; changing config does not extend this run."
+			stop := "Skip this step or run " + abort + " to stop the run."
+			if intentRefusal {
+				stop = "Skip is rejected by the intent-conformance finding, so only " + abort + " remains."
+			}
+			next = "The total Review fix-round budget is exhausted, so a fix request is refused and cannot retry the refused step. " + stop + " A new run gets a new budget; changing config does not extend this run."
 		}
 		help = []string{"Protected-path refusals require an explicit operator response; Approve is rejected.", next}
 	}
 	skip := "Run `" + respond + " --action skip` to skip this step"
-	if gate.Name == string(types.StepReview) && pipeline.HasIntentConformanceRefusal(gate.FindingsJSON) {
-		help = []string{
-			"Approve and Skip are rejected: an intent-conformance finding says the change does not match the run's intent, and the PR step would refuse it after Test, Document, and Push.",
-			"Run `" + respond + " --action fix --findings <ids> [--ignore <ids>]` to bring the change into line with the intent (do not edit files yourself), or `no-mistakes axi abort" + runFlag(runID) + "` and start a new run with a corrected --intent",
-		}
+	if intentRefusal {
 		skip = ""
 	}
 	if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
 		help = []string{
 			"Approve is rejected: the run worktree holds work a timed-out Test agent left that no Test turn validated, and approval would publish it. The findings name that work and how to inspect it.",
-			"Run `" + respond + " --action fix --findings <ids>` to validate that work (do not edit files yourself), or `no-mistakes axi abort" + runFlag(runID) + "` to stop the run",
+			"Run `" + respond + " --action fix --findings <ids>` to validate that work (do not edit files yourself), or " + abort + " to stop the run",
 		}
 		skip = "Do not skip this step: the steps after Test would commit and publish the unvalidated work, so skipping needs the operator's explicit decision"
 	}
