@@ -127,7 +127,10 @@ rollback() {
     cp -p "$target.prev" "$target.rollback.tmp" && mv -f "$target.rollback.tmp" "$target" || ok=0
   fi
   restore_database || ok=0
-  if [ "$ok" = 1 ] && "$target" daemon start >/dev/null 2>&1 && daemon_running "$target" \
+  # A refused stop can leave the old daemon up; a running daemon needs no start
+  # (daemon start refuses when one is already running).
+  if [ "$ok" = 1 ] && { daemon_running "$target" || "$target" daemon start >/dev/null 2>&1; } \
+     && daemon_running "$target" \
      && [ "$("$target" --version 2>/dev/null)" = "$old_version" ]; then
     say "rolled back: $old_version is running again"
     remove_hold

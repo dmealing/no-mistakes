@@ -33,6 +33,7 @@ case "$1" in
         echo stopped > "$S/daemon" ;;
       start)
         echo "start $V" >> "$S/log"
+        if [ "$(cat "$S/daemon" 2>/dev/null)" = running ]; then echo "daemon already running" >&2; exit 1; fi
         if [ -e "$S/fail-start-$V" ]; then echo garbage > "$NM_HOME/state.sqlite"; exit 1; fi
         echo running > "$S/daemon" ;;
       status)
@@ -177,8 +178,9 @@ func TestInstallLocalBuild_FailureBeforeInstallKeepsTheTarget(t *testing.T) {
 	if v := versionOf(t, f.target+".prev"); v != "no-mistakes version v0-stale" {
 		t.Fatalf("rollback copy version = %q, want it untouched", v)
 	}
-	if got := readFile(t, filepath.Join(f.state, "log")); got != "stop v1-old --force\nstop v1-old --force\nstart v1-old\n" {
-		t.Fatalf("service log = %q, want only the old daemon restarted", got)
+	// The refused stop left the old daemon running, so rollback needs no start.
+	if got := readFile(t, filepath.Join(f.state, "log")); got != "stop v1-old --force\nstop v1-old --force\n" {
+		t.Fatalf("service log = %q, want the refused stop retried and no restart", got)
 	}
 	if _, err := os.Stat(filepath.Join(f.home, "hold")); !os.IsNotExist(err) {
 		t.Fatalf("hold file left behind (err=%v)", err)
