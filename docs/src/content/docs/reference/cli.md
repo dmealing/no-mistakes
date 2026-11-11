@@ -150,6 +150,7 @@ no-mistakes axi run --intent "the user's goal" --closes 95 --closes owner/repo#1
 | `--wait`        | `duration` | `8m`    | Maximum time for active-run lookup and run driving before the caller must reattach |
 | `--launch-nonce` | `string` | (none) | Non-secret correlation identifier for a durable pre-drive receipt; requires `--validation-generation` |
 | `--validation-generation` | `string` | (none) | Caller-selected validation generation bound to `--launch-nonce`; requires that flag |
+| `--triage-override` | `string` | (none) | Start a new run over the [pre-run check](#pre-run-check)'s stops (every stop except a hold); the reason is required and recorded |
 
 Explicit intent is the user's goal or request, not a description of the diff.
 no-mistakes uses the supplied text instead of transcript inference; see [Intent input](#intent-input) for transports and whitespace handling.
@@ -202,6 +203,20 @@ Reattaching with a `--base-branch` that differs from the active run's stored tar
 Before starting a run that may omit the section (this flag set, the global `intent.publish_intent` default `false`, or a global config that cannot be read), `axi run` probes the running daemon for the capability and refuses to start anything when that daemon is too old to honor it (an older daemon would silently drop the field, never read the global default, and publish); restart the daemon with the current binary. Only a run that cannot omit (flag unset, global default `true`) may reuse an older daemon. `rerun` always probes, because it inherits omission from the selected prior run and only the daemon knows that selection.
 Under the flag the PR-drafting turns receive no intent text at all and draft from the diff and commit messages only; every other step prompt keeps the full intent.
 The same omit-to-reattach rule applies to `--model`/`--effort` against an active run's [pinned Pi profile](/no-mistakes/reference/global-config/#per-run-pi-profiles); a different selection cannot change that pin.
+
+### Pre-run check
+
+Before it starts a NEW run (never when it reattaches), `axi run` applies the rules of [`axi triage`](#no-mistakes-axi-triage) to the branch, from local facts only (the hold file, the run database, git), and refuses to start with exit code 3 when any holds:
+
+| Rule | Stops when |
+| ---- | ---------- |
+| `hold` | `<NM_HOME>/hold` exists (an install is waiting for runs to leave their steps). Cannot be overridden; the daemon refuses the run too. |
+| `in-validation-conflict` | The branch's head cannot merge cleanly with the head of another branch of the same project that is in validation now. |
+| `third-branch` | Two other branches of the same project are already in validation. |
+| `small-change-with-sibling` | The change has 300 production lines or fewer (tests and docs do not count) while another branch of the project is in validation: it should ride with that lane. |
+
+A branch is in validation while its run is pending or running, parked at a gate or not. The same project means the same upstream URL (SSH and HTTPS spellings match), across every checkout registered with the daemon. A fact that cannot be read (a lane's commit missing from both this checkout and its gate, an unreadable database) never stops the run; it is reported as unchecked.
+The output names each stop and what to do instead. `--triage-override "<reason>"` starts the run anyway over every stop except the hold; the reason is required, shown in the run's output, and appended with the branch, head, run ID, and overridden rules to `<NM_HOME>/triage-overrides.ndjson`. A started run's output also carries the bundling facts: the tier, the production-line count, and the other branches of the project in validation.
 
 ### Closing issues
 
@@ -279,6 +294,35 @@ A replay that adds `--no-publish-intent` against a run bound to publish the sect
 Explicit `--model`/`--effort` must match a stored pin the same way; omitting both preserves it.
 A conflicting claim does not consume the first `created` disposition.
 Without the two proof flags, ordinary reattachment is unchanged, and historical runs without a nonce are not adopted into a proof binding.
+
+## no-mistakes axi triage
+
+Classify the current branch's change, print the run command and pre-run review advice, and say whether a new run may start.
+
+```sh
+no-mistakes axi triage
+no-mistakes axi triage --base-branch epic/foo
+no-mistakes axi triage --skip-only
+no-mistakes axi triage --conflicts [--head REF]
+no-mistakes axi triage --post-merge [--gated SHA]
+```
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--base` | `string` | (none) | Measure the change from this commit or ref instead of the merge base with the base branch |
+| `--base-branch` | `string` | (none) | The run's base branch, as passed to `axi run --base-branch` (default: the repository's default branch) |
+| `--skip-only` | `bool` | `false` | Print only the `--skip` value, as plain text for scripts |
+| `--conflicts` | `bool` | `false` | Run only the conflict checks: exit 0 clean, 3 conflicts, 2 cannot check |
+| `--head` | `string` | (none) | With `--conflicts`, check this ref instead of `HEAD` |
+| `--post-merge` | `bool` | `false` | Judge `HEAD` as one merge of the base on top of a head that already passed validation: exit 0 no new run, 4 new run |
+| `--gated` | `string` | `HEAD^1` | With `--post-merge`, the head that passed validation |
+| `--offline` | `bool` | `false` | Do not fetch the base or query open pull requests (also set by `NM_TRIAGE_NO_CONFLICTS=1`) |
+
+The change's tier is its strictest changed file: `DOCS` (prose and agent configuration only: run with `--skip test,lint,document`), `TEST` (tests, plus docs: `--skip document`), `CODE` (anything else: a full run), or `RISK` (a code file on a risk path such as migrations, auth, crypto, payments, build manifests, workflows or deploy config: a full run and an independent review first). A repository adds risk globs, one per line, in `.nm-triage-risk`; its own `scripts/nm-triage.sh`, when present, decides the tier instead, for both `axi triage` and the `axi run` pre-run check (a risk path still lifts it to `RISK`; not consulted with `--base`). When that script fails, times out, or prints no `TIER:` line, a one-line `repo_script` note says so and the built-in tier is used.
+
+The output is TOON: the tier and production-line count, the run command, the pre-run review advice, the bundling facts (the other branches of the project in validation and whether the change is small), conflicts, and a `verdict` of `go` or `stop` with the rules of the [pre-run check](#pre-run-check) that `axi run` applies. It exits 3 on `stop`. As advice that never stops a run, it also test-merges the branch with its base and with every other open, non-draft GitHub pull request of the repository. Test merges write nothing to any repository.
+
+`--post-merge` isolates the hand resolution of the merge's conflicts (`git show --remerge-diff`): a clean merge, or one that resolved only docs and test files, needs the repository's local test suite instead of a new run; one that resolved production files, or a `HEAD` that is not one merge of the base on top of the validated head, needs a new run. `.nm-triage-nonprod` adds globs that count as non-production there.
 
 ## no-mistakes axi respond
 
@@ -960,6 +1004,16 @@ Stops the current daemon and starts it again. This works whether the daemon is c
 [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping)
 owns the active-run guard, the scope of `--force`, and recursive
 validation-step containment.
+
+## no-mistakes daemon busy
+
+Print how many runs are in the middle of a step.
+
+```sh
+no-mistakes daemon busy
+```
+
+Counts runs that are pending or running and not parked at a gate, and lists them on stderr. A clean `daemon stop --force` keeps a run parked at a gate (it resumes at the same gate on the next start) but fails a run in the middle of a step, so `0` means the service can be stopped without losing work. It reads the run database read-only and never starts the daemon. `make install-local` (`scripts/install-local-build.sh`) waits for it to reach `0` before it installs a new local build: it writes `<NM_HOME>/hold` so no new run starts while it waits (no time limit), stops the service, backs up the run database to `<NM_HOME>/backups/install-<time>/`, installs the build over the binary on `PATH` (keeping the previous one as `<binary>.prev`), starts the service, checks the version, and removes the hold. On any failure it starts the previous binary again, putting it back only once the new one was installed and restoring the database only once the new build was started from that backup. A run parked at a gate that is answered or resumed between the last busy check and the stop is failed by the stop and must be re-run. It exits 0 installed, 1 nothing changed (including while another hold exists), 2 failed and rolled back, and 3 when the rollback failed too, which leaves the hold in place.
 
 ## no-mistakes daemon status
 

@@ -15,7 +15,7 @@ LDFLAGS := -X github.com/kunchenguid/no-mistakes/internal/buildinfo.Version=$(VE
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryHost=$(UMAMI_HOST) \
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryWebsiteID=$(UMAMI_WEBSITE_ID)
 
-.PHONY: build dist install test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check winres winres-check
+.PHONY: build dist install install-local test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check winres winres-check
 
 DIST_DIR ?= dist
 INSTALL_BIN := $(shell go env GOPATH)/bin/no-mistakes
@@ -49,6 +49,13 @@ install: build
 	install -m 755 bin/no-mistakes $(INSTALL_BIN)
 	$(INSTALL_BIN) daemon stop
 	$(INSTALL_BIN) daemon start
+
+# install-local installs bin/no-mistakes into the RUNNING service without
+# failing a run in the middle of a step: it writes the hold file, waits for
+# `daemon busy` to reach 0, backs up the run database, installs, checks the
+# version, and rolls back on failure. See scripts/install-local-build.sh.
+install-local: build
+	scripts/install-local-build.sh
 
 test:
 	go test -race ./...

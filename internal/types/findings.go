@@ -255,6 +255,45 @@ type Finding struct {
 	// always info/no-op: it needs no fix round, and its edit is verified by the
 	// review step's inline-fix verification turn.
 	AppliedInline bool `json:"applied_inline,omitempty"`
+	// InfoKind classifies an "info" review finding by what fixing it changes:
+	// InfoKindWording or InfoKindCommentPlacement for a note that changes no
+	// behavior, InfoKindOther (or empty) for anything else. After the first
+	// review round, a Review whose only remaining findings are such notes
+	// completes without spending another fix round (IsWordingNote).
+	InfoKind string `json:"info_kind,omitempty"`
+}
+
+// Info kinds of a review finding (Finding.InfoKind).
+const (
+	InfoKindWording          = "wording"
+	InfoKindCommentPlacement = "comment-placement"
+	InfoKindOther            = "other"
+)
+
+// IsWordingNote reports whether f is an info-severity note that only asks to
+// reword text or move or add a comment: no behavior changes when it is fixed.
+// Anything else - another severity, an unclassified kind, a review question -
+// is not.
+func (f Finding) IsWordingNote() bool {
+	if f.Severity != FindingSeverityInfo || f.Category == FindingCategoryReviewQuestion {
+		return false
+	}
+	return f.InfoKind == InfoKindWording || f.InfoKind == InfoKindCommentPlacement
+}
+
+// OnlyWordingNotes reports whether items is non-empty and every finding is a
+// wording note the reviewer did not route to a person: what a Review after
+// its first round leaves for the PR instead of spending a fix round on.
+func OnlyWordingNotes(items []Finding) bool {
+	if len(items) == 0 {
+		return false
+	}
+	for _, item := range items {
+		if !item.IsWordingNote() || item.ActionOrDefault() == ActionAskUser {
+			return false
+		}
+	}
+	return true
 }
 
 // TestScenario is one named end-to-end scenario the test step derived from the
@@ -330,6 +369,7 @@ type findingWire struct {
 	FixLines            int    `json:"fix_lines,omitempty"`
 	FixFiles            int    `json:"fix_files,omitempty"`
 	AppliedInline       bool   `json:"applied_inline,omitempty"`
+	InfoKind            string `json:"info_kind,omitempty"`
 	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
 }
 
@@ -722,6 +762,7 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.FixLines = wire.FixLines
 	f.FixFiles = wire.FixFiles
 	f.AppliedInline = wire.AppliedInline
+	f.InfoKind = wire.InfoKind
 	if f.Action == "" && wire.RequiresHumanReview != nil {
 		if *wire.RequiresHumanReview {
 			f.Action = ActionAskUser

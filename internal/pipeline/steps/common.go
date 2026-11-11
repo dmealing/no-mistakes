@@ -314,6 +314,7 @@ var reviewFindingsSchema = json.RawMessage(`{
 					"action": {"type": "string", "enum": ["no-op", "auto-fix", "ask-user"]},
 					"review_scope": {"type": "string", "enum": ["source", "pipeline-owned-delivery", "external-delivery"]},
 					"category": {"type": "string", "enum": ["intent-conformance"]}` + fixEstimateSchemaProperties + `,
+					"info_kind": {"type": "string", "enum": ["wording", "comment-placement", "other"], "description": "For an info finding only: wording (rewords prose, a message, a comment, or a name; no behavior change), comment-placement (moves or adds a code comment), or other"},
 					"applied_inline": {"type": "boolean", "description": "True only when the reviewer already applied this trivial fix itself during the pass"}
 				},
 				"required": ["severity", "description", "action", "review_scope"]

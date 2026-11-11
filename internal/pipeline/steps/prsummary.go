@@ -1454,7 +1454,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 	// them - a data gap we must not paper over as "no issues found".
 	missingRoundFindingsData := sr.FindingsJSON != nil && !roundsHaveFindings(rounds) && !roundsHaveParseFailure(rounds)
 
-	for _, r := range rounds {
+	for i, r := range rounds {
 		isFixRound := r.IsFixRound()
 		if isFixRound {
 			inner.WriteString(fixRoundLine(r))
@@ -1490,6 +1490,15 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 			continue
 		}
 
+		// A completed Review that ended on wording and comment-placement
+		// notes after its first round spent no fix round on them (the
+		// executor's wordingNotesOnly): say so, rather than "still open".
+		if sr.StepName == types.StepReview && i == len(rounds)-1 && r.Round > 1 && sr.Status == types.StepStatusCompleted && types.OnlyWordingNotes(findings.Items) {
+			inner.WriteString(fmt.Sprintf("📝 %d wording or comment-placement %s left for the author (no fix round spent):\n\n", len(findings.Items), pluralWordPR(len(findings.Items), "note", "notes")))
+			writeFindingItems(&inner, sr, &findings, flavor)
+			inner.WriteString("\n")
+			continue
+		}
 		// A fix round that still has findings means the fix did not fully
 		// land; label what remained so the chain reads as fix -> still open.
 		if isFixRound {
@@ -1793,4 +1802,11 @@ func stepDisplayName(name types.StepName) string {
 	default:
 		return string(name)
 	}
+}
+
+func pluralWordPR(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }

@@ -36,6 +36,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/testslots"
+	"github.com/kunchenguid/no-mistakes/internal/triage"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 	"github.com/kunchenguid/no-mistakes/internal/worktrees"
@@ -1612,6 +1613,15 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	if m.shuttingDown.Load() {
 		trackStartFailure("daemon_shutdown")
 		return "", fmt.Errorf("daemon is shutting down")
+	}
+	// A fleet-wide hold (an install waiting for runs to leave their steps)
+	// refuses every new run, whichever path asked for it: `axi run` checks it
+	// first, but a plain push, the TUI, a rerun or a retry reach only this.
+	// Runs already in flight are untouched. Checked before any cancellation
+	// so a held push never supersedes the branch's active run.
+	if hold, _ := triage.ReadHold(m.paths.Root(), time.Now()); hold != nil {
+		trackStartFailure("held")
+		return "", triage.HoldError(hold)
 	}
 	// Best-effort only: a clone's remotes may change after init. Refresh the
 	// registered URLs before constructing any run-owned Git operation, but keep

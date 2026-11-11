@@ -128,6 +128,13 @@ for daemon-wide execution limits and queue behavior.
 This is another reason the daemon exists: branch-level coordination is easier to
 reason about in one long-lived process than inside independent hook invocations.
 
+## Holding new runs
+
+While `$NM_HOME/hold` exists the daemon refuses to create a run, whichever path asks for one (`axi run`, a plain push, a rerun, a retry), and names the hold's `who:`, `why:`, and `until:` lines in the refusal. Runs already in flight are not touched. A hold whose `until:` is a timestamp already past (RFC 3339) has expired; any other content holds until the file is removed.
+`make install-local` writes the hold, waits until [`daemon busy`](/no-mistakes/reference/cli/#no-mistakes-daemon-busy) reports no run in the middle of a step, installs the new build, and removes the hold; a run parked at a gate survives the stop and resumes at that gate.
+
+Before a new run, `axi run` also applies the [pre-run check](/no-mistakes/reference/cli/#pre-run-check), which stops a branch that conflicts with another branch of the same project in validation, a third branch of the project, and a small change while a sibling branch is in validation. That check runs in the CLI only; the daemon itself enforces only the hold.
+
 ## Crash recovery
 
 A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. A clean stop still fails a run that is in the middle of a step.
