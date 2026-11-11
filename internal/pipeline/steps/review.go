@@ -117,6 +117,11 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// edits covers the other half of the measured thrash: a fix that makes the
 	// reported sequence pass while breaking the ordinary path or a caller, and
 	// residue (an alias or branch the fix made dead) the next review reports.
+	// The sibling-search and touched-test rules close what the self-trace
+	// cannot: a sampled nine of 22 later-round findings were sites an earlier
+	// fix round left behind or broke, so the fixer searches for further sites
+	// rather than trusting its own enumeration, and re-runs the tests of the
+	// code it changed before handing back.
 	//
 	// The removal rule is the complement the anti-revert guard was missing.
 	// That guard told the fixer to fix intentional code forward, and "the
@@ -154,7 +159,8 @@ Rules:
 - Do not add code comments explaining your fixes.
 - Apply all the fixes you intend to make first; do not run any verification in between individual fixes.
 - After applying the fixes and before verification, re-trace for each finding the concrete failing sequence it describes through the code as it now is, and trace the ordinary successful path through every function you changed, including each of its callers. Remove any alias, branch, parameter, or helper your fix made unreachable. A fix that makes the reported sequence pass while breaking the ordinary path, a caller's assumption, or a sibling site is a regression the next review will report.
-- After all fixes are applied, run one focused verification limited to the changed area (the specific package, file, or test you touched) at the end of the fix round to confirm the fixes hold.
+- Before handing back, search the code for sibling sites of each finding's fault instead of relying on the sites you already know: search (with grep or your search tool) for the same call, pattern, field, condition, or literal across the changed files and the code that calls into them or that they call. Fix every match in the changed area that has the same fault, with the same correction. Do not edit a match outside the changed area that was already faulty before this change; name it in your summary instead.
+- After all fixes are applied, run one focused verification limited to the changed area at the end of the fix round: re-run every test that exercises code your fixes touched - the tests of each package or file you edited, and every test file you edited or added. If a re-run fails because of your fix, correct the fix and re-run those tests before handing back.
 - Do NOT run the complete repository test suite or lint suite during this fix round. The pipeline has dedicated test and lint steps after review that are the authoritative test and lint gates; their coverage may itself be focused on the changed area when the repository has no configured test or lint commands.
 - If the tool needed for that verification is missing, still apply every fix you intended and skip the unavailable verification. Never make fewer edits, or none, because verification is unavailable.
 - Return JSON with a "summary" field when you are done. Add a "verification_blocked" field, naming the missing tool and why verification could not run, only when the verification you intended could not run; otherwise omit it.
@@ -182,7 +188,7 @@ Previous review findings to address:
 			RequirePreviousFindings:   true,
 			MissingFindingsError:      "review fix requires previous review findings",
 			LogMessage:                "asking agent to fix identified issues...",
-			Prompt:                    fixPrompt,
+			Prompt:                    fixPrompt + freshFixerHandoff(sctx),
 			ErrorPrefix:               "agent fix",
 			FallbackSummary:           "address review findings",
 			SessionRole:               pipeline.SessionRoleFixer,

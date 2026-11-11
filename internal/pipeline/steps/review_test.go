@@ -804,7 +804,7 @@ func TestReviewStep_FixMode_FocusedVerificationContract(t *testing.T) {
 
 	for _, want := range []string{
 		"Apply all the fixes you intend to make first; do not run any verification in between individual fixes.",
-		"After all fixes are applied, run one focused verification limited to the changed area (the specific package, file, or test you touched) at the end of the fix round to confirm the fixes hold.",
+		"After all fixes are applied, run one focused verification limited to the changed area at the end of the fix round: re-run every test that exercises code your fixes touched - the tests of each package or file you edited, and every test file you edited or added. If a re-run fails because of your fix, correct the fix and re-run those tests before handing back.",
 		"Do NOT run the complete repository test suite or lint suite during this fix round. The pipeline has dedicated test and lint steps after review that are the authoritative test and lint gates; their coverage may itself be focused on the changed area when the repository has no configured test or lint commands.",
 	} {
 		if !strings.Contains(fixPrompt, want) {

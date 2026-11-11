@@ -16,6 +16,16 @@ import (
 // concluded from a successful invocation's output never carry it.
 var ErrAgentInvocationFailed = errors.New("agent invocation failed")
 
+// BaseFetchError marks a step that failed because fetching the run's base
+// branch failed after its retries, before the step judged anything. Like an
+// agent invocation failure it says nothing about the change, so a run that
+// failed on it may continue from the failed step.
+type BaseFetchError struct{ Err error }
+
+func (e *BaseFetchError) Error() string { return e.Err.Error() }
+
+func (e *BaseFetchError) Unwrap() error { return e.Err }
+
 type agentInvocationFailure struct{ err error }
 
 func (f *agentInvocationFailure) Error() string { return f.err.Error() }
@@ -97,7 +107,8 @@ func refuseCheckpoint(proof, format string, args ...any) error {
 // boundary to continue from, against the step sequence steps, and refuses
 // with a *RetryRefusal naming the first proof that fails. The record must hold one row per step in
 // that order: completed or skipped rows, then exactly one failed row whose
-// recorded cause is an agent invocation failure, then rows that never ran.
+// recorded cause is an agent invocation failure or a base-branch fetch
+// failure, then rows that never ran.
 // No carried row may be Test or a later step, because Test's evidence and
 // every later step's work are not kept after a run ends.
 func PlanRetryCheckpoint(database *db.DB, run *db.Run, steps []Step) (*RetryCheckpoint, error) {
@@ -129,8 +140,8 @@ func PlanRetryCheckpoint(database *db.DB, run *db.Run, steps []Step) (*RetryChec
 		return nil, refuseCheckpoint(RetryProofCheckpoint, "no step failed")
 	}
 	row := rows[failed]
-	if row.FailureCause == nil || *row.FailureCause != db.StepFailureCauseAgentInvocation {
-		return nil, refuseCheckpoint(RetryProofCause, "step %s did not fail on an agent invocation error (provider, transport, or agent process), so the failure may be about the change itself", row.StepName)
+	if row.FailureCause == nil || (*row.FailureCause != db.StepFailureCauseAgentInvocation && *row.FailureCause != db.StepFailureCauseBaseFetch) {
+		return nil, refuseCheckpoint(RetryProofCause, "step %s did not fail on an agent invocation error (provider, transport, or agent process) or a base-branch fetch, so the failure may be about the change itself", row.StepName)
 	}
 	for _, carried := range rows[:failed] {
 		if carried.StepName.Order() >= types.StepTest.Order() {

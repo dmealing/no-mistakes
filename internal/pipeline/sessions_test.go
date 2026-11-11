@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -385,5 +386,50 @@ func TestRunSessions_AgentChangeDiscardsStoredSession(t *testing.T) {
 	}
 	if call := fake.calls[0]; call.session == nil || call.session.ID != "" {
 		t.Fatalf("stored session for another agent must be discarded, got %+v", call.session)
+	}
+}
+
+// TestRunSessions_DropColdSession pins the prompt-cache window: a stored
+// session idle past SessionColdAfter is forgotten (in memory and in the
+// store) so the next turn starts fresh, one inside the window is kept, and a
+// manager rebuilt after a restart judges the age from the stored row.
+func TestRunSessions_DropColdSession(t *testing.T) {
+	d, run := sessionTestDB(t)
+	fake := newFakeSessionAgent()
+	rs := NewRunSessions(d, run.ID, fake, true)
+	start := time.Now()
+	clock := start
+	rs.SetClock(func() time.Time { return clock })
+	if _, err := rs.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{Prompt: "fix"}, nil); err != nil {
+		t.Fatalf("initial: %v", err)
+	}
+
+	clock = start.Add(SessionColdAfter - time.Second)
+	if _, dropped := rs.DropColdSession(SessionRoleFixer); dropped {
+		t.Fatal("a session inside the cache window must be kept")
+	}
+	if rs.StartsFresh(fake, SessionRoleFixer) {
+		t.Fatal("a kept session must be resumed")
+	}
+
+	// A restarted daemon reads the age from the stored row.
+	restarted := NewRunSessions(d, run.ID, fake, true)
+	restarted.SetClock(func() time.Time { return start.Add(SessionColdAfter + 2*time.Minute) })
+	idle, dropped := restarted.DropColdSession(SessionRoleFixer)
+	if !dropped || idle <= SessionColdAfter {
+		t.Fatalf("a session idle past the window must be dropped, got idle=%s dropped=%v", idle, dropped)
+	}
+	if !restarted.StartsFresh(fake, SessionRoleFixer) {
+		t.Fatal("after a cold drop the next turn must start fresh")
+	}
+	stored, err := d.GetRunAgentSessions(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("a cold drop must delete the stored identity, got %+v", stored)
+	}
+	if _, dropped := restarted.DropColdSession(SessionRoleFixer); dropped {
+		t.Fatal("nothing stored means nothing to drop")
 	}
 }

@@ -686,17 +686,18 @@ func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 	coverageHelp := "Run `" + respond + " --action complete-coverage` to review only the remaining paths using stored coverage for this source"
 	abort := "`no-mistakes axi abort" + runFlag(runID) + "`"
 	intentRefusal := gate.Name == string(types.StepReview) && pipeline.HasIntentConformanceRefusal(gate.FindingsJSON)
+	correctIntent := "`" + respond + " --action correct-intent --intent-file <path>`"
 	help := []string{
 		"Run `" + respond + " --action approve` to accept this step and continue",
 		"Run `" + respond + " --action fix --findings <ids> [--ignore <ids>]` to have the pipeline fix the selected findings (do not edit files yourself); list every finding below in `--findings` or `--ignore`, unless an earlier round of this step already decided it, and a finding that round chose to fix cannot be declined by a later response",
 	}
 	if intentRefusal {
-		help[0] = "Approve and Skip are rejected: an intent-conformance finding says the change does not match the run's intent, and the PR step would refuse it after Test, Document, and Push. Fix the change to bring it into line with the intent, or run " + abort + " and start a new run with a corrected --intent"
+		help[0] = "Approve and Skip are rejected: an intent-conformance finding says the change does not match the run's intent, and the PR step would refuse it after Test, Document, and Push. Fix the change to bring it into line with the intent, or, when the intent itself was wrong, run " + correctIntent + " to review it again in this run against a corrected --intent"
 	}
 	if pipeline.HasReviewFixRoundLimit(gate.FindingsJSON) {
 		next := "Inspect the remaining findings, then explicitly run `" + respond + " --action approve` to accept them, or abort the run. A new run gets a new budget; changing config does not extend this run."
 		if intentRefusal {
-			next = "Approve and Skip are rejected by the intent-conformance finding, so only " + abort + " remains; start a new run with a corrected --intent. A new run gets a new budget; changing config does not extend this run."
+			next = "Approve and Skip are rejected by the intent-conformance finding. When the intent itself was wrong, run " + correctIntent + " to review it again in this run against a corrected --intent (it spends no fix round); otherwise only " + abort + " remains. A new run gets a new budget; changing config does not extend this run."
 		}
 		help = []string{
 			"The total Review fix-round budget is exhausted; further fix requests are refused and automatic resolvers leave this gate parked. Remaining findings are unchanged.",

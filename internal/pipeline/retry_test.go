@@ -361,3 +361,58 @@ func TestExecutor_RetryFollowsTheCurrentCIModeNotTheSourcesLocalSkip(t *testing.
 		})
 	}
 }
+
+// TestExecutor_RecordsABaseFetchFailureAsTheStepsCause: a step that failed
+// because fetching the base branch failed after its retries records the
+// base_fetch cause, so a later run may continue from it; a step that failed
+// for any other reason records none.
+func TestExecutor_RecordsABaseFetchFailureAsTheStepsCause(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		cause string
+	}{
+		{name: "base fetch", err: fmt.Errorf("test: %w", &BaseFetchError{Err: errors.New(`fetch default branch "main" to resolve branch base: Permission denied (publickey)`)}), cause: db.StepFailureCauseBaseFetch},
+		{name: "the step's own verdict", err: errors.New("tests failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			step := &adaptiveCallStep{name: types.StepTest, fn: func(*StepContext) (*StepOutcome, error) { return nil, tc.err }}
+			if err := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil).Execute(context.Background(), run, repo, t.TempDir()); err == nil {
+				t.Fatal("execute succeeded, want the step to fail")
+			}
+			steps, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if steps[0].FailureCause != nil {
+				got = *steps[0].FailureCause
+			}
+			if steps[0].Status != types.StepStatusFailed || got != tc.cause {
+				t.Fatalf("step status=%s cause=%q, want failed with cause %q", steps[0].Status, got, tc.cause)
+			}
+		})
+	}
+}
+
+// TestPlanRetryCheckpointAcceptsABaseFetchFailure: a step that failed on the
+// base-branch fetch is a boundary a continuation may restart, like an agent
+// invocation failure, so a Test that could not fetch main does not cost the
+// finished review.
+func TestPlanRetryCheckpointAcceptsABaseFetchFailure(t *testing.T) {
+	core := []types.StepName{types.StepIntent, types.StepRebase, types.StepReview, types.StepTest, types.StepDocument}
+	database, _, _, repo := setupTest(t)
+	run := failedSourceRun(t, database, repo, core, types.StepTest)
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.FailStepWithCause(steps[3].ID, `fetch default branch "main" to resolve branch base: signal: killed`, 10, db.StepFailureCauseBaseFetch); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := PlanRetryCheckpoint(database, run, stepsNamed(core...))
+	if err != nil || checkpoint.Failed().StepName != types.StepTest || checkpoint.Index != 3 {
+		t.Fatalf("checkpoint = %+v, err = %v; want Test at index 3", checkpoint, err)
+	}
+}

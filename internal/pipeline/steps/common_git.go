@@ -56,8 +56,8 @@ func resolveBranchBaseSHA(ctx context.Context, sctx *pipeline.StepContext, fallb
 	// Eval replay has no upstream to fetch: it pins origin/<base> to the
 	// captured commit in its isolated worktree, which is the base to use.
 	if strings.TrimSpace(defaultBranch) != "" && !sctx.EvalReplay {
-		if err := fetchRunUpstreamBranch(ctx, sctx, defaultBranch); err != nil {
-			return "", fmt.Errorf("fetch default branch %q to resolve branch base: %w", defaultBranch, err)
+		if err := fetchBaseBranchWithRetry(ctx, sctx, defaultBranch); err != nil {
+			return "", &pipeline.BaseFetchError{Err: fmt.Errorf("fetch default branch %q to resolve branch base: %w", defaultBranch, err)}
 		}
 	}
 	baseSHA := mergeBaseWithDefaultBranch(ctx, sctx.WorkDir, defaultBranch)
@@ -202,6 +202,41 @@ var fetchUpstreamTimeout = 120 * time.Second
 
 // ErrFetchTimeout marks a fetch that exceeded fetchUpstreamTimeout.
 var ErrFetchTimeout = errors.New("upstream fetch timed out")
+
+// baseFetchAttempts and baseFetchRetryDelay bound the base-branch fetch's
+// retries. Recorded failures of that fetch were transient - a killed or
+// timed-out SSH session, a dropped connection, a concurrent fetch holding the
+// remote-tracking ref lock - and each failed a run whose review had already
+// finished. The delay doubles after each failed attempt. Overridable so tests
+// do not wait it out.
+var (
+	baseFetchAttempts   = 3
+	baseFetchRetryDelay = 2 * time.Second
+)
+
+// fetchBaseBranchWithRetry fetches branch's current upstream tip, retrying a
+// failed fetch until baseFetchAttempts is spent. A cancelled or expired run
+// context is never retried.
+func fetchBaseBranchWithRetry(ctx context.Context, sctx *pipeline.StepContext, branch string) error {
+	delay := baseFetchRetryDelay
+	var err error
+	for attempt := 1; ; attempt++ {
+		if err = fetchRunUpstreamBranch(ctx, sctx, branch); err == nil || ctx.Err() != nil || attempt >= baseFetchAttempts {
+			return err
+		}
+		if sctx.Log != nil {
+			sctx.Log(fmt.Sprintf("fetch of base branch %q failed (attempt %d of %d), retrying in %s: %s", branch, attempt, baseFetchAttempts, delay, safeurl.RedactText(err.Error())))
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return err
+		case <-timer.C:
+		}
+		delay *= 2
+	}
+}
 
 func fetchRunUpstreamBranch(ctx context.Context, sctx *pipeline.StepContext, branch string) error {
 	// Respect a deadline the caller already set rather than extending it.

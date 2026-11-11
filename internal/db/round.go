@@ -35,10 +35,12 @@ type StepRound struct {
 	ID           string
 	StepResultID string
 	Round        int
-	// Trigger is "initial", "auto_fix", "coverage", or "answer" (a review turn resumed
+	// Trigger is "initial", "auto_fix", "coverage", "answer" (a review turn resumed
 	// once every question it left open was answered - not a fix round, since
-	// no code changed). "coverage" starts another static review without a fix
-	// or verdict; legacy "user_fix" is treated as "auto_fix".
+	// no code changed), or "intent" (a review rerun against an intent the
+	// operator corrected at the gate - also not a fix round). "coverage" starts
+	// another static review without a fix or verdict; legacy "user_fix" is
+	// treated as "auto_fix".
 	Trigger          string
 	FindingsJSON     *string // nullable - findings produced by this round
 	ReviewedHeadSHA  *string // non-authoritative commit candidate captured by a review round

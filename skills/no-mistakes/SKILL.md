@@ -230,9 +230,18 @@ Run the pipeline and decide on its findings as they come up:
    # continue static review when coverage is incomplete and findings are empty
    no-mistakes axi respond --step review --action complete-coverage
 
+   # review again against a corrected run intent, in this run
+   no-mistakes axi respond --step review --action correct-intent --intent-file <path>
+
    # reject this gate (only when the user has decided it must fail)
    no-mistakes axi respond --action abort --reason "<why the gate is rejected>"
    ```
+   `correct-intent` is the answer when a Review finding shows the run's
+   intent was wrong or incomplete: it replaces the intent and reviews again in
+   the same run instead of an abort and a new run. The corrected intent is the
+   user's to give - send only text the user stated or approved. Findings judged
+   against the old intent are reviewed again; a fix already dispatched stays
+   outstanding until a review verifies it.
    `complete-coverage` runs a fresh reviewer over only the missing paths.
    It reuses stored coverage only for the same run, step, round, head, base, and trusted scope.
    Missing or invalid provenance keeps Review gated. Source changes during the turn also keep it gated.

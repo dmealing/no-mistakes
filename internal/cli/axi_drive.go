@@ -382,6 +382,7 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			runID = active.ID
 		}
 	}
+	var lead []toon.Field
 	if runID != "" && planRequested {
 		return emitError(cmd, 2, "--verification-plan is accepted only when starting a new run; omit it to reattach")
 	}
@@ -419,6 +420,14 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		if guard := preflightGuard(ctx, env, branch); guard != nil {
 			return guard(cmd)
 		}
+		if launchNonce == "" && !planRequested && profile == nil && len(skipSteps) == 0 {
+			if continued := continueFailedRun(ctx, env, branch, intent, baseBranch, omitIntent, closesIssues); continued != nil {
+				runID = continued.RunID
+				lead = retriedRunFields(continued)
+			}
+		}
+	}
+	if runID == "" {
 		planID := ""
 		if planRequested {
 			source, err := filepath.Abs(planPath)
@@ -476,11 +485,49 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 	run, ciReady, err := driveRun(driveCtx, cmd.ErrOrStderr(), env.client, env.p.Socket(), runID, autoYes)
 	if err != nil {
 		if isAxiWaitElapsed(ctx, driveCtx, err) {
-			return emitAxiWaitElapsed(cmd, wait, "no-mistakes axi run")
+			return emitAxiWaitElapsed(cmd, wait, "no-mistakes axi run", lead...)
 		}
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
-	return renderDriveResult(cmd, run, ciReady)
+	return renderDriveResult(cmd, run, ciReady, lead...)
+}
+
+// continueFailedRun asks the daemon to continue the branch's latest run
+// instead of starting a fresh one, so a run that failed after its review
+// finished (on an agent invocation error or a base-branch fetch) does not pay
+// for that review again. The daemon proves every `axi retry` proof plus an
+// unchanged request and a finished, carried review. Any refusal or error -
+// including an older daemon that does not know the request - returns nil and
+// the caller starts a fresh run exactly as before.
+func continueFailedRun(ctx context.Context, env *axiEnv, branch, intent, baseBranch string, omitIntent bool, closesIssues []string) *ipc.RetryRunResult {
+	callerHead, err := rerunCallerHead(ctx)
+	if err != nil || callerHead == "" {
+		return nil
+	}
+	var result ipc.RetryRunResult
+	if err := env.client.Call(ipc.MethodRetryRun, &ipc.RetryRunParams{
+		RepoID:           env.repo.ID,
+		Branch:           branch,
+		CallerHeadSHA:    callerHead,
+		Automatic:        true,
+		Intent:           intent,
+		PRBaseBranch:     strings.TrimSpace(baseBranch),
+		OmitIntent:       omitIntent,
+		ClosingIssueRefs: closesIssues,
+	}, &result); err != nil || result.RunID == "" {
+		return nil
+	}
+	return &result
+}
+
+// retriedRunFields leads a continued run's output, as `axi retry` does.
+func retriedRunFields(result *ipc.RetryRunResult) []toon.Field {
+	return []toon.Field{
+		{Key: "retried", Value: true},
+		{Key: "retry_of", Value: result.SourceRunID},
+		{Key: "restarted_step", Value: string(result.Step)},
+		{Key: "failed_round", Value: result.SourceRound},
+	}
 }
 
 func digestLaunchIntent(intent string) string {
@@ -1162,7 +1209,7 @@ func driveRunScoped(ctx context.Context, progress io.Writer, client *ipc.Client,
 			// fixing the scope and a corrected --intent settles it, and Approve is
 			// refused at review, so --yes has nothing it may send.
 			if gate.Name == string(types.StepReview) && pipeline.HasIntentConformanceRefusal(gate.FindingsJSON) {
-				fmt.Fprintf(progress, "%s: an intent-conformance finding requires an explicit response (fix the change, or abort and rerun with a corrected --intent); --yes leaves this gate awaiting a response\n", gate.Name)
+				fmt.Fprintf(progress, "%s: an intent-conformance finding requires an explicit response (fix the change, or correct-intent to review it again against a corrected --intent); --yes leaves this gate awaiting a response\n", gate.Name)
 				return run, false, nil
 			}
 			gateKey := gate.Name + "\x00" + gate.Status
@@ -1299,6 +1346,12 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 	if len(coverage) == 1 {
 		params.Coverage = coverage[0]
 	}
+	return sendRespondParams(client, params)
+}
+
+// sendRespondParams sends one gate response and turns a daemon refusal into a
+// respondRefusalError.
+func sendRespondParams(client *ipc.Client, params *ipc.RespondParams) (ipc.RespondResult, error) {
 	var result ipc.RespondResult
 	if err := client.Call(ipc.MethodRespond, params, &result); err != nil {
 		return ipc.RespondResult{}, err
@@ -1555,14 +1608,14 @@ func successReportHelp(fixes []fixRow) []string {
 const legacyApprovalReasonRefusal = "an approval reason applies only to Test approval"
 
 func newAxiRespondCmd() *cobra.Command {
-	var action, step, findings, ignore, instructions, instructionsFile, addFinding, addFindingFile, reason, runID string
+	var action, step, findings, ignore, instructions, instructionsFile, addFinding, addFindingFile, reason, runID, intent, intentFile string
 	var autoYes bool
 	var wait time.Duration
 
 	cmd := &cobra.Command{
 		Use:   "respond",
 		Short: "Answer the current approval gate and continue the run",
-		Long: "Sends approve/fix/skip/abort/complete-coverage for the step currently awaiting approval, then\n" +
+		Long: "Sends approve/fix/skip/abort/complete-coverage/correct-intent for the step currently awaiting approval, then\n" +
 			"blocks until the next gate, CI-ready decision point, or final outcome.\n" +
 			"With no flags it answers the active run on the current branch. Pass\n" +
 			"--run <id> to answer a specific run by its id from anywhere - including\n" +
@@ -1584,6 +1637,13 @@ func newAxiRespondCmd() *cobra.Command {
 			"the structured branch_sync next_action in the output. Unlike `axi abort`,\n" +
 			"which cancels whatever the run is doing, this records a rejection at one\n" +
 			"gate and is refused unless the run is parked there.\n\n" +
+			"With --action correct-intent, a parked Review takes a corrected run intent\n" +
+			"(--intent, --intent-file, or --intent - for stdin) and reviews the change\n" +
+			"again against it in the same run, instead of the run being aborted and\n" +
+			"started over. Findings judged against the old intent are reviewed again;\n" +
+			"a fix already dispatched stays outstanding until a review verifies it.\n" +
+			"The corrected intent replaces the run's intent for every later step,\n" +
+			"including the PR body.\n\n" +
 			"Warning: inline text is expanded by your shell; backticks can execute commands\n" +
 			"and silently replace content. Use --instructions-file or --add-finding-file\n" +
 			"for text containing backticks, quotes, or newlines. Use --instructions - or --add-finding - to read\n" +
@@ -1615,11 +1675,15 @@ func newAxiRespondCmd() *cobra.Command {
 					wait:             wait,
 					runID:            strings.TrimSpace(runID),
 					runFlagSet:       cmd.Flags().Changed("run"),
+					intent:           intent,
+					intentFile:       intentFile,
 				})
 			})
 		},
 	}
-	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip | abort | complete-coverage (required)")
+	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip | abort | complete-coverage | correct-intent (required)")
+	cmd.Flags().StringVar(&intent, "intent", "", "corrected run intent (with --action correct-intent); '-' reads stdin (exclusive with --intent-file)")
+	cmd.Flags().StringVar(&intentFile, "intent-file", "", "read the corrected run intent from a file (with --action correct-intent; exclusive with --intent)")
 	cmd.Flags().StringVar(&runID, "run", "", "answer this run id directly, without resolving the current branch or worktree")
 	cmd.Flags().StringVar(&step, "step", "", "step to respond to (default: the step awaiting approval)")
 	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
@@ -1648,6 +1712,8 @@ type respondArgs struct {
 	wait             time.Duration
 	runID            string
 	runFlagSet       bool
+	intent           string
+	intentFile       string
 }
 
 func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
@@ -1668,16 +1734,35 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	respondCmd := "no-mistakes axi respond" + runFlag(ra.runID)
 	act := types.ApprovalAction(strings.TrimSpace(ra.action))
 	switch act {
-	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort, types.ActionCompleteCoverage:
+	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort, types.ActionCompleteCoverage, types.ActionCorrectIntent:
 	case "":
 		return emitError(cmd, 2, "--action is required",
 			"Run `"+respondCmd+" --action approve|fix|skip|abort`")
 	default:
 		return emitError(cmd, 2, fmt.Sprintf("unknown action %q", ra.action),
-			"Valid actions: approve, fix, skip, abort, complete-coverage")
+			"Valid actions: approve, fix, skip, abort, complete-coverage, correct-intent")
 	}
 	if act == types.ActionCompleteCoverage && (ra.autoYes || ra.findings != "" || ra.ignore != "" || ra.instructions != "" || ra.addFinding != "" || ra.reason != "") {
 		return emitError(cmd, 2, "complete-coverage cannot approve subsequent gates or change findings")
+	}
+	intentGiven := cmd.Flags().Changed("intent") || cmd.Flags().Changed("intent-file")
+	if act != types.ActionCorrectIntent && intentGiven {
+		return emitError(cmd, 2, "--intent and --intent-file apply only to --action correct-intent")
+	}
+	if act == types.ActionCorrectIntent && (ra.autoYes || ra.findings != "" || ra.ignore != "" || ra.instructions != "" || ra.instructionsFile != "" || ra.addFinding != "" || ra.addFindingFile != "" || ra.reason != "") {
+		return emitError(cmd, 2, "correct-intent takes only the corrected intent: it cannot approve subsequent gates, give a reason, or change findings")
+	}
+	if act == types.ActionCorrectIntent && !intentGiven {
+		return emitError(cmd, 2, "--action correct-intent requires --intent <text>, --intent-file <path>, or --intent - (stdin)",
+			"Run `"+respondCmd+" --action correct-intent --intent-file <path>`")
+	}
+	correctedIntent := ""
+	if act == types.ActionCorrectIntent {
+		var err error
+		correctedIntent, err = resolveAxiRunIntent(cmd, ra.intent, ra.intentFile)
+		if err != nil {
+			return emitError(cmd, 2, err.Error())
+		}
 	}
 
 	instructionsStdin := cmd.Flags().Changed("instructions") && ra.instructions == "-"
@@ -1785,6 +1870,9 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	if act == types.ActionCompleteCoverage && stepName != types.StepReview {
 		return emitError(cmd, 2, "complete-coverage applies only to a parked Review")
 	}
+	if act == types.ActionCorrectIntent && stepName != types.StepReview {
+		return emitError(cmd, 2, "correct-intent applies only to a parked Review")
+	}
 
 	findingIDs := splitCSV(ra.findings)
 	ignoreIDs := splitCSV(ra.ignore)
@@ -1828,7 +1916,18 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 			return emitError(cmd, 1, "daemon did not provide a bound review round for coverage continuation")
 		}
 	}
-	result, err := sendRespond(env.client, runID, stepName, act, findingIDs, ignoreIDs, instructions, added, reason, types.ResponseOriginInteractive, coverage)
+	var result ipc.RespondResult
+	if act == types.ActionCorrectIntent {
+		result, err = sendRespondParams(env.client, &ipc.RespondParams{
+			Origin:          types.ResponseOriginInteractive,
+			RunID:           runID,
+			Step:            stepName,
+			Action:          act,
+			CorrectedIntent: correctedIntent,
+		})
+	} else {
+		result, err = sendRespond(env.client, runID, stepName, act, findingIDs, ignoreIDs, instructions, added, reason, types.ResponseOriginInteractive, coverage)
+	}
 	if err != nil {
 		var refusal *respondRefusalError
 		if errors.As(err, &refusal) {
