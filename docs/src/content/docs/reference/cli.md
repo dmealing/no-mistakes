@@ -747,8 +747,8 @@ default can only add omission, never remove it. If another run is active on that
 cancels it before starting over. Treat rerun as a between-runs action after a
 failed or cancelled outcome; use `axi run` for separate local fixes, and do not
 use rerun to bypass a gate. When the run failed only because an agent invocation
-failed, [`no-mistakes axi retry`](#no-mistakes-axi-retry) continues it from the
-failed step instead of repeating every completed step.
+or the base-branch fetch failed, [`no-mistakes axi retry`](#no-mistakes-axi-retry)
+continues it instead of repeating every completed step.
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
