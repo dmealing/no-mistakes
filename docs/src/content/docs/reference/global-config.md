@@ -886,6 +886,7 @@ Set it to `off` (`none`, `never`, and `unlimited` are accepted aliases), `0`, or
 
 Unlike `step_quiet_warning`, this one acts: a run whose active step stays silent past the threshold transitions to `failed` with an error starting with `dead run:`, its agent process tree is killed, and its worktree is cleaned up.
 A running configured `commands.*` invocation counts as activity: its output is captured buffered, so the daemon heartbeats the step while it waits on the live command, and a long-but-healthy test suite is never stall-killed.
+The same holds for a suite an agent runs through a tool call: while a quiet agent waits on a process it launched after its last output, the daemon heartbeats the step every few minutes, so `axi status` keeps reading `liveness: ok`. A long-lived helper the agent started before it last spoke (a stdio MCP server, for example) does not count, so a wedged agent is still caught.
 The CI step is exempt because its monitor deliberately deduplicates unchanged poll logs and its idle lifetime is owned by [`ci_timeout`](#ci_timeout); runs parked at an approval gate are exempt because parking is agent-paced by design, and runs waiting in the [`max_concurrent_runs`](#max_concurrent_runs) queue are exempt because they have not started.
 The watchdog also fails a run whose worktree directory was removed out from under it or whose recorded agent process died without the step observing the exit, regardless of this setting.
 See [the daemon lifecycle](/no-mistakes/concepts/daemon/) for the full dead-run model.

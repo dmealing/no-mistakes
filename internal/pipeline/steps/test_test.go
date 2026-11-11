@@ -1623,3 +1623,92 @@ func TestTestStep_LiveEvidenceDisabledStillRunsAgentWhenBaselineFails(t *testing
 		t.Fatalf("outcome = %+v, want the failing baseline to block", outcome)
 	}
 }
+
+// A change the evidence turn leaves in the worktree (a repaired script, a new
+// focused test) belongs to the Test step. Before this, Test completed with the
+// tree dirty and the Document step's commit swept the change up, publishing a
+// Test repair under a "no-mistakes(document): ..." subject. Committing it must
+// not attest the edited head: the tests ran before the edits.
+func TestTestStep_EvidenceTurnChangesAreCommittedAsTest(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(dir, "install.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(filepath.Join(dir, "install_test.go"), []byte("package main\n"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lastCommitMessage(t, dir); got != "no-mistakes(test): apply changes made during test validation" {
+		t.Fatalf("last commit message = %q, want the Test step's own subject", got)
+	}
+	if status := gitCmd(t, dir, "status", "--porcelain"); strings.TrimSpace(status) != "" {
+		t.Fatalf("Test left changes for a later step to commit:\n%s", status)
+	}
+	newHead := strings.TrimSpace(gitCmd(t, dir, "rev-parse", "HEAD"))
+	if newHead == headSHA || sctx.Run.HeadSHA != newHead {
+		t.Fatalf("run head = %s, worktree head = %s, want the run advanced past %s", sctx.Run.HeadSHA, newHead, headSHA)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The baseline and scenarios ran before the edits, so the tested head
+	// stays the pre-edit one and the edited head is never attested.
+	if findings.TestedHeadSHA != headSHA {
+		t.Fatalf("tested head = %q, want the pre-edit head %q the tests ran against", findings.TestedHeadSHA, headSHA)
+	}
+	steps, rounds := testStepWithFindings(t, outcome.Findings)
+	if att := newPipelineAttestation(steps, rounds, newHead, pipelineAttestationPolicy{}); att.LiveValidation != nil {
+		t.Fatalf("the head carrying unvalidated Test edits was attested as live-validated: %+v", att.LiveValidation)
+	}
+	foundNewTest := false
+	for _, item := range findings.Items {
+		if strings.Contains(item.Description, "new test file written by agent: install_test.go") {
+			foundNewTest = true
+		}
+	}
+	if !foundNewTest {
+		t.Fatalf("the new test file must still be reported after the commit, got %+v", findings.Items)
+	}
+}
+
+// With no evidence-turn edits the head does not move, and the tested head is
+// attested as live-validated exactly as before.
+func TestTestStep_NoEvidenceTurnChangesKeepTheLiveValidationAttestation(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(gitCmd(t, dir, "rev-parse", "HEAD")); got != headSHA || sctx.Run.HeadSHA != headSHA {
+		t.Fatalf("head moved to %s (run head %s) with no edits, want %s", got, sctx.Run.HeadSHA, headSHA)
+	}
+	steps, rounds := testStepWithFindings(t, outcome.Findings)
+	if att := newPipelineAttestation(steps, rounds, headSHA, pipelineAttestationPolicy{}); att.LiveValidation == nil {
+		t.Fatal("an unedited tested head must still carry the live-validation attestation")
+	}
+}

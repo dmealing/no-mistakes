@@ -334,9 +334,13 @@ func (s stepView) findingCount() int {
 }
 
 // findingsTally summarizes a run's findings across all steps by action, so an
-// agent sees the shape of outstanding work without a follow-up call.
+// agent sees the shape of outstanding work without a follow-up call. An
+// ask-user finding is awaiting only while its step is parked at a gate; once
+// the step moved on, a response already decided it, so it counts as decided.
+// Counting every ask-user as awaiting made a finished run report a finding
+// still waiting on a response that could no longer be given.
 func (rv runView) findingsTally() string {
-	var awaiting, autofix, info int
+	var awaiting, decided, autofix, info int
 	for _, s := range rv.Steps {
 		if s.FindingsJSON == "" {
 			continue
@@ -345,10 +349,15 @@ func (rv runView) findingsTally() string {
 		if err != nil {
 			continue
 		}
+		parked := s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusFixReview)
 		for _, f := range parsed.Items {
 			switch f.Action {
 			case types.ActionAskUser:
-				awaiting++
+				if parked {
+					awaiting++
+				} else {
+					decided++
+				}
 			case types.ActionAutoFix:
 				autofix++
 			default:
@@ -356,9 +365,12 @@ func (rv runView) findingsTally() string {
 			}
 		}
 	}
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if awaiting > 0 {
 		parts = append(parts, fmt.Sprintf("%d awaiting", awaiting))
+	}
+	if decided > 0 {
+		parts = append(parts, fmt.Sprintf("%d decided", decided))
 	}
 	if autofix > 0 {
 		parts = append(parts, fmt.Sprintf("%d auto-fix", autofix))

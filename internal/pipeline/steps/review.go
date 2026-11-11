@@ -568,14 +568,14 @@ Risk assessment (after listing all findings):
 		// the same missing evidence as an empty or partial one (VISION.md R4:
 		// every review pass covers the complete change).
 		//
-		// Before parking, one focused completion turn reviews exactly the
-		// uncovered files and merges its record into this round's. Self-reported
+		// Before parking, focused completion turns review exactly the
+		// uncovered files and merge their records into this round's. Self-reported
 		// coverage is lossy in exactly this way on real multi-file diffs (a
 		// 15-file branch saw three consecutive zero-finding rounds each omit a
 		// different file), and the only non-waiver path used to be a full
 		// re-review that re-rolled the same dice after a fixer round with
-		// nothing to fix. The completion turn keeps the operator out of that
-		// loop; whatever is still uncovered after it parks with the explicit
+		// nothing to fix. The completion turns keep the operator out of that
+		// loop; whatever is still uncovered after them parks with the explicit
 		// remainder named, so a partial or fabricated record never approves.
 		completed := findings
 		if retained == nil {
@@ -688,12 +688,67 @@ func reviewCoverageCompletionSection(missing []string) string {
 	return b.String()
 }
 
-// completeCoverageGaps runs at most one focused review turn over exactly the
+// maxCoverageCompletionTurns caps the focused coverage-completion turns one
+// review pass may run. A large change can leave hundreds of files uncovered
+// and one turn covers only a slice of them; with a single turn, a 361-file
+// rereview parked with 338 files unverified and needed one manual
+// continuation per slice.
+const maxCoverageCompletionTurns = 10
+
+// completeCoverageGaps runs focused review turns over exactly the reviewable
+// files still uncovered, merging each turn's findings and coverage record
+// into the round's, while each turn adds coverage: it stops when coverage is
+// complete, when a turn adds nothing, fails, or reports a blocking finding,
+// when the record holds an entry no further review can cure, or after
+// maxCoverageCompletionTurns. It runs only on a round that would otherwise
+// park SOLELY on a coverage gap (zero blocking findings), so a healthy
+// full-coverage review costs nothing extra and a round with findings parks
+// unchanged. Whatever is still uncovered afterwards parks, named.
+func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt string, role pipeline.SessionRole, opts agent.RunOpts, findings Findings, reviewable []string, askDir string) (Findings, error) {
+	for turn := 1; turn <= maxCoverageCompletionTurns; turn++ {
+		before := len(uncoveredReviewablePaths(findings.ReviewedPaths, reviewable))
+		next, ran, err := s.completeCoverageGapsOnce(sctx, basePrompt, role, opts, findings, reviewable, askDir, turn)
+		findings = next
+		if err != nil || !ran {
+			return findings, err
+		}
+		after := len(uncoveredReviewablePaths(findings.ReviewedPaths, reviewable))
+		switch {
+		case after == 0:
+			return findings, nil
+		case after >= before:
+			sctx.Log(fmt.Sprintf("focused coverage pass %d covered no new file; stopping with %d file(s) unverified", turn, after))
+			return findings, nil
+		case hasBlockingFindings(findings.Items):
+			return findings, nil
+		case hasOutOfScopeReviewedPath(findings.ReviewedPaths, reviewable):
+			return findings, nil
+		}
+	}
+	sctx.Log(fmt.Sprintf("reached the cap of %d focused coverage passes", maxCoverageCompletionTurns))
+	return findings, nil
+}
+
+// hasOutOfScopeReviewedPath reports a coverage entry outside the reviewable
+// set. Such an entry fails the coverage check whatever else is covered, so
+// another completion turn cannot certify the round.
+func hasOutOfScopeReviewedPath(reviewed, reviewable []string) bool {
+	allowed := make(map[string]bool, len(reviewable))
+	for _, p := range reviewable {
+		allowed[normalizeReviewedPath(p)] = true
+	}
+	for _, p := range reviewed {
+		if !allowed[normalizeReviewedPath(p)] {
+			return true
+		}
+	}
+	return false
+}
+
+// completeCoverageGapsOnce runs one focused review turn over exactly the
 // reviewable files the current or retained pass did not cover, and merges its
-// findings and coverage record into the round's. It runs only on a round that
-// would otherwise park SOLELY on a coverage gap (zero blocking findings), so
-// a healthy full-coverage review costs nothing extra and a round with
-// findings parks unchanged.
+// findings and coverage record into the round's. ran reports whether a turn
+// ran and returned usable output.
 //
 // Every failure of the completion turn is fail-closed to today's explicit
 // park, never to an approval and never to a failed run: the first turn's
@@ -702,7 +757,7 @@ func reviewCoverageCompletionSection(missing []string) string {
 // keeps the strict coverage rule intact - the union is re-checked by
 // reviewedPathsCoverReviewable, so an out-of-scope entry from either turn
 // still fails the round and is named in the park message.
-func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt string, role pipeline.SessionRole, opts agent.RunOpts, findings Findings, reviewable []string, askDir string) (Findings, error) {
+func (s *ReviewStep) completeCoverageGapsOnce(sctx *pipeline.StepContext, basePrompt string, role pipeline.SessionRole, opts agent.RunOpts, findings Findings, reviewable []string, askDir string, turn int) (Findings, bool, error) {
 	if sctx.EvalReplay {
 		// Eval replay scores the review's findings against captured gold and
 		// never consumes the reviewed_paths certification, so the completion
@@ -712,29 +767,29 @@ func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt
 		// recorded cost; replay runs exactly the captured review pass, schema
 		// retries included, and the strict coverage check below still parks
 		// the incomplete record.
-		return findings, nil
+		return findings, false, nil
 	}
 	missing := uncoveredReviewablePaths(findings.ReviewedPaths, reviewable)
 	if len(missing) == 0 {
 		// Nothing in-scope is missing; the park comes from out-of-scope
 		// reviewed_paths entries, which more review cannot cure.
-		return findings, nil
+		return findings, false, nil
 	}
 	if hasInvalidReviewedPath(findings.ReviewedPaths) {
 		// The record already carries an entry that is not a path at all. That
 		// entry makes reviewedPathsCoverReviewable fail no matter what the
 		// completion turn covers, so the round can only park; running the turn
 		// would spend an agent call on an uncurable record.
-		return findings, nil
+		return findings, false, nil
 	}
-	sctx.Log(fmt.Sprintf("review coverage incomplete; running one focused review pass over %d unverified file(s): %s", len(missing), strings.Join(missing, ", ")))
+	sctx.Log(fmt.Sprintf("review coverage incomplete; running focused review pass %d of up to %d over %d unverified file(s): %s", turn, maxCoverageCompletionTurns, len(missing), strings.Join(missing, ", ")))
 	completionOpts := opts
 	completionOpts.Prompt = basePrompt + reviewCoverageCompletionSection(missing)
 	completionOpts.Purpose = "review-coverage"
 	result, err := s.runReviewAgent(sctx, "agent review coverage", role, completionOpts)
 	if err != nil {
 		sctx.Log(fmt.Sprintf("focused coverage pass failed (%s); parking on the incomplete coverage record", strings.ReplaceAll(err.Error(), "\n", "; ")))
-		return findings, nil
+		return findings, false, nil
 	}
 	completion, err := parseReviewAnalyzerOutput(result)
 	if err == nil {
@@ -743,7 +798,7 @@ func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt
 	}
 	if err != nil {
 		sctx.Log(fmt.Sprintf("focused coverage pass returned invalid findings (%s); parking on the incomplete coverage record", strings.ReplaceAll(err.Error(), "\n", "; ")))
-		return findings, nil
+		return findings, false, nil
 	}
 	// The completion turn runs in the same pre-push phase as the first pass, so
 	// it is held to the same ownership boundary: a finding whose only claim is
@@ -764,9 +819,9 @@ func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt
 	// such a question is ever seen, since nothing reads the conversation again
 	// after this turn returns.
 	if err := s.appendOpenReviewQuestionFindings(sctx, askDir, &findings); err != nil {
-		return findings, err
+		return findings, false, err
 	}
-	return findings, nil
+	return findings, true, nil
 }
 
 // mergeReviewRisk reconciles the round's risk assessment with a focused

@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -141,7 +142,7 @@ func TestReviewStep_PartialCoverageCompletesInOneFocusedPass(t *testing.T) {
 		t.Fatalf("completion purpose = %q, want review-coverage so the turn stays auditable", ag.calls[1].Purpose)
 	}
 	joined := strings.Join(logs, "\n")
-	if !strings.Contains(joined, "running one focused review pass over 1 unverified file(s): feature2.txt") {
+	if !strings.Contains(joined, "running focused review pass 1 of up to 10 over 1 unverified file(s): feature2.txt") {
 		t.Fatalf("log must announce the focused pass and the file it covers; logs:\n%s", joined)
 	}
 }
@@ -199,10 +200,10 @@ func TestReviewStep_MultiRoundCoverageOmissionsConvergeWithoutAWaiver(t *testing
 	// omissions change across rounds, which is exactly the production
 	// symptom the naive full re-review re-rolled.
 	joined := strings.Join(logs, "\n")
-	if !strings.Contains(joined, "running one focused review pass over 1 unverified file(s): feature2.txt") {
+	if !strings.Contains(joined, "running focused review pass 1 of up to 10 over 1 unverified file(s): feature2.txt") {
 		t.Fatalf("round 1 must complete feature2.txt; logs:\n%s", joined)
 	}
-	if !strings.Contains(joined, "running one focused review pass over 1 unverified file(s): feature.txt") {
+	if !strings.Contains(joined, "running focused review pass 1 of up to 10 over 1 unverified file(s): feature.txt") {
 		t.Fatalf("round 2 must complete feature.txt; logs:\n%s", joined)
 	}
 }
@@ -676,5 +677,121 @@ func TestReviewStep_EvalReplaySkipsTheCoverageCompletion(t *testing.T) {
 	joined := strings.Join(logs, "\n")
 	if !strings.Contains(joined, "review coverage is incomplete; parking for approval with 1 reviewable file(s) unverified: feature2.txt") {
 		t.Fatalf("the incomplete record must still be named explicitly; logs:\n%s", joined)
+	}
+}
+
+// manyFileRepo is the single-file template plus extra changed files, all in
+// one commit, so coverage can be completed in slices. It returns the
+// reviewable files in name order.
+func manyFileRepo(t *testing.T, extra int) (string, string, string, []string) {
+	t.Helper()
+	dir, baseSHA, _ := setupGitRepo(t)
+	files := []string{"feature.txt"}
+	for i := 0; i < extra; i++ {
+		name := fmt.Sprintf("module%02d.txt", i)
+		if err := os.WriteFile(dir+"/"+name, []byte(name+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, name)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "large multi-module change")
+	return dir, baseSHA, gitCmd(t, dir, "rev-parse", "HEAD"), files
+}
+
+// slicingCoverageAgent covers firstTurn files on the main review turn and then
+// perTurn more on each completion turn, in order, like a reviewer that reads
+// only a slice of a large change per turn.
+func slicingCoverageAgent(files []string, firstTurn, perTurn int) *mockAgent {
+	ag := &mockAgent{name: "coverage-slicer"}
+	covered := 0
+	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		n := perTurn
+		if !strings.Contains(opts.Prompt, coverageCompletionMarker) {
+			covered, n = 0, firstTurn
+		}
+		end := min(covered+n, len(files))
+		slice := files[covered:end]
+		covered = end
+		return &agent.Result{Output: json.RawMessage(coverageFindingJSON(append([]string{}, slice...)))}, nil
+	}
+	return ag
+}
+
+// The production symptom: a 361-file rereview whose single completion turn
+// covered 21 files parked with 338 unverified. Completion now keeps going
+// while each turn adds coverage, so a large change converges without a park.
+func TestReviewStep_CoverageCompletionConvergesOnALargeChange(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA, files := manyFileRepo(t, 29)
+	ag := slicingCoverageAgent(files, 3, 5)
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatal("coverage completed over several turns must certify the head without a park")
+	}
+	if got := len(outcome.ReviewedPaths); got != len(files) {
+		t.Fatalf("merged ReviewedPaths = %d files, want %d", got, len(files))
+	}
+	// 27 files left after the main turn, 5 per completion turn: 6 turns.
+	if len(ag.calls) != 7 {
+		t.Fatalf("review invocations = %d, want 7 (review turn + 6 completion turns)", len(ag.calls))
+	}
+}
+
+// Completion is bounded: past maxCoverageCompletionTurns the round parks on
+// whatever is still uncovered, named, rather than spending without limit.
+func TestReviewStep_CoverageCompletionStopsAtTheCap(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA, files := manyFileRepo(t, 29)
+	ag := slicingCoverageAgent(files, 1, 1)
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	var logs []string
+	sctx.Log = func(msg string) { logs = append(logs, msg) }
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(ag.calls) != 1+maxCoverageCompletionTurns {
+		t.Fatalf("review invocations = %d, want %d (review turn + the capped completion turns)", len(ag.calls), 1+maxCoverageCompletionTurns)
+	}
+	if !outcome.NeedsApproval {
+		t.Fatal("coverage still incomplete at the cap must park")
+	}
+	remaining := len(files) - 1 - maxCoverageCompletionTurns
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, fmt.Sprintf("reached the cap of %d focused coverage passes", maxCoverageCompletionTurns)) ||
+		!strings.Contains(joined, fmt.Sprintf("parking for approval with %d reviewable file(s) unverified", remaining)) {
+		t.Fatalf("the cap and the unverified remainder must be logged; logs:\n%s", joined)
+	}
+}
+
+// A completion turn that covers nothing new would only repeat itself, so the
+// round parks after it instead of spending the rest of the cap.
+func TestReviewStep_CoverageCompletionStopsWhenATurnAddsNothing(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA, files := manyFileRepo(t, 5)
+	ag := slicingCoverageAgent(files, 2, 0)
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	var logs []string
+	sctx.Log = func(msg string) { logs = append(logs, msg) }
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(ag.calls) != 2 {
+		t.Fatalf("review invocations = %d, want 2 (review turn + one completion turn that added nothing)", len(ag.calls))
+	}
+	if !outcome.NeedsApproval {
+		t.Fatal("incomplete coverage must park")
+	}
+	if joined := strings.Join(logs, "\n"); !strings.Contains(joined, "focused coverage pass 1 covered no new file; stopping with 4 file(s) unverified") {
+		t.Fatalf("the early stop must be logged; logs:\n%s", joined)
 	}
 }
