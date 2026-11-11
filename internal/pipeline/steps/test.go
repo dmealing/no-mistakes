@@ -427,15 +427,20 @@ Rules:
 	// Capture new test files before the commit below: detectNewTestFiles
 	// reads uncommitted status.
 	newTests := mergeNewTestFiles(newTestsFromFix, detectNewTestFiles(ctx, sctx.WorkDir))
+	// The tested head is the one the baseline and scenarios ran against, read
+	// BEFORE the commit below. The evidence turn's edits were never all
+	// validated: the configured baseline ran before them, and the agent can
+	// edit after its last scenario. So a head that carries those edits is
+	// never attested as live-validated; the attestation drops live_validation
+	// once the run head moves past this one.
+	findings.TestedHeadSHA = sctx.Run.HeadSHA
 	// The evidence turn may write a focused test or repair what it found while
 	// validating. Commit that work here, under this step's own subject. Left
 	// in the worktree, the next step's commit swept it up and published a Test
-	// change as a Document commit. The tested head is read after the commit:
-	// the tests ran against exactly this tree.
+	// change as a Document commit.
 	if _, err := commitAgentFixesWithResult(sctx, types.StepTest, "", "apply changes made during test validation", producer); err != nil {
 		return nil, err
 	}
-	findings.TestedHeadSHA = sctx.Run.HeadSHA
 	findings.Items = append(baselineFindings, findings.Items...)
 	if baselineSummary != "" {
 		findings.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, findings.Summary}, "\n"))

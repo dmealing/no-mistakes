@@ -365,7 +365,7 @@ The `v1` payload is compact JSON with these required fields:
 - `step`: the raw pipeline step name, such as `intent`, `rebase`, `review`, `test`, `document`, `lint`, `push`, `pr`, or `ci`; a repository-declared [gate](/no-mistakes/reference/repo-config/#gates) appears as `gate.<anchor>.<name>`
 - `status`: the raw [step status](#step-statuses) recorded for that step, such as `completed`, `skipped`, or `failed`
 
-When the Test step validated the same `head_sha`, the payload also includes `live_validation` with `verdict`, `live` (the number of scenarios driven live), and `total`. The field is omitted for pre-contract findings and whenever a later Document, Lint, Push, or repair commit changes the head without validating that new commit. Consumers therefore never receive a previous head's live-validation verdict as a claim about the current head.
+When the Test step validated the same `head_sha`, the payload also includes `live_validation` with `verdict`, `live` (the number of scenarios driven live), and `total`. The field is omitted for pre-contract findings and whenever a later Document, Lint, Push, or repair commit changes the head without validating that new commit. That includes the Test step's own commit of edits its evidence turn left behind: Test commits them under its own subject, but the configured baseline and the scenarios ran before those edits, so the attested head stays the one they ran against. Consumers therefore never receive a previous head's live-validation verdict as a claim about the current head.
 
 Two additional fields are additive and omitted when empty, so older attestations remain valid:
 
