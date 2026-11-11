@@ -105,7 +105,7 @@ metadata:
 **Continuing a Failed Run (`internal/pipeline/retry.go`, `internal/daemon/retry.go`)**
 
 - `PlanRetryCheckpoint` continues a run only for a recorded `step_results.failure_cause` of `agent_invocation` or `base_fetch`. A base fetch is retried in-step first (`fetchBaseBranchWithRetry`, 3 attempts, doubling 2s backoff, no retry after cancellation) and only the final error is wrapped in `pipeline.BaseFetchError`.
-- `axi run` asks the daemon to continue the branch's latest failed run (`ipc.RetryRunParams.Automatic`) before starting a fresh one when it carries no skip, plan, profile, or launch nonce. `proveAutomaticRetryRequest` adds to every `axi retry` proof: the same intent bytes, PR base branch, intent omission, and closing refs, no Pi profile, every carried step completed, and a carried Review. Any refusal falls back to a fresh run. Regressions: `internal/daemon/retry_automatic_test.go`, `internal/cli/axi_run_continue_test.go`, `internal/pipeline/steps/common_git_fetch_retry_test.go`.
+- `axi run` asks the daemon to continue the branch's latest failed run (`ipc.RetryRunParams.Automatic`) before starting a fresh one when it carries no skip, plan, profile, or launch nonce. `proveAutomaticRetryRequest` adds to every `axi retry` proof: the same intent (whitespace-trimmed), PR base branch, intent omission, and closing refs, no Pi profile, every carried step completed, and a carried Review. Any refusal falls back to a fresh run. Regressions: `internal/daemon/retry_automatic_test.go`, `internal/cli/axi_run_continue_test.go`, `internal/pipeline/steps/common_git_fetch_retry_test.go`.
 
 **Live-Validation Contract (Test step)**
 
