@@ -14,6 +14,12 @@ import "github.com/kunchenguid/no-mistakes/internal/types"
 // fixEstimateRule asks a finding-producing agent to rate each finding's fix.
 const fixEstimateRule = `- For each finding, estimate what fixing it takes, judged by the reasoning the fix needs rather than by its severity: set fix_complexity to "simple" (a local, mechanical change whose correct form is obvious), "moderate" (some reasoning about surrounding code, a few call sites, or one invariant), or "complex" (cross-file design, root-cause analysis, concurrency, security, or data or migration reasoning). Set fix_lines and fix_files to your estimate of how many lines the fix changes and across how many files.`
 
+// infoKindRule asks the reviewer to classify each info finding, so a Review
+// after its first round can leave wording and comment-placement notes for the
+// PR instead of spending a fix round on them. A weak test, a stale record, or
+// a doc that is factually wrong is "other": those are still fixed.
+const infoKindRule = `- For each "info" finding, set info_kind to "wording" when fixing it only rewords prose, a message, a comment, or a name and changes no behavior; "comment-placement" when it only moves or adds a code comment; otherwise "other" (a weak or missing test, a stale or factually wrong record or doc, dead code, anything that changes behavior). Leave info_kind unset on "error" and "warning" findings.`
+
 // fixEstimateSchemaProperties is the per-finding estimate fragment every
 // findings schema carries, with a leading comma so it follows "action".
 const fixEstimateSchemaProperties = `,

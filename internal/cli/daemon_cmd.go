@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/lifecycle"
@@ -41,6 +42,7 @@ func newDaemonCmd() *cobra.Command {
 	cmd.AddCommand(newDaemonUninstallCmd())
 	cmd.AddCommand(newDaemonRestartCmd())
 	cmd.AddCommand(newDaemonStatusCmd())
+	cmd.AddCommand(newDaemonBusyCmd())
 	cmd.AddCommand(newDaemonRunCmd())
 	cmd.AddCommand(newDaemonAdmitPushCmd())
 	cmd.AddCommand(newDaemonNotifyPushCmd())
@@ -726,6 +728,47 @@ func newDaemonStatusCmd() *cobra.Command {
 				}
 				return nil
 			})
+		},
+	}
+}
+
+// newDaemonBusyCmd reports the runs a clean stop would fail. The local
+// install waits for it to print 0 before it stops the service: a run parked
+// at a gate survives a clean stop, one in the middle of a step does not.
+func newDaemonBusyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "busy",
+		Short: "Print how many runs are in the middle of a step (a clean stop would fail them)",
+		Long: "Prints the number of runs that are pending or running and not parked at a\n" +
+			"gate, and lists them on stderr. A clean `daemon stop --force` keeps a run\n" +
+			"parked at a gate (it resumes at the same gate on the next start) but fails\n" +
+			"a run in the middle of a step, so 0 means the service can be stopped\n" +
+			"without losing work. Reads the run database read-only; never starts the\n" +
+			"daemon or migrates the database.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := paths.New()
+			if err != nil {
+				return err
+			}
+			if _, statErr := os.Stat(p.DB()); errors.Is(statErr, os.ErrNotExist) {
+				fmt.Fprintln(cmd.OutOrStdout(), 0)
+				return nil
+			}
+			d, err := db.OpenReadOnly(p.DB())
+			if err != nil {
+				return err
+			}
+			defer d.Close()
+			runs, err := d.RunsMidStep()
+			if err != nil {
+				return err
+			}
+			for _, r := range runs {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  %s  %s  %s\n", r.ID, r.Status, r.Branch)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), len(runs))
+			return nil
 		},
 	}
 }

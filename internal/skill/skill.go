@@ -118,6 +118,14 @@ Reattach an in-flight run by re-running ` + "`no-mistakes axi run`" + ` when it 
 Only ` + "`no-mistakes axi abort`" + ` it when you mean to discard that run before starting over; aborting is a between-runs action, never a way to take over or bypass a gate while a run is still going (see [Validate and decide](#validate-and-decide)).
 If it shows an active run on another branch, leave that run alone and start validation for your current branch with ` + "`no-mistakes axi run --intent \"...\"`" + `.
 
+A NEW run first passes a pre-run check (` + "`no-mistakes axi triage`" + ` shows it, with the
+` + "`--skip`" + ` that fits the change). ` + "`axi run`" + ` exits 3 with ` + "`verdict: stop`" + ` when new runs are
+on hold, the branch conflicts with another branch of the project in validation,
+two other branches of the project are in validation, or a small change has a
+sibling branch in validation. Do not work around a stop: report its lines to
+whoever asked for the run. Only when they give a reason, pass
+` + "`--triage-override \"<reason>\"`" + ` (recorded); a hold cannot be overridden.
+
 ## Intent is required
 
 When you start a new run you must supply explicit intent through exactly one of

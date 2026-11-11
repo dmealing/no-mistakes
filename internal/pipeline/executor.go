@@ -1866,6 +1866,17 @@ rounds:
 		if stepName.IsCustomGate() {
 			autoFixable = gateAutoFixEligible(roundFindings, sctx.PreviousFindings, sctx.DeferredFindings, sctx.Fixing)
 		}
+		// After its first round, a Review whose only remaining findings are
+		// info-severity wording or comment-placement notes completes without
+		// another fix round: the notes stay on the round and the PR body lists
+		// them as left for the author. Round 1's notes are still fixed, and a
+		// weak test, a stale record or anything else is never such a note.
+		wordingNotesOnly := stepName == types.StepReview && roundNum > 1 && onlyWordingNotesJSON(effectiveFindings)
+		if wordingNotesOnly && autoFixable {
+			n := findingsCount(effectiveFindings)
+			writeLog(fmt.Sprintf("round %d left only %d wording or comment-placement %s; no fix round spent, listed in the PR instead", roundNum, n, pluralize(n, "note", "notes")))
+			autoFixable = false
+		}
 		if autoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit && !reviewBudgetExhausted {
 			fixableFindings := autoFixableFindingsJSON(roundFindings)
 			if carryFindings {
@@ -1905,7 +1916,7 @@ rounds:
 			}
 		}
 
-		if !outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && !hasBlockingFindingsJSON(effectiveFindings) && (!carryFindings || !hasSelectedFindingsJSON(effectiveFindings, selectedOutstandingIDs)) {
+		if !outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && !hasBlockingFindingsJSON(effectiveFindings) && (!carryFindings || wordingNotesOnly || !hasSelectedFindingsJSON(effectiveFindings, selectedOutstandingIDs)) {
 			// Step completed without needing approval.
 			// Any remaining info-only or non-blocking findings
 			// are acceptable and don't block the pipeline.

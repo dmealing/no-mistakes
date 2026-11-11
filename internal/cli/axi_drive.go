@@ -260,6 +260,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this run (tighten-only; full intent still reaches every step prompt except PR drafting)")
 	cmd.Flags().StringArrayVar(&closesIssues, "closes", nil, "issue this PR closes when merged; repeat for multiple issues (42, owner/repo#42, or a nested GitLab project path)")
 	cmd.Flags().String("verification-plan", "", "capture a nonempty UTF-8 verification plan as separate run evidence (new runs only)")
+	cmd.Flags().String(triageOverrideFlag, "", "start a NEW run over the pre-run check's stops (all but a hold); the reason is required and recorded")
 	bindAxiWaitFlag(cmd, &wait)
 	bindPiProfileFlags(cmd, &model, &effort)
 	return cmd
@@ -383,6 +384,7 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		}
 	}
 	var lead []toon.Field
+	var newRunCheck *newRunTriage
 	if runID != "" && planRequested {
 		return emitError(cmd, 2, "--verification-plan is accepted only when starting a new run; omit it to reattach")
 	}
@@ -420,10 +422,19 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		if guard := preflightGuard(ctx, env, branch); guard != nil {
 			return guard(cmd)
 		}
+		// The pre-run check applies to every new run, including a
+		// continuation of a failed one: a hold, a conflict with a branch in
+		// validation, a third branch of the project, or a small change with a
+		// sibling lane stops it unless --triage-override states why not.
+		newRunCheck, err = checkTriageBeforeNewRun(cmd, env, branch, headSHA, baseBranch)
+		if err != nil {
+			return err
+		}
+		lead = append(lead, newRunCheck.fields...)
 		if launchNonce == "" && !planRequested && profile == nil && len(skipSteps) == 0 {
 			if continued := continueFailedRun(ctx, env, branch, intent, baseBranch, omitIntent, closesIssues); continued != nil {
 				runID = continued.RunID
-				lead = retriedRunFields(continued)
+				lead = append(lead, retriedRunFields(continued)...)
 			}
 		}
 	}
@@ -466,6 +477,9 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			}
 			return emitError(cmd, 1, err.Error())
 		}
+	}
+	if newRunCheck != nil {
+		recordTriageOverride(cmd, env, newRunCheck, runID)
 	}
 	if launchReceipt != nil {
 		emitLaunchReceipt(cmd, *launchReceipt)

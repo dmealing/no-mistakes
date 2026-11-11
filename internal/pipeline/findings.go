@@ -950,3 +950,13 @@ func recordWithdrawnFindingsJSON(raw string, withdrawn []types.WithdrawnFinding)
 	}
 	return encoded
 }
+
+// onlyWordingNotesJSON is types.OnlyWordingNotes over raw findings JSON;
+// unparseable findings are not wording notes.
+func onlyWordingNotesJSON(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	return err == nil && types.OnlyWordingNotes(findings.Items)
+}

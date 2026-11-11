@@ -1495,3 +1495,35 @@ func (d *DB) SetRunCIRerunState(id, state string) error {
 	}
 	return nil
 }
+
+// MidStepRun is a run in validation that is not parked at a gate.
+type MidStepRun struct {
+	ID     string
+	Branch string
+	Status types.RunStatus
+}
+
+// RunsMidStep lists the runs a clean daemon stop would fail: pending or
+// running and not parked at an approval gate (a parked run survives a clean
+// stop and resumes at the same gate). It reads only columns every schema
+// since awaiting_agent_since has, so a read-only handle on an older
+// database works.
+func (d *DB) RunsMidStep() ([]MidStepRun, error) {
+	rows, err := d.sql.Query(
+		`SELECT id, branch, status FROM runs WHERE status IN (?, ?) AND awaiting_agent_since IS NULL ORDER BY created_at, id`,
+		types.RunPending, types.RunRunning,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list runs mid-step: %w", err)
+	}
+	defer rows.Close()
+	var out []MidStepRun
+	for rows.Next() {
+		var r MidStepRun
+		if err := rows.Scan(&r.ID, &r.Branch, &r.Status); err != nil {
+			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

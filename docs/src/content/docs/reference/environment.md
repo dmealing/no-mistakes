@@ -22,6 +22,7 @@ When set, everything else moves under this root:
 - Socket / PID / singleton lock: `$NM_HOME/socket`, `$NM_HOME/daemon.pid`, and `$NM_HOME/daemon.lock`
 - The socket path must fit the platform's Unix socket limit: 103 bytes on macOS, 107 on Linux. `daemon start`, `daemon restart`, `daemon status`, `init`, `attach`, `rerun`, `axi run`, and the push hook fail with a message that names the path, its length, and the limit when it is too long. Use a shorter `NM_HOME`. The physical path counts: a symbolic link to a long directory does not help, because the push hook dials the resolved path.
 - Managed agent server PID records: `$NM_HOME/servers/`
+- Hold on new runs: `$NM_HOME/hold` (see [Holding new runs](/no-mistakes/concepts/daemon/#holding-new-runs)); pre-run check overrides: `$NM_HOME/triage-overrides.ndjson`; install database backups: `$NM_HOME/backups/`
 - Local evaluation cases and registry: `$NM_HOME/eval/` (created by automatic collection or an explicit `no-mistakes eval` command)
 - Managed service names get a short stable suffix derived from `$NM_HOME` so multiple installs don't collide.
 
@@ -195,6 +196,17 @@ Disable background update checks.
 | Default | unset (checks enabled)                         |
 
 Update checks run on every CLI invocation except `update` itself and version queries (`--version` / `-v`, which stay side-effect-free), fetch the GitHub release-asset channel manifest, cache the result in `$NM_HOME/update-check.json`, and print a one-line notification to stderr when a newer version is available. Dev builds (non-semver versions) and binaries that resolve into `/nix/store` suppress the check automatically.
+
+## `NM_TRIAGE_NO_CONFLICTS`
+
+Make [`axi triage`](/no-mistakes/reference/cli/#no-mistakes-axi-triage) skip its network checks.
+
+|         |                                                |
+| ------- | ---------------------------------------------- |
+| Type    | `1` to skip, anything else to run them         |
+| Default | unset (checks run)                             |
+
+Same as `axi triage --offline`: the base branch is not fetched and open pull requests are not queried. The checks against branches in validation are local and still run.
 
 ## `XDG_DATA_HOME`
 
