@@ -8,6 +8,8 @@
 #   2. Wait, with no time limit, until no run is in the middle of a step
 #      (`<new binary> daemon busy` prints 0). A run parked at a gate does not
 #      count: a clean stop keeps it and the next start resumes it at that gate.
+#      A run parked at a gate that is answered or resumed between the last
+#      busy check and the stop is failed by the stop and must be re-run.
 #   3. Stop the service with `daemon stop --force` (its guard would refuse
 #      while parked runs exist; they survive).
 #   4. Back up the run database to <NM_HOME>/backups/install-<time>/.
@@ -15,8 +17,11 @@
 #      previous binary next to it as <target>.prev (the rollback copy).
 #   6. Start the service and check the installed version and that the daemon
 #      runs.
-#   7. On any failure from step 3 on: put the previous binary and the backed-up
-#      database back, start the service again, and exit non-zero.
+#   7. On any failure from step 3 on: start the previous binary again and exit
+#      non-zero. The previous binary is put back only once the new one was
+#      installed, and the backed-up database only once the new build was
+#      started from this install's complete backup; a failure before the
+#      install only restarts the old daemon.
 #   8. Remove the hold file. If the rollback itself fails the hold stays, with
 #      a reason saying the service needs a person.
 #
@@ -89,13 +94,15 @@ printf 'who: %s\nwhy: %s\nuntil: %s\n' "$who" "$why" "$until_text" > "$hold" || 
 say "hold written: $hold (new runs are refused until it is removed)"
 
 stopped=0        # set once the service has been stopped: failures then roll back
+installed=0      # set once the new binary replaced the target
+started=0        # set once the new build was started from a complete backup
 backup_dir=""
 finished=0
 
 remove_hold() { rm -f "$hold"; }
 
 restore_database() {
-  [ -n "$backup_dir" ] || return 0
+  [ "$started" = 1 ] || return 0
   local f
   for f in state.sqlite-wal state.sqlite-shm; do rm -f "$nm_home/$f"; done
   for f in state.sqlite state.sqlite-wal state.sqlite-shm; do
@@ -116,7 +123,7 @@ rollback() {
   say "rolling back to $old_version"
   "$target" daemon stop --force >/dev/null 2>&1 || true
   local ok=1
-  if [ -e "$target.prev" ]; then
+  if [ "$installed" = 1 ]; then
     cp -p "$target.prev" "$target.rollback.tmp" && mv -f "$target.rollback.tmp" "$target" || ok=0
   fi
   restore_database || ok=0
@@ -176,11 +183,14 @@ done
 [ -e "$db" ] && say "database backed up to $backup_dir"
 
 # 5. Install, keeping the previous binary as the rollback copy.
-cp -p "$target" "$target.prev" || fail "cannot keep the previous binary as $target.prev"
+cp -p "$target" "$target.prev.tmp" && mv -f "$target.prev.tmp" "$target.prev" \
+  || fail "cannot keep the previous binary as $target.prev"
 cp -p "$binary" "$target.new" && chmod 755 "$target.new" && mv -f "$target.new" "$target" \
   || fail "cannot install $binary over $target"
+installed=1
 
 # 6. Start and check.
+started=1
 "$target" daemon start || fail "daemon start failed"
 got="$("$target" --version 2>/dev/null)"
 [ "$got" = "$new_version" ] || fail "installed version is '$got', expected '$new_version'"

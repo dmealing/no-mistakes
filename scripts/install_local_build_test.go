@@ -13,7 +13,8 @@ import (
 // and drives a fake service whose state lives in $FAKE_STATE. `daemon busy`
 // counts down from the number in $FAKE_STATE/busy and logs whether the hold
 // file existed when it was asked; `daemon start` fails (after scribbling over
-// the database) when $FAKE_STATE/fail-start-<version> exists.
+// the database) when $FAKE_STATE/fail-start-<version> exists, and `daemon
+// stop` fails when $FAKE_STATE/fail-stop-<version> exists.
 const fakeBinary = `#!/usr/bin/env bash
 V="@VERSION@"
 S="$FAKE_STATE"
@@ -26,7 +27,10 @@ case "$1" in
         if [ -e "$NM_HOME/hold" ]; then echo held >> "$S/busy-log"; else echo unheld >> "$S/busy-log"; fi
         if [ "$n" -gt 0 ]; then echo $((n-1)) > "$S/busy"; echo "  run-$n  running  some-branch" >&2; fi
         echo "$n" ;;
-      stop) echo stopped > "$S/daemon"; echo "stop $V $3" >> "$S/log" ;;
+      stop)
+        echo "stop $V $3" >> "$S/log"
+        if [ -e "$S/fail-stop-$V" ]; then exit 1; fi
+        echo stopped > "$S/daemon" ;;
       start)
         echo "start $V" >> "$S/log"
         if [ -e "$S/fail-start-$V" ]; then echo garbage > "$NM_HOME/state.sqlite"; exit 1; fi
@@ -153,6 +157,68 @@ func TestInstallLocalBuild_KeepsTheHoldWhenTheRollbackFails(t *testing.T) {
 	hold := readFile(t, filepath.Join(f.home, "hold"))
 	if !strings.Contains(hold, "needs a person") {
 		t.Fatalf("hold after a failed rollback = %q", hold)
+	}
+}
+
+// A failure before the new binary is installed must not copy a stale
+// rollback copy from an earlier install over the healthy target.
+func TestInstallLocalBuild_FailureBeforeInstallKeepsTheTarget(t *testing.T) {
+	f := newInstallFixture(t)
+	writeExec(t, f.target+".prev", strings.ReplaceAll(fakeBinary, "@VERSION@", "v0-stale"))
+	writeFile(t, filepath.Join(f.state, "fail-stop-v1-old"), "")
+
+	out, code := f.run(t)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2 (rolled back):\n%s", code, out)
+	}
+	if v := versionOf(t, f.target); v != "no-mistakes version v1-old" {
+		t.Fatalf("installed version = %q, want the untouched old build", v)
+	}
+	if v := versionOf(t, f.target+".prev"); v != "no-mistakes version v0-stale" {
+		t.Fatalf("rollback copy version = %q, want it untouched", v)
+	}
+	if got := readFile(t, filepath.Join(f.state, "log")); got != "stop v1-old --force\nstop v1-old --force\nstart v1-old\n" {
+		t.Fatalf("service log = %q, want only the old daemon restarted", got)
+	}
+	if _, err := os.Stat(filepath.Join(f.home, "hold")); !os.IsNotExist(err) {
+		t.Fatalf("hold file left behind (err=%v)", err)
+	}
+}
+
+// A backup that fails partway must leave the live database files alone: the
+// rollback restores the database only from a complete backup.
+func TestInstallLocalBuild_PartialBackupLeavesTheLiveDatabase(t *testing.T) {
+	f := newInstallFixture(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root can read an unreadable file, so the backup would not fail")
+	}
+	wal := filepath.Join(f.home, "state.sqlite-wal")
+	writeFile(t, wal, "unbacked wal pages")
+	if err := os.Chmod(wal, 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := f.run(t)
+	if err := os.Chmod(wal, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code != 2 {
+		t.Fatalf("exit %d, want 2 (rolled back):\n%s", code, out)
+	}
+	if !strings.Contains(out, "database backup failed") {
+		t.Fatalf("output does not report the failed backup:\n%s", out)
+	}
+	if got := readFile(t, wal); got != "unbacked wal pages" {
+		t.Fatalf("live WAL = %q, want it untouched", got)
+	}
+	if got := readFile(t, filepath.Join(f.home, "state.sqlite")); got != "original database" {
+		t.Fatalf("live database = %q", got)
+	}
+	if v := versionOf(t, f.target); v != "no-mistakes version v1-old" {
+		t.Fatalf("installed version = %q, want the untouched old build", v)
+	}
+	if got := readFile(t, filepath.Join(f.state, "daemon")); got != "running\n" {
+		t.Fatalf("service state = %q, want the old daemon running again", got)
 	}
 }
 

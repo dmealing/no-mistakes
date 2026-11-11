@@ -55,8 +55,10 @@ func newAxiTriageCmd() *cobra.Command {
 			"  CODE  anything else             -> full run\n" +
 			"  RISK  CODE on a risk path       -> full run + an independent review first\n" +
 			"A repository may add risk globs in .nm-triage-risk, and its own\n" +
-			"scripts/nm-triage.sh tier wins over the built-in one (a risk path still\n" +
-			"lifts any tier to RISK; not consulted with --base).\n\n" +
+			"scripts/nm-triage.sh tier wins over the built-in one here and in\n" +
+			"`axi run` (a risk path still lifts any tier to RISK; not consulted with\n" +
+			"--base). When that script fails or prints no TIER: line, repo_script\n" +
+			"says so and the built-in tier is used.\n\n" +
 			"--skip-only prints only the --skip value (plain text, for scripts).\n" +
 			"--conflicts runs only the conflict checks: exit 0 clean, 3 conflicts, 2\n" +
 			"cannot check; --head REF checks that ref instead of HEAD.\n" +
@@ -176,33 +178,59 @@ func triageBaseRef(ctx context.Context, root, baseBranch string, repo *db.Repo) 
 
 var repoScriptTier = regexp.MustCompile(`(?m)^TIER: ([A-Z]+)`)
 
-// repoScriptOverride runs the repository's own scripts/nm-triage.sh, which
-// knows that repository's deliberate relaxations, and maps its tier. It is
-// consulted only by the explicit `axi triage` (never by `axi run`), from the
-// caller's own checkout, exactly as the standalone script did.
-func repoScriptOverride(ctx context.Context, root string) triage.Tier {
-	script := filepath.Join(root, "scripts", "nm-triage.sh")
+const repoScriptPath = "scripts/nm-triage.sh"
+
+// triageTier is the tier `axi triage` and `axi run`'s pre-run check both
+// report: the built-in classification, replaced by the tier the
+// repository's own scripts/nm-triage.sh prints (it knows that repository's
+// deliberate relaxations; not consulted with an explicit --base), then lifted
+// to RISK by any risk path. note is one line saying why the script, when it
+// exists, did not decide the tier.
+func triageTier(ctx context.Context, root string, change triage.Change, explicitBase bool) (tier, scriptTier triage.Tier, note string) {
+	tier = change.Tier
+	if !explicitBase && len(change.Files) > 0 {
+		scriptTier, note = repoScriptOverride(ctx, root)
+		if scriptTier != "" {
+			tier = scriptTier
+		}
+	}
+	if len(change.RiskPaths) > 0 {
+		tier = triage.TierRisk
+	}
+	return tier, scriptTier, note
+}
+
+// repoScriptOverride runs the repository's own scripts/nm-triage.sh from the
+// caller's checkout and maps its tier, exactly as the standalone script did.
+func repoScriptOverride(ctx context.Context, root string) (triage.Tier, string) {
+	script := filepath.Join(root, filepath.FromSlash(repoScriptPath))
 	if _, err := os.Stat(script); err != nil {
-		return ""
+		return "", ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	c := exec.CommandContext(ctx, "bash", script)
 	c.Dir = root
-	out, _ := c.Output()
+	out, err := c.Output()
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
+		return "", repoScriptPath + " timed out after 60s; the built-in tier was used"
+	case err != nil:
+		return "", fmt.Sprintf("%s failed (%v); the built-in tier was used", repoScriptPath, err)
+	}
 	m := repoScriptTier.FindStringSubmatch(string(out))
 	if m == nil {
-		return ""
+		return "", repoScriptPath + " printed no TIER: line; the built-in tier was used"
 	}
 	switch {
 	case m[1] == "FULL":
-		return triage.TierCode
+		return triage.TierCode, ""
 	case strings.HasPrefix(m[1], "TEST"):
-		return triage.TierTest
+		return triage.TierTest, ""
 	case m[1] == "DOCS":
-		return triage.TierDocs
+		return triage.TierDocs, ""
 	}
-	return ""
+	return "", fmt.Sprintf("%s printed an unknown tier %q; the built-in tier was used", repoScriptPath, m[1])
 }
 
 type triageLaneRow struct {
@@ -254,16 +282,7 @@ func runAxiTriage(cmd *cobra.Command, opts triageOptions, skipOnly bool) error {
 		emitDoc(cmd, toon.Field{Key: "tier", Value: fmt.Sprintf("none: no committed changes vs %s - nothing to validate", shortSHA(base))})
 		return nil
 	}
-	tier := change.Tier
-	scriptTier := triage.Tier("")
-	if opts.base == "" {
-		if scriptTier = repoScriptOverride(ctx, root); scriptTier != "" {
-			tier = scriptTier
-		}
-	}
-	if len(change.RiskPaths) > 0 {
-		tier = triage.TierRisk
-	}
+	tier, scriptTier, scriptNote := triageTier(ctx, root, change, opts.base != "")
 	skip := triage.SkipFor(tier)
 	if skipOnly {
 		fmt.Fprintln(cmd.OutOrStdout(), skip)
@@ -291,6 +310,9 @@ func runAxiTriage(cmd *cobra.Command, opts triageOptions, skipOnly bool) error {
 	}
 	if scriptTier != "" {
 		summary = append(summary, toon.Field{Key: "repo_script_tier", Value: string(scriptTier)})
+	}
+	if scriptNote != "" {
+		summary = append(summary, toon.Field{Key: "repo_script", Value: scriptNote})
 	}
 	if len(change.RiskPaths) > 0 {
 		summary = append(summary, toon.Field{Key: "risk_paths", Value: change.RiskPaths})
@@ -544,9 +566,9 @@ type newRunTriage struct {
 	override *triage.OverrideRecord
 }
 
-// checkTriageBeforeNewRun runs the same rules as `axi triage`, without its
-// network checks (base fetch, open pull requests) or the repository's own
-// script, and refuses to start the run on a stop unless the caller passed
+// checkTriageBeforeNewRun runs the same rules and reports the same tier as
+// `axi triage`, without its network checks (base fetch, open pull requests),
+// and refuses to start the run on a stop unless the caller passed
 // --triage-override with a reason. The hold cannot be overridden.
 func checkTriageBeforeNewRun(cmd *cobra.Command, env *axiEnv, branch, headSHA, baseBranch string) (*newRunTriage, error) {
 	ctx := cmd.Context()
@@ -574,8 +596,15 @@ func checkTriageBeforeNewRun(cmd *cobra.Command, env *axiEnv, branch, headSHA, b
 	})
 	facts := []toon.Field{}
 	if res.Change != nil {
+		tier, scriptTier, scriptNote := triageTier(ctx, root, *res.Change, false)
+		facts = append(facts, toon.Field{Key: "tier", Value: string(tier)})
+		if scriptTier != "" {
+			facts = append(facts, toon.Field{Key: "repo_script_tier", Value: string(scriptTier)})
+		}
+		if scriptNote != "" {
+			facts = append(facts, toon.Field{Key: "repo_script", Value: scriptNote})
+		}
 		facts = append(facts,
-			toon.Field{Key: "tier", Value: string(res.Change.Tier)},
 			toon.Field{Key: "production_lines", Value: res.Change.ProductionLines},
 			toon.Field{Key: "small_change", Value: res.Change.Small()},
 		)

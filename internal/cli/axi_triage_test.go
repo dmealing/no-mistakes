@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -175,5 +176,99 @@ func TestAxiRunGoesWithOneSiblingAndALargeChange(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 other branch of this project: lane-a") {
 		t.Fatalf("output does not print the bundling facts:\n%s", out)
+	}
+}
+
+// commitRepoTriageScript commits a code file (built-in tier CODE) and puts a
+// scripts/nm-triage.sh whose body is script in the checkout, ignored by git so
+// the script itself is not part of the change.
+func commitRepoTriageScript(t *testing.T, script string) {
+	t.Helper()
+	wd, _ := os.Getwd()
+	if err := os.WriteFile(filepath.Join(wd, ".git", "info", "exclude"), []byte("/scripts/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(wd, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wd, "scripts", "nm-triage.sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wd, "widget.go"), []byte("package widget\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cliGit(t, wd, "add", "widget.go")
+	cliGit(t, wd, "commit", "-m", "widget")
+}
+
+func runAxiTriageForTest(t *testing.T) string {
+	t.Helper()
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	if err := runAxiTriage(cmd, triageOptions{offline: true}, false); err != nil {
+		t.Fatalf("axi triage: %v\n%s", err, out.String())
+	}
+	return out.String()
+}
+
+var reportedTier = regexp.MustCompile(`(?m)^\s*tier: (\S+)`)
+
+func tierIn(t *testing.T, out string) string {
+	t.Helper()
+	m := reportedTier.FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("no tier reported:\n%s", out)
+	}
+	return m[1]
+}
+
+// The repository's own script decides the tier for both commands: its
+// documented `TIER: DOCS` maps to DOCS, where the built-in rules say CODE.
+func TestAxiTriageAndAxiRunReportTheRepositoryScriptsTier(t *testing.T) {
+	launched, _ := triageRunFixture(t)
+	commitRepoTriageScript(t, "#!/usr/bin/env bash\necho 'TIER: DOCS (repository relaxation)'\n")
+
+	triageOut := runAxiTriageForTest(t)
+	runOut, _ := runAxiRunForTriageTest(t, nil)
+	if len(*launched) == 0 {
+		t.Fatalf("the run did not start:\n%s", runOut)
+	}
+	if got := tierIn(t, triageOut); got != "DOCS" {
+		t.Fatalf("axi triage tier = %s, want the script's DOCS:\n%s", got, triageOut)
+	}
+	if got := tierIn(t, runOut); got != "DOCS" {
+		t.Fatalf("axi run tier = %s, want the script's DOCS (as axi triage reports):\n%s", got, runOut)
+	}
+}
+
+func TestAxiTriageAndAxiRunNoteAnUnusableRepositoryScript(t *testing.T) {
+	for name, script := range map[string]string{
+		"fails":   "#!/usr/bin/env bash\necho 'TIER: DOCS'\nexit 1\n",
+		"no tier": "#!/usr/bin/env bash\necho 'nothing to say'\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			triageRunFixture(t)
+			commitRepoTriageScript(t, script)
+
+			triageOut := runAxiTriageForTest(t)
+			runOut, _ := runAxiRunForTriageTest(t, nil)
+			for cmdName, out := range map[string]string{"axi triage": triageOut, "axi run": runOut} {
+				if got := tierIn(t, out); got != "CODE" {
+					t.Fatalf("%s tier = %s, want the built-in CODE:\n%s", cmdName, got, out)
+				}
+				var notes []string
+				for _, line := range strings.Split(out, "\n") {
+					if strings.Contains(line, "repo_script:") {
+						notes = append(notes, line)
+					}
+				}
+				if len(notes) != 1 || !strings.Contains(notes[0], "scripts/nm-triage.sh") || !strings.Contains(notes[0], "the built-in tier was used") {
+					t.Fatalf("%s does not print one note about the script: %q\n%s", cmdName, notes, out)
+				}
+			}
+		})
 	}
 }
