@@ -118,6 +118,10 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		case 2:
 			return &agent.Result{Output: json.RawMessage(coverageFindingJSON([]string{"feature2.txt"}))}, nil
 		case 3:
+			// The first pass's second completion turn covers nothing new, so
+			// the pass stops completing and parks with feature3.txt unverified.
+			return &agent.Result{Output: json.RawMessage(coverageFindingJSON([]string{"feature2.txt"}))}, nil
+		case 4:
 			if inlineFixes && strings.Contains(opts.Prompt, "Inline quick fixes (enabled for this pass)") {
 				return nil, fmt.Errorf("coverage continuation carried the inline-fix permission")
 			}
@@ -221,7 +225,7 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		time.Sleep(time.Millisecond)
 	}
 	if binding == nil {
-		t.Fatal("real ReviewStep did not park after two partial turns")
+		t.Fatal("real ReviewStep did not park after its partial turns")
 	}
 	if recovered {
 		cancel(pipeline.ErrDaemonShutdown)
@@ -322,7 +326,7 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		_, err := executor.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", pipeline.ResponseOptions{Coverage: binding})
 		if expectRefusal && err != nil && !strings.Contains(err.Error(), "no step awaiting approval") {
 			steps, readErr := sctx.DB.GetStepsByRun(run.ID)
-			if readErr != nil || len(steps) != 2 || steps[0].Status != types.StepStatusAwaitingApproval || steps[1].Status != types.StepStatusPending || len(ag.calls) != 2 {
+			if readErr != nil || len(steps) != 2 || steps[0].Status != types.StepStatusAwaitingApproval || steps[1].Status != types.StepStatusPending || len(ag.calls) != 3 {
 				t.Fatalf("invalid continuation consumed its gate or called the agent: %+v calls=%d err=%v", steps, len(ag.calls), readErr)
 			}
 			checkEvidence()
@@ -351,9 +355,9 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 				t.Fatal(readErr)
 			}
 			if len(rounds) == 2 {
-				wantCalls := 3
+				wantCalls := 4
 				if expectScopePark {
-					wantCalls = 2
+					wantCalls = 3
 				}
 				if steps[1].Status != types.StepStatusPending || len(ag.calls) != wantCalls || rounds[0].ID != binding.RoundID || rounds[1].SelectionSource != nil {
 					t.Fatalf("invalid/incomplete coverage bypassed the required gate: %+v calls=%d", steps, len(ag.calls))
@@ -389,8 +393,8 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 			if err != nil || len(rounds) != 2 || rounds[0].ID != binding.RoundID || rounds[1].Trigger != "coverage" || rounds[1].SelectionSource != nil {
 				t.Fatalf("continuation lost round identity or recorded a waiver: %+v %v", rounds, err)
 			}
-			if len(ag.calls) != 3 {
-				t.Fatalf("agent invocations=%d, want two original partial turns plus one focused continuation", len(ag.calls))
+			if len(ag.calls) != 4 {
+				t.Fatalf("agent invocations=%d, want three original partial turns plus one focused continuation", len(ag.calls))
 			}
 			if rounds[1].FindingsJSON == nil {
 				t.Fatal("continued round lost its provenance")
