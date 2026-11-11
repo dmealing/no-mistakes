@@ -37,12 +37,14 @@ func newAxiRetryCmd() *cobra.Command {
 			"are carried from the failed run. The failed step restarts from the\n" +
 			"beginning - a failed agent turn is never replayed - so a failed Review\n" +
 			"reviews the resulting head again in full before Test runs. Every later\n" +
-			"step runs normally.\n\n" +
+			"step runs normally. A run that failed after Test (Document, Lint, Push,\n" +
+			"PR, or CI repair) restarts from Test instead, carrying its finished\n" +
+			"Review, because Test's evidence and later steps' work are never carried.\n\n" +
 			"The retry refuses, and changes nothing, unless every proof holds: --run\n" +
 			"names the branch's latest run; that run failed, nothing is active on the\n" +
-			"branch, and it never pushed; its record shows exactly one failed step,\n" +
-			"failed on an agent invocation error or a base-branch fetch, at or before\n" +
-			"Test; its preserved head\n" +
+			"branch, and it never pushed a head other than its preserved head; its\n" +
+			"record shows exactly one failed step, failed on an agent invocation error\n" +
+			"or a base-branch fetch; its preserved head\n" +
 			"is still anchored in the local gate; the working tree is clean at exactly\n" +
 			"that head (adopt it first with `no-mistakes axi sync --recover`); and the\n" +
 			"run's model profile and the repository's gates are unchanged, and a carried\n" +

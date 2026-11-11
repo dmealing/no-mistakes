@@ -675,8 +675,8 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 }
 
 // planRetry proves the retry source's checkpoint against this run's steps and
-// adopts what the source carries forward: its per-run skips of steps that never
-// ran, and the review approval of a carried Review step, which still names the
+// adopts what the source carries forward: its per-run skips of the steps the
+// continuation runs again, and the review approval of a carried Review step, which still names the
 // head that step approved.
 func (e *Executor) planRetry(run *db.Run) (*RetryCheckpoint, error) {
 	source, err := e.db.GetRun(e.retrySource)
@@ -690,7 +690,7 @@ func (e *Executor) planRetry(run *db.Run) (*RetryCheckpoint, error) {
 	if err != nil {
 		return nil, fmt.Errorf("retry run %s: %w", e.retrySource, err)
 	}
-	for _, row := range checkpoint.Steps[checkpoint.Index+1:] {
+	for _, row := range checkpoint.Steps[checkpoint.Index:] {
 		if row.Status != types.StepStatusSkipped {
 			continue
 		}
@@ -1661,7 +1661,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		nextTrigger = "auto_fix"
 	case state.retrying:
 		nextTrigger = "retry"
-		writeLog(fmt.Sprintf("restarting %s from the beginning: run %s failed in this step on an agent invocation error or a base-branch fetch", stepName, e.retrySource))
+		writeLog(fmt.Sprintf("restarting %s from the beginning: run %s failed in this or a later step on an agent invocation error or a base-branch fetch", stepName, e.retrySource))
 	}
 	skipRemaining := false
 	stepSkipped := false

@@ -70,11 +70,14 @@ func (a *invocationFailureAgent) NeutralizesGateInstructions() bool {
 	return agent.NeutralizesGateInstructions(a.inner)
 }
 
-// RetryCheckpoint is the boundary a failed run continues from: its failed
-// step restarts from the beginning, and the steps before it are carried.
+// RetryCheckpoint is the boundary a failed run continues from: the step at
+// Index restarts from the beginning, and the steps before it are carried. That
+// step is the failed one, or Test when the run failed after Test.
 type RetryCheckpoint struct {
-	// Index is the failed step's position in the pipeline.
+	// Index is the position of the step the continuation restarts.
 	Index int
+	// FailedIndex is the failed step's position in the pipeline.
+	FailedIndex int
 	// Steps holds every step record of the failed run, in pipeline order.
 	Steps []*db.StepResult
 	// Round is the failed step's round that was in flight when it failed.
@@ -82,13 +85,12 @@ type RetryCheckpoint struct {
 }
 
 // Failed is the failed step's record.
-func (c *RetryCheckpoint) Failed() *db.StepResult { return c.Steps[c.Index] }
+func (c *RetryCheckpoint) Failed() *db.StepResult { return c.Steps[c.FailedIndex] }
 
 // Retry proofs PlanRetryCheckpoint can fail.
 const (
 	RetryProofCheckpoint = "durable checkpoint"
 	RetryProofCause      = "eligible failure"
-	RetryProofEvidence   = "reusable evidence"
 )
 
 // RetryRefusal is a failed retry proof: which one, and why.
@@ -110,7 +112,8 @@ func refuseCheckpoint(proof, format string, args ...any) error {
 // recorded cause is an agent invocation failure or a base-branch fetch
 // failure, then rows that never ran.
 // No carried row may be Test or a later step, because Test's evidence and
-// every later step's work are not kept after a run ends.
+// every later step's work are not kept after a run ends: a run that failed
+// after Test restarts from Test.
 func PlanRetryCheckpoint(database *db.DB, run *db.Run, steps []Step) (*RetryCheckpoint, error) {
 	rows, err := database.GetStepsByRun(run.ID)
 	if err != nil {
@@ -143,14 +146,16 @@ func PlanRetryCheckpoint(database *db.DB, run *db.Run, steps []Step) (*RetryChec
 	if row.FailureCause == nil || (*row.FailureCause != db.StepFailureCauseAgentInvocation && *row.FailureCause != db.StepFailureCauseBaseFetch) {
 		return nil, refuseCheckpoint(RetryProofCause, "step %s did not fail on an agent invocation error (provider, transport, or agent process) or a base-branch fetch, so the failure may be about the change itself", row.StepName)
 	}
-	for _, carried := range rows[:failed] {
+	restart := failed
+	for index, carried := range rows[:failed] {
 		if carried.StepName.Order() >= types.StepTest.Order() {
-			return nil, refuseCheckpoint(RetryProofEvidence, "step %s failed after %s, and a continuation cannot carry %s or any later step because their evidence is not kept after a run ends", row.StepName, carried.StepName, types.StepTest)
+			restart = index
+			break
 		}
 	}
 	rounds, err := database.GetRoundsByStep(row.ID)
 	if err != nil {
 		return nil, fmt.Errorf("read step %s rounds: %w", row.StepName, err)
 	}
-	return &RetryCheckpoint{Index: failed, Steps: rows, Round: len(rounds) + 1}, nil
+	return &RetryCheckpoint{Index: restart, FailedIndex: failed, Steps: rows, Round: len(rounds) + 1}, nil
 }

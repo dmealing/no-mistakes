@@ -525,7 +525,7 @@ func retriedRunFields(result *ipc.RetryRunResult) []toon.Field {
 	return []toon.Field{
 		{Key: "retried", Value: true},
 		{Key: "retry_of", Value: result.SourceRunID},
-		{Key: "restarted_step", Value: string(result.Step)},
+		{Key: "failed_step", Value: string(result.Step)},
 		{Key: "failed_round", Value: result.SourceRound},
 	}
 }

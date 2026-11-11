@@ -333,11 +333,12 @@ selection behavior.
 
 When a ` + "`failed`" + ` outcome came from the agent invocation itself - a provider
 processing error, a usage or quota limit, a transport failure, or the agent
-process exiting - in Test or an earlier step, and the run never pushed,
-` + "`no-mistakes axi retry --run <id>`" + ` continues that run instead of repeating it:
+process exiting - and the run never pushed a head other than its preserved
+head, ` + "`no-mistakes axi retry --run <id>`" + ` continues that run instead of repeating it:
 a new run starts at the preserved head, carries the steps before the failed
 one, and restarts the failed step from the beginning, so a failed Review
-reviews the resulting head in full before Test. First adopt the preserved head
+reviews the resulting head in full before Test. A failure after Test restarts
+from Test and keeps the finished Review. First adopt the preserved head
 with the reported ` + "`no-mistakes axi sync --recover`" + ` so your clean ` + "`HEAD`" + ` is
 exactly that head. Retry refuses, changing nothing, and names the failed proof
 whenever continuing is not provably safe - a failure about the change itself,

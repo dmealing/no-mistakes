@@ -636,9 +636,10 @@ The retry starts a new run at the failed run's preserved head, so every correcti
 
 - The steps before the failed step are carried from the failed run, with their outcome and, for a carried Review, the head that Review approved. Their findings and fixes appear in the new run's output and PR body as recorded in the failed run.
 - The failed step restarts from the beginning, with round trigger `retry`. A failed agent turn is never replayed, so a Review that failed during a fix round reviews the resulting head again in full before Test runs. Fixer commits the failed run never re-reviewed are flagged to that review together with the failed run's rounds, exactly as for a rerun.
-- Every later step runs normally. Per-run skips of steps that never ran are kept.
+- Every later step runs normally. Per-run skips of the steps the new run runs again are kept.
 
-The failed step must be Test or an earlier step, because Test's evidence and every later step's work are not kept after a run ends.
+Test's evidence and every later step's work are not kept after a run ends, so nothing from Test on is carried.
+A run that failed after Test - in Document, Lint, Push, PR, or CI repair - restarts from Test instead of the failed step: the steps before Test, including the finished Review, are carried, and Test and every later step run again.
 The new run inherits the failed run's intent byte for byte with its provenance, PR base branch, intent omission, closing references, open PR URL, and Pi profile; retry takes none of the flags that would change them.
 
 `--run` names the failed run, as `axi status` shows it.
@@ -651,10 +652,9 @@ The retry refuses, changing nothing, unless every proof holds:
 | `latest run` | no newer run exists on the branch |
 | `no active run` | no run is active on the branch |
 | `failed run` | the run's status is `failed`, not `cancelled` or `completed` |
-| `unpublished run` | the run never pushed |
+| `unpublished run` | the run never pushed, or every push it made published exactly its preserved head |
 | `durable checkpoint` | the run's record holds one row per step of its pinned pipeline: completed or skipped steps, exactly one failed step, then steps that never ran |
 | `eligible failure` | the failed step's recorded cause is an agent invocation failure or a base-branch fetch failure |
-| `reusable evidence` | the failed step is Test or an earlier step |
 | `preserved head` | the run verified its final head when it failed, and the gate still keeps exactly that commit: its recovery ref when the pipeline moved the head, the submitted commit otherwise |
 | `clean branch` | the working tree has no uncommitted changes |
 | `matching head` | the local `HEAD` is exactly the preserved head; adopt it first with `no-mistakes axi sync --recover` |
@@ -672,7 +672,7 @@ Each refusal names the failed proof and points to `no-mistakes rerun`.
 The new run records which run, step, and round it continues, the failed step's error, and the preserved head it started from.
 Its run object shows that link as `retry_of`, and the failed run's run object names its continuation as `retried_by`; the new run's own outcome completes the trail.
 A failed run is continued at most once.
-Retry is never offered as a next action. Besides `axi retry`, one path runs it without being asked for by name: [`axi run`](#no-mistakes-axi-run), when it would start a new run, and the request has no `--skip`, `--verification-plan`, `--model`, `--effort`, or `--launch-nonce`, first asks the daemon to continue the branch's latest run instead. The daemon does so only when every proof above holds and the request matches the failed run: the same intent (ignoring leading and trailing whitespace), PR base branch, intent omission, and closing references, no Pi profile, a carried Review, and every carried step completed. Otherwise `axi run` starts a fresh run as before. The output of a continued run leads with `retried: true`, `retry_of`, `restarted_step`, and `failed_round`, so a finished review is not paid for twice after a late failure.
+Retry is never offered as a next action. Besides `axi retry`, one path runs it without being asked for by name: [`axi run`](#no-mistakes-axi-run), when it would start a new run, and the request has no `--skip`, `--verification-plan`, `--model`, `--effort`, or `--launch-nonce`, first asks the daemon to continue the branch's latest run instead. The daemon does so only when every proof above holds and the request matches the failed run: the same intent (ignoring leading and trailing whitespace), PR base branch, intent omission, and closing references, no Pi profile, a carried Review, and every carried step completed. Otherwise `axi run` starts a fresh run as before. The output of a continued run leads with `retried: true`, `retry_of`, `failed_step`, and `failed_round`, so a finished review is not paid for twice after a late failure.
 Like `axi run`, it then blocks until the next gate, CI-ready decision point, or final outcome, bounded by `--wait` (default `8m`).
 
 | Flag | Type | Default | Description |

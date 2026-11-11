@@ -82,15 +82,16 @@ func refuseRetry(runID, proof, format string, args ...any) error {
 // HandleRetry continues runID, the branch's latest run, in a new run that
 // starts at the failed run's preserved head: the steps before its failed step
 // are carried, the failed step restarts from the beginning, and every later
-// step runs normally. It refuses, changing nothing, unless every proof holds:
-// the run is this branch's latest and failed while nothing is active; its
-// record names exactly one failed step, failed on an agent invocation error
-// or a base-branch fetch,
-// with nothing from Test on carried and nothing published; its preserved head
-// is anchored; the caller is clean at exactly that head; the model profile and
-// the repository's gates are unchanged; and the repository configuration, the
-// recorded global configuration, and the agent and model that served each
-// carried step are the ones a new run would use.
+// step runs normally. A run that failed after Test restarts from Test instead,
+// because nothing from Test on is ever carried. It refuses, changing nothing,
+// unless every proof holds: the run is this branch's latest and failed while
+// nothing is active; its record names exactly one failed step, failed on an
+// agent invocation error or a base-branch fetch; it published no head other
+// than its preserved head; that head is anchored; the caller is clean at
+// exactly that head; the model profile and the repository's gates are
+// unchanged; and the repository configuration, the recorded global
+// configuration, and the agent and model that served each carried step are
+// the ones a new run would use.
 func (m *RunManager) HandleRetry(ctx context.Context, repoID, branch, runID, callerHeadSHA string) (*db.RunRetry, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
@@ -141,6 +142,11 @@ func (m *RunManager) HandleAutomaticRetry(ctx context.Context, repoID, branch, c
 	if latest == "" {
 		return nil, refuseRetry("", "latest run", "branch %s has no run to continue", branch)
 	}
+	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		return nil, fmt.Errorf("load global config: %w", err)
+	}
+	req.OmitIntent = req.OmitIntent || !globalCfg.Intent.PublishesIntentByDefault()
 	return m.handleRetry(ctx, repo, branch, latest, callerHeadSHA, func(launch *retryLaunch) error {
 		return proveAutomaticRetryRequest(launch, req)
 	})
@@ -258,8 +264,8 @@ func (m *RunManager) proveRetry(ctx context.Context, repo *db.Repo, branch, runI
 	if source.Status != types.RunFailed {
 		return nil, refuseRetry(runID, "failed run", "the run is %s, and only a failed run can continue", source.Status)
 	}
-	if source.LastPushedSHA != nil || source.PushGeneration != nil {
-		return nil, refuseRetry(runID, "unpublished run", "the run already pushed, so its head is no longer only in the local gate")
+	if (source.LastPushedSHA != nil || source.PushGeneration != nil) && (source.LastPushedSHA == nil || *source.LastPushedSHA != source.HeadSHA) {
+		return nil, refuseRetry(runID, "unpublished run", "the run already pushed a head other than its preserved head %s", source.HeadSHA)
 	}
 	if source.VerificationPlan != nil {
 		return nil, refuseRetry(runID, "compatible configuration", "the run carries a verification plan, which belongs to that run alone")

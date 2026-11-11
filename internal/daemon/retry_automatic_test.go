@@ -117,3 +117,85 @@ func TestManualRetryStillRequiresTheRunID(t *testing.T) {
 	}
 	f.requireNothingLaunched(t)
 }
+
+// TestAutomaticRetryComparesTheEffectiveIntentPublication: with global
+// `intent.publish_intent: false` the launch stores omit_intent=1 even though
+// `axi run` never passed --no-publish-intent, so the same request without
+// that flag is the same request and continues the failed run.
+func TestAutomaticRetryComparesTheEffectiveIntentPublication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent stand-ins are POSIX shell scripts")
+	}
+	f := newRetryFixture(t, retryFixtureOptions{failInTest: true, omitIntent: true, beforeSource: func(t *testing.T, f *retryFixture) {
+		writeFakeAgents(t, f.p, "claude", "agent_config:\n  claude:\n    model: opus\nintent:\n  publish_intent: false\n", "claude")
+	}})
+	result, err := f.automaticRetry(t, ipc.RetryRunParams{Intent: "keep it"})
+	if err != nil {
+		t.Fatalf("automatic retry: %v", err)
+	}
+	if run := waitForRunTerminalState(t, f.d, result.RunID); run.Status != types.RunCompleted || !run.OmitIntent {
+		t.Fatalf("continuation = %s omit_intent=%v, want completed and still omitting the intent", run.Status, run.OmitIntent)
+	}
+}
+
+// TestRetryOfALateFailureRestartsFromTest: a run whose Review finished but
+// which failed in Document, or in PR after it pushed its preserved head,
+// continues from Test with the Review carried, through both `axi retry` and
+// the automatic `axi run` continuation. Test and every later step run again.
+func TestRetryOfALateFailureRestartsFromTest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent stand-ins are POSIX shell scripts")
+	}
+	late := []types.StepName{types.StepDocument, types.StepLint, types.StepPush, types.StepPR}
+	for _, tc := range []struct {
+		name      string
+		failAt    types.StepName
+		pushed    bool
+		automatic bool
+		executed  int32
+	}{
+		{name: "document via retry", failAt: types.StepDocument, executed: 5},
+		{name: "document via run", failAt: types.StepDocument, automatic: true, executed: 5},
+		{name: "pr after pushing the preserved head via retry", failAt: types.StepPR, pushed: true, executed: 5},
+		{name: "pr after pushing the preserved head via run", failAt: types.StepPR, pushed: true, automatic: true, executed: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRetryFixture(t, retryFixtureOptions{failAt: tc.failAt, late: late, beforeSource: func(t *testing.T, f *retryFixture) {
+				writeFakeAgents(t, f.p, "claude", "agent_config:\n  claude:\n    model: opus\n", "claude")
+			}})
+			if tc.pushed {
+				if err := f.d.UpdateRunPushBinding(f.source.ID, db.PushBinding{HeadSHA: f.source.HeadSHA, TargetKind: "origin", TargetFingerprint: "fp", Ref: "refs/heads/main"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var result ipc.RetryRunResult
+			var err error
+			if tc.automatic {
+				result, err = f.automaticRetry(t, ipc.RetryRunParams{Intent: "keep it"})
+			} else {
+				result, err = f.retry(t, f.source.ID)
+			}
+			if err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if result.SourceRunID != f.source.ID || result.Step != tc.failAt {
+				t.Fatalf("result = %+v, want %s of %s named as the failed step", result, tc.failAt, f.source.ID)
+			}
+			if run := waitForRunTerminalState(t, f.d, result.RunID); run.Status != types.RunCompleted {
+				t.Fatalf("continuation = %s, want completed", run.Status)
+			}
+			if got := f.executions.Load(); got != tc.executed {
+				t.Fatalf("executed %d steps, want %d (Test and every later step; Rebase and Review carried)", got, tc.executed)
+			}
+			rows, err := f.d.GetStepsByRun(result.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range rows {
+				if carried := row.CarriedFrom != nil; carried != (row.StepName.Order() < types.StepTest.Order()) {
+					t.Fatalf("%s carried = %v; only the steps before Test may be carried", row.StepName, carried)
+				}
+			}
+		})
+	}
+}

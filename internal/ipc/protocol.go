@@ -268,8 +268,8 @@ type RetryRunParams struct {
 	ClosingIssueRefs []string `json:"closing_issue_refs,omitempty"`
 }
 
-// RetryRunResult names the run that continues the failed one and the step it
-// restarted, with the round of that step the failed run was in.
+// RetryRunResult names the run that continues the failed one and the failed
+// run's failed step, with the round of that step the failed run was in.
 type RetryRunResult struct {
 	RunID       string         `json:"run_id"`
 	SourceRunID string         `json:"source_run_id"`
