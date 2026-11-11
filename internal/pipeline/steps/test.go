@@ -407,7 +407,7 @@ Rules:
 		reassessHistory,
 		agent.MemoryFilesRule,
 	) + testRepairScopeRules
-	findings, err := runTestAnalyzer(sctx, evidencePrompt)
+	findings, producer, err := runTestAnalyzer(sctx, evidencePrompt)
 	if err != nil {
 		if errors.Is(err, errTestAgentTimeout) {
 			outcome := testAgentTimeoutOutcome(sctx, err, startHead, baselineFindings, baselineSummary, baselineExitCode)
@@ -424,6 +424,17 @@ Rules:
 	if len(tested) > 0 {
 		findings.Tested = append(append([]string{}, tested...), findings.Tested...)
 	}
+	// Capture new test files before the commit below: detectNewTestFiles
+	// reads uncommitted status.
+	newTests := mergeNewTestFiles(newTestsFromFix, detectNewTestFiles(ctx, sctx.WorkDir))
+	// The evidence turn may write a focused test or repair what it found while
+	// validating. Commit that work here, under this step's own subject. Left
+	// in the worktree, the next step's commit swept it up and published a Test
+	// change as a Document commit. The tested head is read after the commit:
+	// the tests ran against exactly this tree.
+	if _, err := commitAgentFixesWithResult(sctx, types.StepTest, "", "apply changes made during test validation", producer); err != nil {
+		return nil, err
+	}
 	findings.TestedHeadSHA = sctx.Run.HeadSHA
 	findings.Items = append(baselineFindings, findings.Items...)
 	if baselineSummary != "" {
@@ -439,7 +450,6 @@ Rules:
 	// Record any new test files the agent wrote as informational (no-op)
 	// findings. Their presence alone is not an actionable problem, so they
 	// must not force the test step into approval when tests pass (issue #140).
-	newTests := mergeNewTestFiles(newTestsFromFix, detectNewTestFiles(ctx, sctx.WorkDir))
 	for _, f := range newTests {
 		findings.Items = append(findings.Items, Finding{
 			Severity:    "info",
@@ -468,7 +478,9 @@ Rules:
 // than correcting structured output.
 const testAnalyzerMaxAttempts = 3
 
-func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error) {
+// runTestAnalyzer returns the validated findings and the agent result that
+// produced them, which attributes any worktree changes the turn left.
+func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, *agent.Result, error) {
 	current := prompt
 	var lastErr error
 	for attempt := 1; attempt <= testAnalyzerMaxAttempts; attempt++ {
@@ -490,7 +502,7 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 		})
 		runErr := testAgentError(timeout, "agent run tests", err)
 		if runErr != nil && (errors.Is(runErr, errTestAgentTimeout) || sctx.Ctx.Err() != nil || !agent.IsStructuredOutputRejected(runErr)) {
-			return Findings{}, runErr
+			return Findings{}, nil, runErr
 		}
 
 		var valErr error
@@ -503,7 +515,7 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 			var findings Findings
 			findings, valErr = parseTestAnalyzerOutput(result)
 			if valErr == nil {
-				return findings, nil
+				return findings, result, nil
 			}
 		}
 		lastErr = valErr
@@ -516,7 +528,7 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 		}
 		current = testAnalyzerCorrectionPrompt(valErr, rejected)
 	}
-	return Findings{}, agent.RejectStructuredOutput(fmt.Errorf("validate test analyzer findings after %d attempts: %w", testAnalyzerMaxAttempts, lastErr))
+	return Findings{}, nil, agent.RejectStructuredOutput(fmt.Errorf("validate test analyzer findings after %d attempts: %w", testAnalyzerMaxAttempts, lastErr))
 }
 
 func parseTestAnalyzerOutput(result *agent.Result) (Findings, error) {

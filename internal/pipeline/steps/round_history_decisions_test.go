@@ -790,3 +790,66 @@ func TestRoundHistory_ALaterSelectionNeverRediscardsAnEarlierFix(t *testing.T) {
 		t.Fatalf("the later round's complement declines are missing:\n%s", got)
 	}
 }
+
+// A finding the human chose to fix in Review, and that Review's next fix round
+// applied, must reach the Test step as fixed. Before this, Test saw only the
+// finding's original problem description under "user chose to fix" and
+// re-reported both fixed findings as unapplied and awaiting a decision.
+func TestFixedSelectionReachesALaterStepAsFixed(t *testing.T) {
+	t.Parallel()
+	f := newDecisionFixture(t)
+	findings := `{"findings":[{"id":"review-3","severity":"warning","file":"gen/Controller.java",` +
+		`"description":"a second string escaper duplicates the shared one; a maintainer decision","action":"ask-user"},` +
+		`{"id":"review-9","severity":"warning","file":"gen/Other.java","description":"left for later","action":"ask-user"}]}`
+	initial, err := f.db.InsertStepRound(f.reviewSR.ID, 1, "initial", &findings, nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := `["review-3"]`
+	if err := f.db.SetStepRoundUserDecision(initial.ID, &selected, db.RoundSelectionSourceUser, nil); err != nil {
+		t.Fatal(err)
+	}
+	applied := changesAppliedSummary
+	clean := `{"findings":[]}`
+	if _, err := f.db.InsertStepRound(f.reviewSR.ID, 2, "auto_fix", &clean, &applied, 10); err != nil {
+		t.Fatal(err)
+	}
+
+	got := roundHistoryPromptSection(f.testStepContext())
+
+	if !strings.Contains(got, `review round 1 user chose to fix, and fix round 2 applied it: {"id":"review-3"`) {
+		t.Fatalf("the fixed selection does not say a fix round applied it:\n%s", got)
+	}
+	if !strings.Contains(got, `review round 1 declined: {"id":"review-9"`) {
+		t.Fatalf("the unselected finding must still read as declined:\n%s", got)
+	}
+	if !strings.Contains(got, "unless the current code still shows the problem") {
+		t.Fatalf("missing the verify-before-re-reporting instruction:\n%s", got)
+	}
+}
+
+// A fix round that changed nothing fixed nothing, so the selection keeps its
+// plain label.
+func TestUnappliedFixRoundDoesNotMarkTheSelectionFixed(t *testing.T) {
+	t.Parallel()
+	f := newDecisionFixture(t)
+	findings := `{"findings":[{"id":"review-3","severity":"warning","description":"dup escaper","action":"ask-user"}]}`
+	initial, err := f.db.InsertStepRound(f.reviewSR.ID, 1, "initial", &findings, nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := `["review-3"]`
+	if err := f.db.SetStepRoundUserDecision(initial.ID, &selected, db.RoundSelectionSourceUser, nil); err != nil {
+		t.Fatal(err)
+	}
+	none := NoChangesAppliedSummary
+	if _, err := f.db.InsertStepRound(f.reviewSR.ID, 2, "user_fix", &findings, &none, 10); err != nil {
+		t.Fatal(err)
+	}
+
+	got := roundHistoryPromptSection(f.testStepContext())
+
+	if !strings.Contains(got, `review round 1 user chose to fix: {"id":"review-3"`) || strings.Contains(got, "fix round 2 applied it") {
+		t.Fatalf("a no-change fix round must not mark the selection fixed:\n%s", got)
+	}
+}

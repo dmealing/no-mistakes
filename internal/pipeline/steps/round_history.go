@@ -315,6 +315,8 @@ const driverInstructionsNote = "A finding's driver_instructions field is fix gui
 
 const humanDecisionPreamble = "Entries are chronological. A LATER entry about the same concern supersedes an earlier entry. " +
 	"Entries labelled declined were not selected to be fixed; Do NOT implement them, and do NOT change code, tests, or documentation to satisfy them. " +
+	"An entry that names the fix round that applied it was already fixed by that step; its description is the problem as first reported, not the current state. " +
+	"Do NOT report such an entry again, as unfixed, or as awaiting a decision unless the current code still shows the problem; if it does, cite the current code that shows it. " +
 	"A recorded decision SUPERSEDES conflicting user-intent wording. " +
 	"You may raise a related concern only when the current change genuinely introduces a new, materially different problem. " +
 	"Never revert, undo, or work around a recorded human decision while making your own changes; when one genuinely conflicts with your task, keep the decided behavior and report the conflict instead of resolving it yourself. " +
@@ -341,8 +343,12 @@ func runDecisionsPromptSection(sctx *pipeline.StepContext) string {
 			continue
 		}
 		var earlierFixes map[string]bool
-		for _, r := range rounds {
-			lines = appendHumanDecisionLines(lines, string(step.StepName), r, earlierFixes)
+		for i, r := range rounds {
+			var next *db.StepRound
+			if i+1 < len(rounds) {
+				next = rounds[i+1]
+			}
+			lines = appendHumanDecisionLines(lines, string(step.StepName), r, earlierFixes, appliedFixRound(next))
 			earlierFixes = withChosenToFix(earlierFixes, r)
 		}
 	}
@@ -402,10 +408,16 @@ func appendDeclinedLines(lines []string, stepName string, r *db.StepRound, earli
 }
 
 func appendBranchDecisionLines(lines []string, stepName string, r *db.StepRound, earlierFixes map[string]bool) []string {
-	return appendHumanDecisionLines(lines, stepName, r, earlierFixes)
+	return appendHumanDecisionLines(lines, stepName, r, earlierFixes, nil)
 }
 
-func appendHumanDecisionLines(lines []string, stepName string, r *db.StepRound, earlierFixes map[string]bool) []string {
+// appendHumanDecisionLines renders one round's human decisions. A non-nil
+// fixedBy is the fix round that applied the selection, named on each
+// chosen-to-fix line. Without it a later step of the same run read a selected
+// finding's original problem description with nothing saying it had been
+// fixed, and re-reported already-fixed findings as open and awaiting a
+// decision.
+func appendHumanDecisionLines(lines []string, stepName string, r *db.StepRound, earlierFixes map[string]bool, fixedBy *db.StepRound) []string {
 	if r == nil {
 		return lines
 	}
@@ -413,11 +425,25 @@ func appendHumanDecisionLines(lines []string, stepName string, r *db.StepRound, 
 	if selectionSourceValue(r.SelectionSource) != db.RoundSelectionSourceUser {
 		return lines
 	}
+	label := "user chose to fix"
+	if fixedBy != nil {
+		label = fmt.Sprintf("user chose to fix, and fix round %d applied it", fixedBy.Round)
+	}
 	selected, _ := partitionRoundFindings(r.FindingsJSON, withoutDriverInstructions(r.UserFindingsJSON), r.SelectedFindingIDs)
 	for _, line := range selected {
-		lines = append(lines, fmt.Sprintf("  - %s round %d user chose to fix: %s", sanitizePromptText(stepName), r.Round, line))
+		lines = append(lines, fmt.Sprintf("  - %s round %d %s: %s", sanitizePromptText(stepName), r.Round, label, line))
 	}
 	return lines
+}
+
+// appliedFixRound returns r when it is a fix round that reported applying
+// changes, else nil. A fix round that changed nothing, or reported nothing,
+// fixed nothing.
+func appliedFixRound(r *db.StepRound) *db.StepRound {
+	if r == nil || !r.IsFixRound() || fixRoundOutcome(r) != fixOutcomeApplied {
+		return nil
+	}
+	return r
 }
 
 // withoutDriverInstructions drops each finding's driver guidance from a round's

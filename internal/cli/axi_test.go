@@ -73,7 +73,7 @@ func TestRunViewFromDBCarriesCIOverrideReason(t *testing.T) {
 
 func TestFindingsTally(t *testing.T) {
 	rv := runView{Steps: []stepView{
-		{FindingsJSON: findingsJSON(t, []types.Finding{
+		{Status: string(types.StepStatusAwaitingApproval), FindingsJSON: findingsJSON(t, []types.Finding{
 			{ID: "a", Action: types.ActionAskUser, Description: "x"},
 			{ID: "b", Action: types.ActionAutoFix, Description: "y"},
 			{ID: "c", Action: types.ActionNoOp, Description: "z"},
@@ -87,6 +87,32 @@ func TestFindingsTally(t *testing.T) {
 	empty := runView{Steps: []stepView{{}}}
 	if got := empty.findingsTally(); got != "none" {
 		t.Errorf("empty findingsTally = %q, want none", got)
+	}
+}
+
+// A finished run: Review parked on an ask-user finding, the operator answered
+// the gate, and the run completed. Nothing is awaiting a response any more,
+// so the tally must not say one is.
+func TestFindingsTallyCountsADecidedGateAsDecided(t *testing.T) {
+	rv := runView{Steps: []stepView{
+		{Status: string(types.StepStatusCompleted), FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: "install-busy-stop-race", Action: types.ActionAskUser, Description: "x"},
+		}, "s")},
+		{Status: string(types.StepStatusCompleted), FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: "test-1", Action: types.ActionNoOp, Description: "y"},
+		}, "s")},
+	}}
+	if got := rv.findingsTally(); got != "1 decided, 1 info" {
+		t.Errorf("findingsTally = %q, want %q", got, "1 decided, 1 info")
+	}
+
+	parked := runView{Steps: []stepView{
+		{Status: string(types.StepStatusFixReview), FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: "a", Action: types.ActionAskUser, Description: "x"},
+		}, "s")},
+	}}
+	if got := parked.findingsTally(); got != "1 awaiting" {
+		t.Errorf("fix_review findingsTally = %q, want 1 awaiting", got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -98,6 +99,8 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 		ag = sctx.Agent
 	}
 	activity := observeAgentActivity(&opts)
+	stopHeartbeat := sctx.startAgentChildHeartbeat(activity, agentChildHeartbeatInterval)
+	defer stopHeartbeat()
 	return invokeAgent(parent, timeout, working, cause, activity, func(ctx context.Context) (*agent.Result, error) {
 		if sessionRole != "" && sctx != nil && sctx.Sessions != nil {
 			return sctx.Sessions.Run(ctx, ag, sessionRole, opts, sctx.Log)
@@ -107,6 +110,49 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 		}
 		return ag.Run(ctx, opts)
 	})
+}
+
+// agentChildHeartbeatInterval paces the step-activity heartbeat while a quiet
+// agent waits on a process it launched. Like the configured-command heartbeat
+// it must stay well under step_quiet_warning (10m) and step_stall_timeout
+// (1h). A package var so tests can shorten it.
+var agentChildHeartbeatInterval = 4 * time.Minute
+
+// startAgentChildHeartbeat touches the step's activity row while the agent is
+// quiet but waiting on a child process it launched after its last output,
+// such as a test suite or build a tool call started. Step liveness (`axi
+// status` and the dead-run watchdog) reads only that row, and an agent
+// emits no bytes while a tool call runs, so without this a healthy hour-long
+// test run read as stalled and could be killed as dead. It uses the same
+// waitingOnChild evidence as the invocation stall budget, so helpers alive
+// for the whole turn (stdio MCP servers, an ACP agent under acpx) never keep
+// a wedged agent looking alive. Callers without a recorded step get a no-op.
+func (sctx *StepContext) startAgentChildHeartbeat(activity *agentActivity, interval time.Duration) func() {
+	if sctx == nil || sctx.DB == nil || sctx.StepResultID == "" || activity == nil || interval <= 0 {
+		return func() {}
+	}
+	activity.enableChildTracking()
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if !activity.waitingOnChild() {
+					continue
+				}
+				text := fmt.Sprintf("agent waiting on a process it launched (%s since its last output)", roundActivity(activity.sinceLastOutput()))
+				if err := sctx.DB.TouchStepActivity(sctx.StepResultID, text); err != nil {
+					slog.Warn("failed to heartbeat agent child activity", "step_result_id", sctx.StepResultID, "error", err)
+				}
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
 }
 
 func invokeAgent(parent context.Context, timeout, working time.Duration, cause error, activity *agentActivity, run func(context.Context) (*agent.Result, error)) (*agent.Result, error) {
@@ -149,8 +195,8 @@ type agentActivity struct {
 	// exited is set once the launched subprocess reported its exit, so its
 	// PID is never probed for children after the kernel may have reused it.
 	exited bool
-	// trackChildren is set when a stall budget applies, the only reader of
-	// the child samples below.
+	// trackChildren is set when a stall budget applies or a recorded step
+	// heartbeats its activity, the two readers of the child samples below.
 	trackChildren bool
 	// finished stops the child sampler once the invocation returned.
 	finished bool
@@ -328,6 +374,14 @@ func (a *agentActivity) waitingOnChild() bool {
 		}
 	}
 	return false
+}
+
+// sinceLastOutput is how long ago the agent last produced output.
+func (a *agentActivity) sinceLastOutput() time.Duration {
+	a.mu.Lock()
+	last := a.last
+	a.mu.Unlock()
+	return time.Since(last)
 }
 
 // evidence renders what was actually observed, for the timeout message.
