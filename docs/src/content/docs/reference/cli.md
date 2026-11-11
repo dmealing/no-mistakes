@@ -293,19 +293,22 @@ no-mistakes axi respond --action fix --findings F1 --instructions-file ./guidanc
 no-mistakes axi respond --action fix --add-finding-file ./finding.json
 no-mistakes axi respond --action skip
 no-mistakes axi respond --step review --action complete-coverage
+no-mistakes axi respond --step review --action correct-intent --intent-file ./intent.md
 no-mistakes axi respond --action abort --reason "why the gate is rejected"
 no-mistakes axi respond --run <id> --action approve
 ```
 
 | Flag             | Type     | Default       | Description                                                          |
 | ---------------- | -------- | ------------- | -------------------------------------------------------------------- |
-| `--action`       | `string` | (none)        | `approve`, `fix`, `skip`, `complete-coverage`, or `abort`; required. A reviewer's open question is answered with [`axi answer`](#no-mistakes-axi-answer), not here |
+| `--action`       | `string` | (none)        | `approve`, `fix`, `skip`, `complete-coverage`, `correct-intent`, or `abort`; required. A reviewer's open question is answered with [`axi answer`](#no-mistakes-axi-answer), not here |
 | `--run`          | `string` | current-branch active run | Answer the gate of this run ID from any directory, without resolving the current branch or worktree |
 | `--step`         | `string` | awaiting step | Step to respond to                                                   |
 | `--findings`     | `string` | (none)        | Comma-separated finding IDs to fix with `--action fix`               |
 | `--ignore`       | `string` | (none)        | Comma-separated finding IDs to decline with `--action fix`; see the accounting rules below |
 | `--instructions` | `string` | (none)        | Driver fix guidance applied to selected findings with `--action fix`; recorded as `driver_instructions`, never as the user's decision; `-` reads stdin until EOF, cancellation, or `--wait`; exclusive with `--instructions-file` |
 | `--instructions-file` | `string` | (none) | Read driver fix guidance from a file; exclusive with `--instructions` |
+| `--intent`       | `string` | (none)        | Corrected run intent with `--action correct-intent`; `-` reads stdin to EOF; exclusive with `--intent-file` |
+| `--intent-file`  | `string` | (none)        | Read the corrected run intent from a file with `--action correct-intent`; exclusive with `--intent` |
 | `--reason`       | `string` | (none)        | Operator's reason: optional exception explanation for a Test approval, required with `--action abort` |
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix; a `driver_instructions` key is refused, since driver guidance comes only from `--instructions`; `-` reads stdin until EOF, cancellation, or `--wait`; exclusive with `--add-finding-file` |
 | `--add-finding-file` | `string` | (none) | Read JSON finding object from a file; exclusive with `--add-finding` |
@@ -325,6 +328,15 @@ Every successful fix response echoes what it recorded in a `recorded:` object: `
 `--action complete-coverage` continues a Review gate under the [coverage continuation rules](/no-mistakes/reference/pipeline-steps/#coverage-continuation).
 It refuses `--yes`, `--findings`, `--ignore`, `--instructions`, `--instructions-file`, `--add-finding`, `--add-finding-file`, and `--reason`.
 The CLI supplies the observed head, step result, and latest round binding automatically.
+
+`--action correct-intent` answers a parked Review whose findings show the run's intent was wrong or incomplete.
+It replaces the run's intent with the corrected text, recorded as an explicit intent, and reviews the change again in the same run, instead of the run being aborted and a new one started.
+The corrected intent is read with the same transports and limits as [`axi run` intent input](#intent-input), and the run's pinned `intent.check` rules apply to it as they did at launch.
+Every finding judged against the old intent leaves the gate and is reviewed again, except a finding a fix round already dispatched, which stays outstanding until a later review verifies it; an `intent-conformance` finding always leaves, because the correction decides it.
+The rerun's round is recorded with trigger `intent`, is not a fix round, and spends none of the Review fix-round budget.
+Every later step, including the PR body's intent section, uses the corrected intent.
+It refuses `--yes`, `--findings`, `--ignore`, `--instructions`, `--instructions-file`, `--add-finding`, `--add-finding-file`, and `--reason`, and any step but Review.
+The corrected intent is the user's: an agent driving the run sends only text the user stated or approved.
 
 For an explicitly authorized Test exception, use `no-mistakes axi respond --step test --action approve --reason "the operator's explanation"`.
 The reason is optional: approval without one remains effective, and a qualifying exception is reported with no operator reason supplied.
@@ -609,7 +621,7 @@ That cancels the pipeline's in-flight work and forces a full re-validation; use 
 
 ## no-mistakes axi retry
 
-Continue a run that failed because an agent invocation itself failed, instead of starting the whole pipeline again.
+Continue a run that failed because an agent invocation itself failed, or because the fetch of its base branch failed, instead of starting the whole pipeline again.
 
 ```sh
 no-mistakes axi retry --run <id>
@@ -617,15 +629,17 @@ no-mistakes axi retry --run <id>
 
 An agent invocation failure is an error the agent call returned while its context was still live: a provider processing error, a usage or quota limit, a transport failure, or the agent process exiting.
 The executor records that cause on the failed step when the step fails with that error.
+A base-branch fetch failure is the other recorded cause: every step that scopes its work to the branch's changes fetches the base branch first, retries a failed fetch twice with a short backoff, and records the cause only when every attempt failed.
 A timeout, a cancellation, and every failure about the change itself - a review finding, a failing test or lint, a refused policy, a human decision at a gate - record no cause and are never retried; use [`no-mistakes rerun`](#no-mistakes-rerun) or address them first.
 
 The retry starts a new run at the failed run's preserved head, so every correction the pipeline already committed is kept:
 
 - The steps before the failed step are carried from the failed run, with their outcome and, for a carried Review, the head that Review approved. Their findings and fixes appear in the new run's output and PR body as recorded in the failed run.
 - The failed step restarts from the beginning, with round trigger `retry`. A failed agent turn is never replayed, so a Review that failed during a fix round reviews the resulting head again in full before Test runs. Fixer commits the failed run never re-reviewed are flagged to that review together with the failed run's rounds, exactly as for a rerun.
-- Every later step runs normally. Per-run skips of steps that never ran are kept.
+- Every later step runs normally. Per-run skips of the steps the new run runs again are kept.
 
-The failed step must be Test or an earlier step, because Test's evidence and every later step's work are not kept after a run ends.
+Test's evidence and every later step's work are not kept after a run ends, so nothing from Test on is carried.
+A run that failed after Test - in Document, Lint, Push, PR, or CI repair - restarts from Test instead of the failed step: the steps before Test, including the finished Review, are carried, and Test and every later step run again.
 The new run inherits the failed run's intent byte for byte with its provenance, PR base branch, intent omission, closing references, open PR URL, and Pi profile; retry takes none of the flags that would change them.
 
 `--run` names the failed run, as `axi status` shows it.
@@ -638,10 +652,9 @@ The retry refuses, changing nothing, unless every proof holds:
 | `latest run` | no newer run exists on the branch |
 | `no active run` | no run is active on the branch |
 | `failed run` | the run's status is `failed`, not `cancelled` or `completed` |
-| `unpublished run` | the run never pushed |
+| `unpublished run` | the run never pushed, or every push it made published exactly its preserved head |
 | `durable checkpoint` | the run's record holds one row per step of its pinned pipeline: completed or skipped steps, exactly one failed step, then steps that never ran |
-| `eligible failure` | the failed step's recorded cause is an agent invocation failure |
-| `reusable evidence` | the failed step is Test or an earlier step |
+| `eligible failure` | the failed step's recorded cause is an agent invocation failure or a base-branch fetch failure |
 | `preserved head` | the run verified its final head when it failed, and the gate still keeps exactly that commit: its recovery ref when the pipeline moved the head, the submitted commit otherwise |
 | `clean branch` | the working tree has no uncommitted changes |
 | `matching head` | the local `HEAD` is exactly the preserved head; adopt it first with `no-mistakes axi sync --recover` |
@@ -659,7 +672,7 @@ Each refusal names the failed proof and points to `no-mistakes rerun`.
 The new run records which run, step, and round it continues, the failed step's error, and the preserved head it started from.
 Its run object shows that link as `retry_of`, and the failed run's run object names its continuation as `retried_by`; the new run's own outcome completes the trail.
 A failed run is continued at most once.
-Retry is never offered as an automatic next action: it runs only when you ask for it.
+Retry is never offered as a next action. Besides `axi retry`, one path runs it without being asked for by name: [`axi run`](#no-mistakes-axi-run), when it would start a new run, and the request has no `--skip`, `--verification-plan`, `--model`, `--effort`, or `--launch-nonce`, first asks the daemon to continue the branch's latest run instead. The daemon does so only when every proof above holds and the request matches the failed run: the same intent (ignoring leading and trailing whitespace), PR base branch, intent omission, and closing references, no Pi profile, a carried Review, and every carried step completed. Otherwise `axi run` starts a fresh run as before. The output of a continued run leads with `retried: true`, `retry_of`, `failed_step`, and `failed_round`, so a finished review is not paid for twice after a late failure.
 Like `axi run`, it then blocks until the next gate, CI-ready decision point, or final outcome, bounded by `--wait` (default `8m`).
 
 | Flag | Type | Default | Description |
@@ -734,8 +747,8 @@ default can only add omission, never remove it. If another run is active on that
 cancels it before starting over. Treat rerun as a between-runs action after a
 failed or cancelled outcome; use `axi run` for separate local fixes, and do not
 use rerun to bypass a gate. When the run failed only because an agent invocation
-failed, [`no-mistakes axi retry`](#no-mistakes-axi-retry) continues it from the
-failed step instead of repeating every completed step.
+or the base-branch fetch failed, [`no-mistakes axi retry`](#no-mistakes-axi-retry)
+continues it instead of repeating every completed step.
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |

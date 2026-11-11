@@ -203,8 +203,13 @@ type retryFixtureOptions struct {
 	profile      *agentcfg.PiProfile
 	plan         *verificationplan.Snapshot
 	failInTest   bool
-	twoHop       bool
-	globalYAML   string
+	// failAt, when set, is a step after Test where the source failed; it
+	// is appended to the pipeline after Test with every step in late.
+	failAt     types.StepName
+	late       []types.StepName
+	omitIntent bool
+	twoHop     bool
+	globalYAML string
 	// repoYAML replaces the effective repository configuration the review
 	// round records; empty records the configuration a new run would get.
 	repoYAML   string
@@ -216,9 +221,13 @@ type retryFixtureOptions struct {
 func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 	t.Helper()
 	var executions atomic.Int32
-	steps := []*countingStep{{name: types.StepRebase, count: &executions}, {name: types.StepReview, count: &executions}, {name: types.StepTest, count: &executions}}
+	names := append([]types.StepName{types.StepRebase, types.StepReview, types.StepTest}, opts.late...)
 	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
-		return []pipeline.Step{steps[0], steps[1], steps[2]}
+		steps := make([]pipeline.Step, len(names))
+		for i, name := range names {
+			steps[i] = &countingStep{name: name, count: &executions}
+		}
+		return steps
 	})
 	repo, submitted := setupTestGitRepo(t, p, d, "retry-proof-repo")
 	f := &retryFixture{p: p, d: d, repo: repo, submitted: submitted, callerHead: submitted, executions: &executions}
@@ -230,11 +239,12 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 	if opts.profile != nil {
 		profiles = append(profiles, opts.profile)
 	}
-	source, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "main", submitted, submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, "", "", "", "", false, opts.plan, profiles...)
+	source, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "main", submitted, submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, "", "", "", "", opts.omitIntent, opts.plan, profiles...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []types.StepName{types.StepRebase, types.StepReview, types.StepTest} {
+	failedLate := false
+	for _, name := range names {
 		sr, err := d.InsertStepResult(source.ID, name)
 		if err != nil {
 			t.Fatal(err)
@@ -243,7 +253,7 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 		switch {
 		case name == types.StepRebase:
 			err = d.CompleteStepWithStatus(sr.ID, types.StepStatusCompleted, 0, 1, "")
-		case name == types.StepReview && opts.failInTest:
+		case name == types.StepReview && (opts.failInTest || opts.failAt != ""):
 			if err = d.CompleteStepWithStatus(sr.ID, types.StepStatusCompleted, 0, 1, ""); err == nil {
 				recorded := []byte(opts.repoYAML)
 				if opts.repoYAML == "" {
@@ -268,6 +278,11 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 			err = d.FailStepWithCause(sr.ID, "review agent: "+outage, 1, db.StepFailureCauseAgentInvocation)
 		case name == types.StepTest && opts.failInTest:
 			err = d.FailStepWithCause(sr.ID, "test agent: "+outage, 1, db.StepFailureCauseAgentInvocation)
+		case name == opts.failAt:
+			failedLate = true
+			err = d.FailStepWithCause(sr.ID, string(name)+" agent: "+outage, 1, db.StepFailureCauseAgentInvocation)
+		case opts.failAt != "" && !failedLate:
+			err = d.CompleteStepWithStatus(sr.ID, types.StepStatusCompleted, 0, 1, "")
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -434,8 +449,8 @@ func TestRetryRefusesUnlessEveryProofHolds(t *testing.T) {
 			}
 			return f.source.ID
 		}},
-		{name: "a run that pushed", proof: "unpublished run", breakProof: func(t *testing.T, f *retryFixture) string {
-			if err := f.d.UpdateRunPushBinding(f.source.ID, db.PushBinding{HeadSHA: f.submitted, TargetKind: "origin", TargetFingerprint: "fp", Ref: "refs/heads/main"}); err != nil {
+		{name: "a run that pushed another head", proof: "unpublished run", breakProof: func(t *testing.T, f *retryFixture) string {
+			if err := f.d.UpdateRunPushBinding(f.source.ID, db.PushBinding{HeadSHA: strings.Repeat("2", 40), TargetKind: "origin", TargetFingerprint: "fp", Ref: "refs/heads/main"}); err != nil {
 				t.Fatal(err)
 			}
 			return f.source.ID

@@ -1476,7 +1476,18 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		link, err := mgr.HandleRetry(ctx, p.RepoID, p.Branch, p.RunID, p.CallerHeadSHA)
+		var link *db.RunRetry
+		var err error
+		if p.Automatic {
+			link, err = mgr.HandleAutomaticRetry(ctx, p.RepoID, p.Branch, p.CallerHeadSHA, AutomaticRetryRequest{
+				Intent:           p.Intent,
+				PRBaseBranch:     p.PRBaseBranch,
+				OmitIntent:       p.OmitIntent,
+				ClosingIssueRefs: p.ClosingIssueRefs,
+			})
+		} else {
+			link, err = mgr.HandleRetry(ctx, p.RepoID, p.Branch, p.RunID, p.CallerHeadSHA)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1509,7 +1520,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		dispositions, err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, respondInstructions(p), p.AddedFindings, p.ApprovalReason, pipeline.ResponseOptions{Origin: p.Origin, Coverage: p.Coverage})
+		dispositions, err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, respondInstructions(p), p.AddedFindings, p.ApprovalReason, pipeline.ResponseOptions{Origin: p.Origin, Coverage: p.Coverage, CorrectedIntent: p.CorrectedIntent})
 		if err != nil {
 			// A refused fix response is the caller's input to fix, not a
 			// transport failure: the gate is still parked. Report it as a

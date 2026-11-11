@@ -221,9 +221,18 @@ Run the pipeline and decide on its findings as they come up:
    # continue static review when coverage is incomplete and findings are empty
    no-mistakes axi respond --step review --action complete-coverage
 
+   # review again against a corrected run intent, in this run
+   no-mistakes axi respond --step review --action correct-intent --intent-file <path>
+
    # reject this gate (only when the user has decided it must fail)
    no-mistakes axi respond --action abort --reason "<why the gate is rejected>"
    ` + "```" + `
+   ` + "`correct-intent`" + ` is the answer when a Review finding shows the run's
+   intent was wrong or incomplete: it replaces the intent and reviews again in
+   the same run instead of an abort and a new run. The corrected intent is the
+   user's to give - send only text the user stated or approved. Findings judged
+   against the old intent are reviewed again; a fix already dispatched stays
+   outstanding until a review verifies it.
    ` + "`complete-coverage`" + ` runs a fresh reviewer over only the missing paths.
    It reuses stored coverage only for the same run, step, round, head, base, and trusted scope.
    Missing or invalid provenance keeps Review gated. Source changes during the turn also keep it gated.
@@ -324,11 +333,12 @@ selection behavior.
 
 When a ` + "`failed`" + ` outcome came from the agent invocation itself - a provider
 processing error, a usage or quota limit, a transport failure, or the agent
-process exiting - in Test or an earlier step, and the run never pushed,
-` + "`no-mistakes axi retry --run <id>`" + ` continues that run instead of repeating it:
+process exiting - and the run never pushed a head other than its preserved
+head, ` + "`no-mistakes axi retry --run <id>`" + ` continues that run instead of repeating it:
 a new run starts at the preserved head, carries the steps before the failed
 one, and restarts the failed step from the beginning, so a failed Review
-reviews the resulting head in full before Test. First adopt the preserved head
+reviews the resulting head in full before Test. A failure after Test restarts
+from Test and keeps the finished Review. First adopt the preserved head
 with the reported ` + "`no-mistakes axi sync --recover`" + ` so your clean ` + "`HEAD`" + ` is
 exactly that head. Retry refuses, changing nothing, and names the failed proof
 whenever continuing is not provably safe - a failure about the change itself,

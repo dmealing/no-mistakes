@@ -7,13 +7,13 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	toon "github.com/toon-format/toon-go"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 )
 
-// newAxiRetryCmd continues a run that failed on an agent invocation error.
+// newAxiRetryCmd continues a run that failed on an agent invocation error or a
+// base-branch fetch.
 //
 // --run does not select a run. The retried run is always the current branch's
 // latest run, as for every mutating axi command; --run is the operator's
@@ -24,21 +24,27 @@ func newAxiRetryCmd() *cobra.Command {
 	var wait time.Duration
 	cmd := &cobra.Command{
 		Use:   "retry",
-		Short: "Continue a run that failed on an agent invocation error",
+		Short: "Continue a run that failed on an agent invocation error or a base fetch",
 		Long: "Continues the current branch's latest run when it failed because an agent\n" +
 			"invocation itself failed - a provider error, a usage limit, a transport\n" +
-			"failure, or the agent process exiting - instead of starting the whole\n" +
-			"pipeline again with `no-mistakes rerun`.\n\n" +
+			"failure, or the agent process exiting - or because fetching the base\n" +
+			"branch still failed after its retries, instead of starting the whole\n" +
+			"pipeline again with `no-mistakes rerun`. `axi run` does the same on its\n" +
+			"own when the branch's latest run qualifies and nothing about the run\n" +
+			"request changed.\n\n" +
 			"A new run starts at the failed run's preserved head, so every correction\n" +
 			"the pipeline already committed is kept. The steps before the failed one\n" +
 			"are carried from the failed run. The failed step restarts from the\n" +
 			"beginning - a failed agent turn is never replayed - so a failed Review\n" +
 			"reviews the resulting head again in full before Test runs. Every later\n" +
-			"step runs normally.\n\n" +
+			"step runs normally. A run that failed after Test (Document, Lint, Push,\n" +
+			"PR, or CI repair) restarts from Test instead, carrying its finished\n" +
+			"Review, because Test's evidence and later steps' work are never carried.\n\n" +
 			"The retry refuses, and changes nothing, unless every proof holds: --run\n" +
 			"names the branch's latest run; that run failed, nothing is active on the\n" +
-			"branch, and it never pushed; its record shows exactly one failed step,\n" +
-			"failed on an agent invocation error, at or before Test; its preserved head\n" +
+			"branch, and it never pushed a head other than its preserved head; its\n" +
+			"record shows exactly one failed step, failed on an agent invocation error\n" +
+			"or a base-branch fetch; its preserved head\n" +
 			"is still anchored in the local gate; the working tree is clean at exactly\n" +
 			"that head (adopt it first with `no-mistakes axi sync --recover`); and the\n" +
 			"run's model profile and the repository's gates are unchanged, and a carried\n" +
@@ -107,12 +113,7 @@ func runAxiRetry(cmd *cobra.Command, runID string, wait time.Duration) error {
 			"Run `no-mistakes axi status` to inspect the failed run and the branch's custody")
 	}
 
-	lead := []toon.Field{
-		{Key: "retried", Value: true},
-		{Key: "retry_of", Value: result.SourceRunID},
-		{Key: "restarted_step", Value: string(result.Step)},
-		{Key: "failed_round", Value: result.SourceRound},
-	}
+	lead := retriedRunFields(&result)
 	driveCtx, cancel, err := boundAxiWait(ctx, wait)
 	if err != nil {
 		return emitError(cmd, 2, err.Error(), "Pass a positive duration such as --wait 8m")

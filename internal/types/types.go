@@ -323,6 +323,12 @@ const (
 	// never a valid response to any other gate - the daemon sends it, not an
 	// operator (see docs concepts/review-conversation).
 	ActionAnswer ApprovalAction = "answer"
+	// ActionCorrectIntent replaces the run's intent at a parked review gate and
+	// reviews the change again against the corrected intent, in the same run.
+	// It is a review-only operator response: findings judged against the old
+	// intent are dropped and re-judged, while a dispatched fix still awaiting
+	// verification stays outstanding.
+	ActionCorrectIntent ApprovalAction = "correct-intent"
 )
 
 // AgentName identifies a supported agent backend. Explicit ACP targets use

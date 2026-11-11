@@ -129,6 +129,66 @@ func TestReviewStep_FixPromptClosesTheInvariantAcrossSiblingSites(t *testing.T) 
 	}
 }
 
+// TestReviewStep_FixPromptSearchesSiblingsAndRerunsTouchedTests pins the two
+// finish-the-job rules of the review fixer. Nine of 22 sampled later-round
+// findings were left behind or caused by an earlier fix round, so before
+// handing back the fixer searches the code for further sites of each fault
+// (not only the ones it already knows) and fixes those in the changed area,
+// and its one verification re-runs the tests that exercise what it touched,
+// correcting the fix when one fails. Both sit after the self-trace, so they
+// see the code as edited, and the rereview never receives them.
+func TestReviewStep_FixPromptSearchesSiblingsAndRerunsTouchedTests(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if strings.Contains(opts.Prompt, "Previous review findings to address") {
+				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+			}
+			j, _ := json.Marshal(cleanReviewFindings())
+			return &agent.Result{Output: j}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"findings":[{"id":"review-1","severity":"error","file":"main.go","line":3,"description":"user input reaches the query unescaped","action":"auto-fix"}],"summary":"1 issue"}`
+
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 2 {
+		t.Fatalf("expected fix + rereview calls, got %d", len(ag.calls))
+	}
+	fixPrompt := ag.calls[0].Prompt
+	sibling := "Before handing back, search the code for sibling sites of each finding's fault instead of relying on the sites you already know"
+	touched := "re-run every test that exercises code your fixes touched - the tests of each package or file you edited, and every test file you edited or added. If a re-run fails because of your fix, correct the fix and re-run those tests before handing back."
+	for _, want := range []string{
+		sibling,
+		"Fix every match in the changed area that has the same fault, with the same correction.",
+		"Do not edit a match outside the changed area that was already faulty before this change; name it in your summary instead.",
+		touched,
+	} {
+		if !strings.Contains(fixPrompt, want) {
+			t.Errorf("review fix prompt missing finish-the-job rule %q:\n%s", want, fixPrompt)
+		}
+	}
+	trace := strings.Index(fixPrompt, fixerSelfTraceContract[0])
+	search := strings.Index(fixPrompt, sibling)
+	verify := strings.Index(fixPrompt, touched)
+	if trace < 0 || search < 0 || verify < 0 || !(trace < search && search < verify) {
+		t.Errorf("sibling search must follow the self-trace and precede the touched-test re-run (trace=%d search=%d verify=%d)", trace, search, verify)
+	}
+	rereviewPrompt := ag.calls[1].Prompt
+	for _, fixerOnly := range []string{sibling, touched} {
+		if strings.Contains(rereviewPrompt, fixerOnly) {
+			t.Errorf("rereview prompt must not carry the fixer rule %q", fixerOnly)
+		}
+	}
+}
+
 // TestReviewStep_ReviewPromptReportsTheClassOnce pins the reviewer's
 // class-once rule: a defect finding lists, in that same finding, every other
 // site in the changed code where the same invariant is violated or must hold,

@@ -249,15 +249,27 @@ type RerunParams struct {
 // step. RunID must name the branch's latest run: it confirms the run the
 // caller inspected and never selects any other. CallerHeadSHA is the clean
 // caller worktree's HEAD; empty means the worktree was not clean.
+//
+// Automatic marks a fresh `axi run` asking to continue the branch's latest run
+// instead of starting over: RunID is then empty and the daemon selects the
+// latest run itself, and the request fields below must match what that run was
+// started with. A daemon that predates Automatic refuses it (an empty RunID
+// names no run), and the caller then starts a fresh run.
 type RetryRunParams struct {
 	RepoID        string `json:"repo_id"`
 	Branch        string `json:"branch"`
 	RunID         string `json:"run_id"`
 	CallerHeadSHA string `json:"caller_head_sha,omitempty"`
+
+	Automatic        bool     `json:"automatic,omitempty"`
+	Intent           string   `json:"intent,omitempty"`
+	PRBaseBranch     string   `json:"pr_base_branch,omitempty"`
+	OmitIntent       bool     `json:"omit_intent,omitempty"`
+	ClosingIssueRefs []string `json:"closing_issue_refs,omitempty"`
 }
 
-// RetryRunResult names the run that continues the failed one and the step it
-// restarted, with the round of that step the failed run was in.
+// RetryRunResult names the run that continues the failed one and the failed
+// run's failed step, with the round of that step the failed run was in.
 type RetryRunResult struct {
 	RunID       string         `json:"run_id"`
 	SourceRunID string         `json:"source_run_id"`
@@ -297,6 +309,9 @@ type RespondParams struct {
 	InstructionsFromDriver bool            `json:"instructions_from_driver,omitempty"`
 	AddedFindings          []types.Finding `json:"added_findings,omitempty"`
 	ApprovalReason         string          `json:"approval_reason,omitempty"` // Test approval, or the reason recorded with an abort
+	// CorrectedIntent is the replacement run intent a correct-intent response
+	// carries to a parked Review. Empty for every other action.
+	CorrectedIntent string `json:"corrected_intent,omitempty"`
 }
 
 type CoverageBinding struct {

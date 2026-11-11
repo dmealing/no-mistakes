@@ -103,7 +103,7 @@ func HasUnreadableReviewQuestionHistory(findingsJSON string) bool {
 func approvalRefusal(step types.StepName, action types.ApprovalAction, findingsJSON string) string {
 	if action == types.ActionSkip {
 		if step == types.StepReview && HasIntentConformanceRefusal(findingsJSON) {
-			return "cannot skip review: an intent-conformance finding says the change does not match the run's intent, and skipping review would publish it unresolved; use fix to bring the change into line with the intent, or abort and rerun with a corrected --intent"
+			return "cannot skip review: an intent-conformance finding says the change does not match the run's intent, and skipping review would publish it unresolved; use fix to bring the change into line with the intent, or correct-intent to review it again in this run against a corrected --intent"
 		}
 		return ""
 	}
@@ -118,7 +118,7 @@ func approvalRefusal(step types.StepName, action types.ApprovalAction, findingsJ
 	case HasUnvalidatedWorkRefusal(findingsJSON):
 		return fmt.Sprintf("cannot approve %s: the run worktree holds work no Test turn validated and approval would publish it; inspect it as the findings describe, then use fix to validate it, or abort", step)
 	case step == types.StepReview && HasIntentConformanceRefusal(findingsJSON):
-		return "cannot approve review: an intent-conformance finding says the change does not match the run's intent, and the PR step would refuse it after Test, Document, and Push; use fix to bring the change into line with the intent, or abort and rerun with a corrected --intent"
+		return "cannot approve review: an intent-conformance finding says the change does not match the run's intent, and the PR step would refuse it after Test, Document, and Push; use fix to bring the change into line with the intent, or correct-intent to review it again in this run against a corrected --intent"
 	}
 	return ""
 }

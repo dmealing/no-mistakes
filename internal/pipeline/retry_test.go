@@ -216,17 +216,71 @@ func TestPlanRetryCheckpointRefusesAnUnprovenBoundary(t *testing.T) {
 	}
 }
 
+// TestPlanRetryCheckpointNeverCarriesTestOrALaterStep: Test's evidence and
+// every later step's work are not kept after a run ends, so a run that failed
+// after Test restarts from Test, while the audit still names the failed step.
 func TestPlanRetryCheckpointNeverCarriesTestOrALaterStep(t *testing.T) {
-	core := []types.StepName{types.StepRebase, types.StepReview, types.StepTest, types.StepDocument}
+	core := []types.StepName{types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR}
 	database, _, _, repo := setupTest(t)
 	atTest := failedSourceRun(t, database, repo, core, types.StepTest)
-	if checkpoint, err := PlanRetryCheckpoint(database, atTest, stepsNamed(core...)); err != nil || checkpoint.Failed().StepName != types.StepTest {
-		t.Fatalf("a failure at Test must be retryable: checkpoint=%+v err=%v", checkpoint, err)
+	if checkpoint, err := PlanRetryCheckpoint(database, atTest, stepsNamed(core...)); err != nil || checkpoint.Failed().StepName != types.StepTest || checkpoint.Index != 2 {
+		t.Fatalf("a failure at Test must restart Test: checkpoint=%+v err=%v", checkpoint, err)
 	}
-	afterTest := failedSourceRun(t, database, repo, core, types.StepDocument)
-	_, err := PlanRetryCheckpoint(database, afterTest, stepsNamed(core...))
-	if err == nil || !strings.Contains(err.Error(), "cannot carry test") {
-		t.Fatalf("err = %v, want a refusal to carry Test", err)
+	for _, failed := range []types.StepName{types.StepDocument, types.StepPR} {
+		run := failedSourceRun(t, database, repo, core, failed)
+		checkpoint, err := PlanRetryCheckpoint(database, run, stepsNamed(core...))
+		if err != nil || checkpoint.Failed().StepName != failed || checkpoint.Steps[checkpoint.Index].StepName != types.StepTest {
+			t.Fatalf("a failure at %s: checkpoint=%+v err=%v; want a restart from Test naming %s as failed", failed, checkpoint, err, failed)
+		}
+	}
+}
+
+// TestExecutor_RetryOfALateFailureRestartsFromTestAndReusesTheReview: a run
+// that failed in Document after its Review finished continues by carrying
+// Rebase and Review and running Test and every later step again.
+func TestExecutor_RetryOfALateFailureRestartsFromTestAndReusesTheReview(t *testing.T) {
+	database, p, _, repo := setupTest(t)
+	names := []types.StepName{types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint}
+	source := failedSourceRun(t, database, repo, names, types.StepDocument)
+	if err := database.UpdateRunReviewApprovedHeadSHA(source.ID, "reviewed"); err != nil {
+		t.Fatal(err)
+	}
+	continuation, err := database.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := make([]*mockStep, len(names))
+	pipelineSteps := make([]Step, len(names))
+	for i, name := range names {
+		steps[i] = newPassStep(name)
+		pipelineSteps[i] = steps[i]
+	}
+	exec := NewExecutor(database, p, &config.Config{}, nil, pipelineSteps, nil)
+	exec.SetRetrySource(source.ID)
+	if err := exec.Execute(context.Background(), continuation, repo, t.TempDir()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	for i, want := range []int{0, 0, 1, 1, 1} {
+		if got := steps[i].callCount(); got != want {
+			t.Errorf("%s executed %d times, want %d", names[i], got, want)
+		}
+	}
+	rows, err := database.GetStepsByRun(continuation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		carried := row.CarriedFrom != nil
+		if want := row.StepName.Order() < types.StepTest.Order(); carried != want {
+			t.Errorf("%s carried = %v, want %v", row.StepName, carried, want)
+		}
+	}
+	if rounds, err := database.GetRoundsByStep(rows[2].ID); err != nil || len(rounds) != 1 || rounds[0].Trigger != "retry" {
+		t.Fatalf("test rounds = %+v (err %v), want one retry round", rounds, err)
+	}
+	got, err := database.GetRun(continuation.ID)
+	if err != nil || got.Status != types.RunCompleted || got.ReviewApprovedHeadSHA == nil || *got.ReviewApprovedHeadSHA != "reviewed" {
+		t.Fatalf("continuation = %+v (err %v), want completed with the carried review approval", got, err)
 	}
 }
 
@@ -359,5 +413,60 @@ func TestExecutor_RetryFollowsTheCurrentCIModeNotTheSourcesLocalSkip(t *testing.
 				assertSkippedWithReason(t, database, continuation.ID, types.StepCI, config.LocalCISkipReason)
 			}
 		})
+	}
+}
+
+// TestExecutor_RecordsABaseFetchFailureAsTheStepsCause: a step that failed
+// because fetching the base branch failed after its retries records the
+// base_fetch cause, so a later run may continue from it; a step that failed
+// for any other reason records none.
+func TestExecutor_RecordsABaseFetchFailureAsTheStepsCause(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		cause string
+	}{
+		{name: "base fetch", err: fmt.Errorf("test: %w", &BaseFetchError{Err: errors.New(`fetch default branch "main" to resolve branch base: Permission denied (publickey)`)}), cause: db.StepFailureCauseBaseFetch},
+		{name: "the step's own verdict", err: errors.New("tests failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			step := &adaptiveCallStep{name: types.StepTest, fn: func(*StepContext) (*StepOutcome, error) { return nil, tc.err }}
+			if err := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil).Execute(context.Background(), run, repo, t.TempDir()); err == nil {
+				t.Fatal("execute succeeded, want the step to fail")
+			}
+			steps, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := ""
+			if steps[0].FailureCause != nil {
+				got = *steps[0].FailureCause
+			}
+			if steps[0].Status != types.StepStatusFailed || got != tc.cause {
+				t.Fatalf("step status=%s cause=%q, want failed with cause %q", steps[0].Status, got, tc.cause)
+			}
+		})
+	}
+}
+
+// TestPlanRetryCheckpointAcceptsABaseFetchFailure: a step that failed on the
+// base-branch fetch is a boundary a continuation may restart, like an agent
+// invocation failure, so a Test that could not fetch main does not cost the
+// finished review.
+func TestPlanRetryCheckpointAcceptsABaseFetchFailure(t *testing.T) {
+	core := []types.StepName{types.StepIntent, types.StepRebase, types.StepReview, types.StepTest, types.StepDocument}
+	database, _, _, repo := setupTest(t)
+	run := failedSourceRun(t, database, repo, core, types.StepTest)
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.FailStepWithCause(steps[3].ID, `fetch default branch "main" to resolve branch base: signal: killed`, 10, db.StepFailureCauseBaseFetch); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := PlanRetryCheckpoint(database, run, stepsNamed(core...))
+	if err != nil || checkpoint.Failed().StepName != types.StepTest || checkpoint.Index != 3 {
+		t.Fatalf("checkpoint = %+v, err = %v; want Test at index 3", checkpoint, err)
 	}
 }

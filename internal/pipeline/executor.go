@@ -71,6 +71,9 @@ type approvalResponse struct {
 	addedFindings      []types.Finding
 	approvalReason     string
 	coverageRound      *db.StepRound
+	// correctedIntent is the operator's replacement intent carried by an
+	// ActionCorrectIntent response, validated while the gate was parked.
+	correctedIntent string
 	// approvalOverride is the unresolved condition an accepted approval
 	// records, verified while the gate was still parked.
 	approvalOverride string
@@ -316,6 +319,9 @@ func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, fin
 type ResponseOptions struct {
 	Origin   types.ResponseOrigin
 	Coverage *ipc.CoverageBinding
+	// CorrectedIntent is the replacement intent an ActionCorrectIntent
+	// response carries. Every other action must leave it empty.
+	CorrectedIntent string
 }
 
 // RespondWithOverrides is like Respond but also carries explicit declines,
@@ -357,9 +363,12 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	// refuses the handler's own release, and the gate parks forever with every
 	// question answered.
 	switch action {
-	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort, types.ActionAnswer, types.ActionCompleteCoverage:
+	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort, types.ActionAnswer, types.ActionCompleteCoverage, types.ActionCorrectIntent:
 	default:
-		return RespondDispositions{}, fmt.Errorf("unrecognized approval action %q (valid: approve, fix, skip, abort, answer)", action)
+		return RespondDispositions{}, fmt.Errorf("unrecognized approval action %q (valid: approve, fix, skip, abort, answer, complete-coverage, correct-intent)", action)
+	}
+	if err := validateCorrectedIntentResponse(step, action, option.CorrectedIntent, findingIDs, ignoreFindingIDs, instructions, addedFindings, e.config); err != nil {
+		return RespondDispositions{}, err
 	}
 	e.mu.Lock()
 	if !e.waiting {
@@ -399,6 +408,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		addedFindings:      addedFindings,
 		approvalReason:     approvalReason,
 		coverageRound:      coverageRound,
+		correctedIntent:    option.CorrectedIntent,
 	}
 	if action == types.ActionApprove && e.waitingApprovalVerify != nil {
 		unresolved, err := e.waitingApprovalVerify()
@@ -665,8 +675,8 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 }
 
 // planRetry proves the retry source's checkpoint against this run's steps and
-// adopts what the source carries forward: its per-run skips of steps that never
-// ran, and the review approval of a carried Review step, which still names the
+// adopts what the source carries forward: its per-run skips of the steps the
+// continuation runs again, and the review approval of a carried Review step, which still names the
 // head that step approved.
 func (e *Executor) planRetry(run *db.Run) (*RetryCheckpoint, error) {
 	source, err := e.db.GetRun(e.retrySource)
@@ -680,7 +690,7 @@ func (e *Executor) planRetry(run *db.Run) (*RetryCheckpoint, error) {
 	if err != nil {
 		return nil, fmt.Errorf("retry run %s: %w", e.retrySource, err)
 	}
-	for _, row := range checkpoint.Steps[checkpoint.Index+1:] {
+	for _, row := range checkpoint.Steps[checkpoint.Index:] {
 		if row.Status != types.StepStatusSkipped {
 			continue
 		}
@@ -750,8 +760,11 @@ type stepExecutionState struct {
 	// gate parked as fix_review and the answer round has to keep that context or
 	// the two answer paths disagree about the step's durable status. That is
 	// what skipFixExecution above is for.
-	answering              bool
-	completingCoverage     bool
+	answering          bool
+	completingCoverage bool
+	// correctingIntent re-enters a parked review after the operator corrected
+	// the run's intent; the round is labelled "intent", never a fix round.
+	correctingIntent       bool
 	coverageRound          *db.StepRound
 	previousFindings       string
 	deferredFindings       string
@@ -1007,14 +1020,31 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	// same way; only the bookkeeping before it and the state handed in differ.
 	// An answer is not a verdict, so it records no selection on the round -
 	// leaving one would read as the human declining the round's findings.
-	case types.ActionFix, types.ActionAnswer, types.ActionCompleteCoverage:
+	case types.ActionFix, types.ActionAnswer, types.ActionCompleteCoverage, types.ActionCorrectIntent:
 		state := stepExecutionState{
 			roundNum:        gate.round,
 			autoFixAttempts: gate.autoFixes,
 			executionMS:     duration,
 			currentRoundID:  gate.lastRoundID,
 		}
-		if response.action == types.ActionCompleteCoverage {
+		if response.action == types.ActionCorrectIntent {
+			if gate.step.Name() != types.StepReview {
+				return e.failRun(run, repo, fmt.Errorf("step %s: %q is only a review response", gate.step.Name(), types.ActionCorrectIntent), ctx)
+			}
+			if err := e.applyCorrectedIntent(run, response.correctedIntent); err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
+			// Same starting set as the live path: the selected findings a fix
+			// round dispatched stay until verified; everything judged against
+			// the old intent is reviewed again.
+			state.correctingIntent = true
+			state.outstandingFindings = dropFindingsSupersededByIntent(gate.findings, gate.selectedOutstandingIDs)
+			state.selectedOutstandingIDs = retainFindingIDs(state.outstandingFindings, gate.selectedOutstandingIDs)
+			if dbErr := e.db.UpdateStepStatus(gate.stepResult.ID, types.StepStatusRunning); dbErr != nil {
+				return e.failRun(run, repo, fmt.Errorf("return recovered step %s to running: %w", gate.step.Name(), dbErr), ctx)
+			}
+			e.emitStepEvent(ipc.EventStepStarted, run, repo, gate.step.Name(), string(types.StepStatusRunning))
+		} else if response.action == types.ActionCompleteCoverage {
 			state.completingCoverage = true
 			state.coverageRound = response.coverageRound
 			state.outstandingFindings = gate.findings
@@ -1625,11 +1655,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// round - which IsFixRound then reads as one.
 	case state.answering:
 		nextTrigger = "answer"
+	case state.correctingIntent:
+		nextTrigger = "intent"
 	case sctx.Fixing:
 		nextTrigger = "auto_fix"
 	case state.retrying:
 		nextTrigger = "retry"
-		writeLog(fmt.Sprintf("restarting %s from the beginning: run %s failed in this step on an agent invocation error", stepName, e.retrySource))
+		writeLog(fmt.Sprintf("restarting %s from the beginning: run %s failed in this or a later step on an agent invocation error or a base-branch fetch", stepName, e.retrySource))
 	}
 	skipRemaining := false
 	stepSkipped := false
@@ -1687,8 +1719,12 @@ rounds:
 			fmt.Fprintf(logFile, "\nerror: %s\n", redactedErr)
 			touchLogActivity("error: "+redactedErr, true)
 			cause := ""
-			if errors.Is(err, ErrAgentInvocationFailed) {
+			var baseFetch *BaseFetchError
+			switch {
+			case errors.Is(err, ErrAgentInvocationFailed):
 				cause = db.StepFailureCauseAgentInvocation
+			case errors.As(err, &baseFetch):
+				cause = db.StepFailureCauseBaseFetch
 			}
 			if dbErr := e.db.FailStepWithCause(sr.ID, redactedErr, durationMS, cause); dbErr != nil {
 				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
@@ -2077,6 +2113,43 @@ rounds:
 				sctx.SkipFixExecution = true
 				nextTrigger = "answer"
 				slog.Info("review answers received, re-executing", "step", stepName)
+				continue rounds
+
+			case types.ActionCorrectIntent:
+				// The operator replaced the run's intent. The review runs again
+				// against it in this run, rather than the run being cancelled
+				// and started over. RespondWithOverrides already refuses this
+				// at any other step; failing closed here keeps a producer that
+				// bypassed it from re-running a non-review step as a review.
+				if stepName != types.StepReview {
+					return false, "", fmt.Errorf("step %s: %q is only a review response", stepName, types.ActionCorrectIntent)
+				}
+				phaseStart = time.Now()
+				if err := e.applyCorrectedIntent(run, response.correctedIntent); err != nil {
+					return false, "", err
+				}
+				writeLog(fmt.Sprintf("intent corrected by the operator; reviewing again against the corrected intent after round %d", roundNum))
+				if err := markRunning(); err != nil {
+					return false, "", err
+				}
+				sctx.UserIntent = response.correctedIntent
+				sctx.IntentSource = db.RunIntentSourceAgent
+				sctx.Fixing = false
+				sctx.AutoFixRound = false
+				sctx.FinalizingAnswers = false
+				sctx.SkipFixExecution = false
+				sctx.CoverageContinuation = nil
+				sctx.PreviousFindings = ""
+				sctx.DeferredFindings = ""
+				sctx.CarriedFindings = ""
+				if carryFindings {
+					outstandingFindings = dropFindingsSupersededByIntent(outstandingFindings, pendingVerificationIDs)
+					pendingVerificationIDs = retainFindingIDs(outstandingFindings, pendingVerificationIDs)
+					selectedOutstandingIDs = retainFindingIDs(outstandingFindings, selectedOutstandingIDs)
+				}
+				BindUncertifiedPipelineRange(sctx)
+				nextTrigger = "intent"
+				slog.Info("review intent corrected, re-executing", "step", stepName)
 				continue rounds
 
 			default:

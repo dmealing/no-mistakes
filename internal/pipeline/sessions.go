@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -30,6 +31,14 @@ const (
 	SessionRoleFixer    SessionRole = "review-fixer"
 )
 
+// SessionColdAfter is how long a durable session may sit idle before its
+// provider's prompt cache is treated as expired. Resuming a session after that
+// re-sends its whole history as uncached input: a measured Sonnet fixer that
+// resumed a cold session cost 4.5 quota units against 2.6 for a fresh one, so a
+// fresh session handed a short summary of the earlier rounds is cheaper and
+// loses nothing the round history does not already carry.
+const SessionColdAfter = 5 * time.Minute
+
 // RunSessions manages the per-run, per-role durable agent sessions of the
 // review loop. It is strictly scoped to one run: identities are keyed by
 // (run, role), persisted as minimum resume metadata (run, role, agent,
@@ -49,6 +58,11 @@ type RunSessions struct {
 
 	mu  sync.Mutex
 	ids map[SessionRole]agent.SessionRef
+	// lastUsed is when each role's session last finished a turn, which is
+	// when the provider last wrote its prompt cache. Persisted as the row's
+	// updated_at so a daemon restart still knows how cold a session is.
+	lastUsed map[SessionRole]time.Time
+	now      func() time.Time
 }
 
 // NewRunSessions creates the manager for one run, loading any persisted
@@ -57,22 +71,70 @@ type RunSessions struct {
 // is only meaningful to the adapter that minted it.
 func NewRunSessions(database *db.DB, runID string, sessionAgent agent.Agent, enabled bool) *RunSessions {
 	rs := &RunSessions{
-		db:      database,
-		runID:   runID,
-		agent:   sessionAgent,
-		enabled: enabled,
-		ids:     map[SessionRole]agent.SessionRef{},
+		db:       database,
+		runID:    runID,
+		agent:    sessionAgent,
+		enabled:  enabled,
+		ids:      map[SessionRole]agent.SessionRef{},
+		lastUsed: map[SessionRole]time.Time{},
+		now:      time.Now,
 	}
 	if database != nil {
 		if stored, err := database.GetRunAgentSessions(runID); err == nil {
 			for _, s := range stored {
 				if s.SessionID != "" && agent.SupportsSessionProvider(sessionAgent, s.Agent) {
 					rs.ids[SessionRole(s.Role)] = agent.SessionRef{ID: s.SessionID, Agent: s.Agent}
+					rs.lastUsed[SessionRole(s.Role)] = time.Unix(s.UpdatedAt, 0)
 				}
 			}
 		}
 	}
 	return rs
+}
+
+// SetClock replaces the clock the cold-session check reads. Tests use it to
+// age a session without sleeping.
+func (rs *RunSessions) SetClock(now func() time.Time) {
+	if rs == nil || now == nil {
+		return
+	}
+	rs.mu.Lock()
+	rs.now = now
+	rs.mu.Unlock()
+}
+
+// DropColdSession forgets role's stored session when it has sat idle longer
+// than SessionColdAfter, so the next turn starts a fresh session instead of
+// resuming one whose prompt cache has expired. It reports how long the session
+// sat idle and whether it was dropped. A session whose last use is unknown is
+// treated as cold. A nil or disabled manager has nothing to drop.
+func (rs *RunSessions) DropColdSession(role SessionRole) (time.Duration, bool) {
+	if rs == nil || !rs.enabled {
+		return 0, false
+	}
+	rs.mu.Lock()
+	_, stored := rs.ids[role]
+	last := rs.lastUsed[role]
+	idle := rs.now().Sub(last)
+	rs.mu.Unlock()
+	if !stored || (!last.IsZero() && idle <= SessionColdAfter) {
+		return 0, false
+	}
+	if last.IsZero() {
+		idle = 0
+	}
+	rs.forget(role)
+	return idle, true
+}
+
+// StartsFresh reports whether role's next turn on a will begin a new session
+// rather than resume one: there is no manager, reuse is off, the adapter
+// cannot resume, or no identity is stored for the role.
+func (rs *RunSessions) StartsFresh(a agent.Agent, role SessionRole) bool {
+	if rs == nil || !rs.enabled || !agent.SupportsSessionResume(a) {
+		return true
+	}
+	return rs.id(role).ID == ""
 }
 
 // Run executes one turn of the given role, reusing the role's durable
@@ -140,10 +202,13 @@ func (rs *RunSessions) remember(role SessionRole, sessionID, provider string) {
 	}
 	identity := agent.SessionRef{ID: sessionID, Agent: provider}
 	rs.mu.Lock()
-	changed := rs.ids[role] != identity
 	rs.ids[role] = identity
+	rs.lastUsed[role] = rs.now()
 	rs.mu.Unlock()
-	if changed && rs.db != nil {
+	// Upsert even when the identity is unchanged: the write refreshes the
+	// row's updated_at, which is how a restarted daemon judges the session's
+	// cache age.
+	if rs.db != nil {
 		_ = rs.db.UpsertRunAgentSession(rs.runID, string(role), provider, sessionID)
 	}
 }
@@ -176,6 +241,7 @@ func (rs *RunSessions) Forget(role SessionRole) {
 func (rs *RunSessions) forget(role SessionRole) {
 	rs.mu.Lock()
 	delete(rs.ids, role)
+	delete(rs.lastUsed, role)
 	rs.mu.Unlock()
 	if rs.db != nil {
 		_ = rs.db.DeleteRunAgentSession(rs.runID, string(role))

@@ -82,14 +82,16 @@ func refuseRetry(runID, proof, format string, args ...any) error {
 // HandleRetry continues runID, the branch's latest run, in a new run that
 // starts at the failed run's preserved head: the steps before its failed step
 // are carried, the failed step restarts from the beginning, and every later
-// step runs normally. It refuses, changing nothing, unless every proof holds:
-// the run is this branch's latest and failed while nothing is active; its
-// record names exactly one failed step, failed on an agent invocation error,
-// with nothing from Test on carried and nothing published; its preserved head
-// is anchored; the caller is clean at exactly that head; the model profile and
-// the repository's gates are unchanged; and the repository configuration, the
-// recorded global configuration, and the agent and model that served each
-// carried step are the ones a new run would use.
+// step runs normally. A run that failed after Test restarts from Test instead,
+// because nothing from Test on is ever carried. It refuses, changing nothing,
+// unless every proof holds: the run is this branch's latest and failed while
+// nothing is active; its record names exactly one failed step, failed on an
+// agent invocation error or a base-branch fetch; it published no head other
+// than its preserved head; that head is anchored; the caller is clean at
+// exactly that head; the model profile and the repository's gates are
+// unchanged; and the repository configuration, the recorded global
+// configuration, and the agent and model that served each carried step are
+// the ones a new run would use.
 func (m *RunManager) HandleRetry(ctx context.Context, repoID, branch, runID, callerHeadSHA string) (*db.RunRetry, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
@@ -98,11 +100,110 @@ func (m *RunManager) HandleRetry(ctx context.Context, repoID, branch, runID, cal
 	if repo == nil {
 		return nil, fmt.Errorf("unknown repo %s", repoID)
 	}
+	return m.handleRetry(ctx, repo, branch, runID, callerHeadSHA, nil)
+}
+
+// AutomaticRetryRequest is what a fresh `axi run` asked for. The automatic
+// continuation is only a cheaper way to give that request the run it would
+// have got, so every field must match the failed run it continues.
+type AutomaticRetryRequest struct {
+	Intent           string
+	PRBaseBranch     string
+	OmitIntent       bool
+	ClosingIssueRefs []string
+}
+
+// HandleAutomaticRetry continues the branch's latest run on behalf of a fresh
+// `axi run` request, so a run that failed after its review finished does not
+// pay for that review again. On top of every HandleRetry proof it requires the
+// request to ask for exactly what the failed run was started with (intent, PR
+// base branch, intent publication, closing references, no model profile) and
+// every carried step, a Review among them, to have completed. A refusal
+// changes nothing; the caller then starts a fresh run as before.
+func (m *RunManager) HandleAutomaticRetry(ctx context.Context, repoID, branch, callerHeadSHA string, req AutomaticRetryRequest) (*db.RunRetry, error) {
+	repo, err := m.db.GetRepo(repoID)
+	if err != nil {
+		return nil, fmt.Errorf("get repo: %w", err)
+	}
+	if repo == nil {
+		return nil, fmt.Errorf("unknown repo %s", repoID)
+	}
+	runs, err := m.db.GetRunsByRepo(repo.ID)
+	if err != nil {
+		return nil, fmt.Errorf("get runs: %w", err)
+	}
+	latest := ""
+	for _, run := range runs {
+		if run.Branch == branch {
+			latest = run.ID
+			break
+		}
+	}
+	if latest == "" {
+		return nil, refuseRetry("", "latest run", "branch %s has no run to continue", branch)
+	}
+	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		return nil, fmt.Errorf("load global config: %w", err)
+	}
+	req.OmitIntent = req.OmitIntent || !globalCfg.Intent.PublishesIntentByDefault()
+	return m.handleRetry(ctx, repo, branch, latest, callerHeadSHA, func(launch *retryLaunch) error {
+		return proveAutomaticRetryRequest(launch, req)
+	})
+}
+
+func proveAutomaticRetryRequest(launch *retryLaunch, req AutomaticRetryRequest) error {
+	source := launch.source
+	runID := source.ID
+	sourceIntent := ""
+	if source.Intent != nil {
+		sourceIntent = *source.Intent
+	}
+	if strings.TrimSpace(sourceIntent) != strings.TrimSpace(req.Intent) {
+		return refuseRetry(runID, "same request", "the intent differs from the failed run's")
+	}
+	sourceBase := ""
+	if source.PRBaseBranch != nil {
+		sourceBase = *source.PRBaseBranch
+	}
+	if strings.TrimSpace(sourceBase) != strings.TrimSpace(req.PRBaseBranch) {
+		return refuseRetry(runID, "same request", "the PR base branch differs from the failed run's")
+	}
+	if source.OmitIntent != req.OmitIntent {
+		return refuseRetry(runID, "same request", "intent publication differs from the failed run's")
+	}
+	if !slices.Equal(source.ClosingIssueRefs, req.ClosingIssueRefs) {
+		return refuseRetry(runID, "same request", "the closing references differ from the failed run's")
+	}
+	if source.PiProfile != nil {
+		return refuseRetry(runID, "same request", "the failed run pinned a model profile")
+	}
+	reviewed := false
+	for _, row := range launch.checkpoint.Steps[:launch.checkpoint.Index] {
+		if row.Status != types.StepStatusCompleted {
+			return refuseRetry(runID, "finished review", "carried step %s is %s, so the continuation would not run what the request asks for", row.StepName, row.Status)
+		}
+		if row.StepName == types.StepReview {
+			reviewed = true
+		}
+	}
+	if !reviewed {
+		return refuseRetry(runID, "finished review", "the run failed before its review finished, so there is no review to reuse")
+	}
+	return nil
+}
+
+func (m *RunManager) handleRetry(ctx context.Context, repo *db.Repo, branch, runID, callerHeadSHA string, prove func(*retryLaunch) error) (*db.RunRetry, error) {
 	var link db.RunRetry
-	_, err = m.withBranchLock(repo.ID, branch, func() (string, error) {
+	_, err := m.withBranchLock(repo.ID, branch, func() (string, error) {
 		launch, err := m.proveRetry(ctx, repo, branch, runID, callerHeadSHA)
 		if err != nil {
 			return "", err
+		}
+		if prove != nil {
+			if err := prove(launch); err != nil {
+				return "", err
+			}
 		}
 		source := launch.source
 		if source.Intent != nil && launch.intentCheck.Mode == config.IntentCheckReject {
@@ -163,8 +264,8 @@ func (m *RunManager) proveRetry(ctx context.Context, repo *db.Repo, branch, runI
 	if source.Status != types.RunFailed {
 		return nil, refuseRetry(runID, "failed run", "the run is %s, and only a failed run can continue", source.Status)
 	}
-	if source.LastPushedSHA != nil || source.PushGeneration != nil {
-		return nil, refuseRetry(runID, "unpublished run", "the run already pushed, so its head is no longer only in the local gate")
+	if (source.LastPushedSHA != nil || source.PushGeneration != nil) && (source.LastPushedSHA == nil || *source.LastPushedSHA != source.HeadSHA) {
+		return nil, refuseRetry(runID, "unpublished run", "the run already pushed a head other than its preserved head %s", source.HeadSHA)
 	}
 	if source.VerificationPlan != nil {
 		return nil, refuseRetry(runID, "compatible configuration", "the run carries a verification plan, which belongs to that run alone")

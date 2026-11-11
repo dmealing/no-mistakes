@@ -47,7 +47,8 @@ type StepResult struct {
 	// the step. Fix selections store their origin on the answered round.
 	ResponseOrigin types.ResponseOrigin
 	// FailureCause is set on a failed step only when the executor recorded why
-	// (StepFailureCauseAgentInvocation); nil means no recorded cause.
+	// (StepFailureCauseAgentInvocation, StepFailureCauseBaseFetch); nil means
+	// no recorded cause.
 	FailureCause *string
 	// CarriedFrom names the source run's step row that a retried run carried
 	// instead of executing.
@@ -58,6 +59,11 @@ type StepResult struct {
 // agent invocation itself returned an error - a provider, transport, or
 // agent-process failure - rather than because of what the step judged.
 const StepFailureCauseAgentInvocation = "agent_invocation"
+
+// StepFailureCauseBaseFetch records a step that failed because fetching the
+// run's base branch failed after its retries, before the step judged the
+// change.
+const StepFailureCauseBaseFetch = "base_fetch"
 
 const stepResultColumns = `id, run_id, step_name, step_order, status, exit_code, duration_ms, log_path, findings_json, error, started_at, completed_at`
 
