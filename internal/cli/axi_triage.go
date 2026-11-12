@@ -65,7 +65,8 @@ func newAxiTriageCmd() *cobra.Command {
 			"or testdata/ directories), generated code, lockfiles and spec or registry\n" +
 			"JSON (*.json under spec/, specs/, registry/, schema/, schemas/) never count;\n" +
 			"excluded_lines reports them. Generated code is found by a generator header\n" +
-			"on a comment line in the first 20 lines (\"// Code generated ... DO NOT EDIT.\"\n" +
+			"on a comment line in the first 20 lines and 64 KiB\n" +
+			"(\"// Code generated ... DO NOT EDIT.\"\n" +
 			"in Go; a comment token, then \"Code generated ... DO NOT EDIT\" or\n" +
 			"\"@generated\" elsewhere), a linguist-generated entry in the root\n" +
 			".gitattributes, or a glob in the\n" +

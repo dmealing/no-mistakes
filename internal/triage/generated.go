@@ -49,8 +49,12 @@ var specJSONDirs = map[string]bool{"spec": true, "specs": true, "registry": true
 // glob per line.
 const GeneratedOverrideFile = ".nm-triage-generated"
 
-// headerScanLines is how far into a file a generator marker may sit.
-const headerScanLines = 20
+// headerScanLines and headerScanBytes are how far into a file a generator
+// marker may sit.
+const (
+	headerScanLines = 20
+	headerScanBytes = 64 << 10
+)
 
 var (
 	objectID          = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
@@ -218,7 +222,7 @@ func (g *generatedDetector) markedFiles(paths []string) ([]string, error) {
 }
 
 // readHeader reads one cat-file --batch answer and returns the first
-// headerScanLines lines of the blob, or "" when the object is missing or not
+// headerScanLines lines, at most headerScanBytes, of the blob, or "" when the object is missing or not
 // a blob.
 func readHeader(r *bufio.Reader) (string, error) {
 	line, err := r.ReadString('\n')
@@ -234,7 +238,7 @@ func readHeader(r *bufio.Reader) (string, error) {
 		return "", fmt.Errorf("unexpected cat-file header %q", strings.TrimSpace(line))
 	}
 	blob := io.LimitReader(r, size)
-	lines := bufio.NewReader(blob)
+	lines := bufio.NewReader(io.LimitReader(blob, headerScanBytes))
 	var header strings.Builder
 	for n := 0; n < headerScanLines; n++ {
 		l, err := lines.ReadString('\n')
