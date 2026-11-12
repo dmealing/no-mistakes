@@ -45,18 +45,28 @@ func newAxiTriageCmd() *cobra.Command {
 			"  small-change-with-sibling the change has 300 production lines or fewer\n" +
 			"                            while a sibling branch is in validation: ride\n" +
 			"                            with a sibling lane instead\n" +
-			"  bundle-over-limit         a bundle of fixes (3+ commits whose subject\n" +
+			"  bundle-over-limit         a pool of separate fixes (3+ commits whose subject\n" +
 			"                            starts with fix) over 1,000 production lines;\n" +
-			"                            a large single feature is not stopped\n" +
+			"                            a coherent change is never stopped for its size\n" +
 			"`axi run --triage-override REASON` starts the run anyway over every stop\n" +
 			"except the hold, and records the reason in <NM_HOME>/" + triage.OverrideLogName + ".\n\n" +
 			"review: says which first review the change gets: cheap (300 production\n" +
 			"lines or fewer, no risk path, or a DOCS/TEST tier) or strong (CODE over\n" +
 			"300, or any risk path), and\n" +
 			"the room left: 300 for a cheap bundle, 600 for a strong one, never over\n" +
-			"1,000. notes: (advice, never a stop) flags a small change whose minor part\n" +
-			"is on a risk path (risk-path-in-small-change) and a bundle of 2+ fixes at\n" +
-			"301-450 production lines (just-over-cheap-limit).\n\n" +
+			"1,000. notes: (advice, never a stop) flags a pool of 2+ separate fixes whose\n" +
+			"minor part is on a risk path (risk-path-in-small-change) and a pool of 2+\n" +
+			"fixes at 301-450 production lines (just-over-cheap-limit). Sizes only decide\n" +
+			"which small fixes pool together: one coherent change ships whole, never\n" +
+			"split or trimmed to fit.\n\n" +
+			"Production lines are hand-written source. Docs, tests, fixtures (fixtures/\n" +
+			"or testdata/ directories), generated code, lockfiles and spec or registry\n" +
+			"JSON (*.json under spec/, specs/, registry/, schema/, schemas/) never count;\n" +
+			"excluded_lines reports them. Generated code is found by a generator header\n" +
+			"(\"Code generated ... DO NOT EDIT.\" or \"@generated\" in the first 20 lines),\n" +
+			"a linguist-generated entry in the root .gitattributes, or a glob in the\n" +
+			"repository's .nm-triage-generated (one per line). A risk path still makes the\n" +
+			"review strong even when its lines are excluded.\n\n" +
 			"As advice only, it also test-merges the branch against its base and\n" +
 			"against every other open GitHub pull request (skipped by --offline).\n\n" +
 			"Tiers (the strictest changed file wins):\n" +
@@ -318,6 +328,7 @@ func runAxiTriage(cmd *cobra.Command, opts triageOptions, skipOnly bool) error {
 		{Key: "files", Value: len(change.Files)},
 		{Key: "production_files", Value: change.ProductionFiles},
 		{Key: "production_lines", Value: change.ProductionLines},
+		{Key: "excluded_lines", Value: change.ExcludedLines},
 	}
 	if scriptTier != "" {
 		summary = append(summary, toon.Field{Key: "repo_script_tier", Value: string(scriptTier)})

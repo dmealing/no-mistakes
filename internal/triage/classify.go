@@ -47,6 +47,11 @@ func (t Tier) rank() int {
 	}
 }
 
+// A change's "production lines" are the lines of hand-written source: docs,
+// tests and fixtures, generated code, lockfiles and spec or registry JSON
+// never count (see generated.go). The size only decides which small fixes
+// pool together; a coherent change ships whole whatever it weighs.
+
 // SmallChangeLines is the production-line size at or under which a change
 // counts as small: it gets no pre-run review, and it should ride with a
 // sibling lane rather than take a validation run of its own.
@@ -74,6 +79,8 @@ var testPatterns = []string{
 	"*_test.go", "*_test.py", "test_*.py", "*/test_*.py",
 	"*.test.[jt]s", "*.test.[jt]sx", "*.spec.[jt]s", "*.spec.[jt]sx",
 	"*Test.java", "*Tests.java", "*IT.java", "*Test.kt", "*Tests.kt", "*_spec.rb",
+	// Fixtures are test data: they are never counted, never risk paths.
+	"fixtures/*", "*/fixtures/*", "testdata/*", "*/testdata/*",
 }
 
 // DefaultRiskPatterns are production paths where a small diff can still do
@@ -90,7 +97,7 @@ var DefaultRiskPatterns = []string{
 // IsDocs reports whether path is prose or agent configuration.
 func IsDocs(path string) bool { return matchAny(docsPatterns, path) }
 
-// IsTest reports whether path is test source.
+// IsTest reports whether path is test source or a test fixture.
 func IsTest(path string) bool { return matchAny(testPatterns, path) }
 
 // IsProduction reports whether path is neither docs nor test.
@@ -160,7 +167,13 @@ type Change struct {
 	ProductionFiles int
 	ProductionLines int
 	RiskPaths       []string
-	// RiskLines is the share of ProductionLines on RiskPaths.
+	// ExcludedFiles and ExcludedLines are the generated, lockfile and spec
+	// or registry JSON files kept out of ProductionFiles and ProductionLines.
+	ExcludedFiles int
+	ExcludedLines int
+	// RiskLines is the share of ProductionLines on RiskPaths. A risk path
+	// whose lines are excluded still lands in RiskPaths (it keeps the strong
+	// review) but adds nothing here.
 	RiskLines int
 	// FixCommits counts the non-merge commits of base..head whose subject
 	// starts with "fix" (any case): a bundle of fixes, not one feature.
@@ -207,6 +220,10 @@ func RiskPatterns(repoRoot string) ([]string, error) {
 // DiffChange classifies base..head in the repository at dir.
 func DiffChange(ctx context.Context, dir, base, head string, risk []string) (Change, error) {
 	c := Change{Base: base}
+	gen, err := newGeneratedDetector(ctx, dir, base, head)
+	if err != nil {
+		return c, fmt.Errorf("read %s: %w", GeneratedOverrideFile, err)
+	}
 	out, _, err := gitOutput(ctx, dir, nil, "-c", "core.quotePath=false", "diff", "--no-renames", "--no-ext-diff", "--numstat", "-z", base+".."+head)
 	if err != nil {
 		return c, err
@@ -224,14 +241,20 @@ func DiffChange(ctx context.Context, dir, base, head string, risk []string) (Cha
 		if !IsProduction(path) {
 			continue
 		}
-		c.ProductionFiles++
 		n := 0
 		if parts[0] != "-" {
 			added, _ := strconv.Atoi(parts[0])
 			deleted, _ := strconv.Atoi(parts[1])
 			n = added + deleted
 		}
-		c.ProductionLines += n
+		if gen.Excluded(path) {
+			c.ExcludedFiles++
+			c.ExcludedLines += n
+			n = 0
+		} else {
+			c.ProductionFiles++
+			c.ProductionLines += n
+		}
 		if matchAny(risk, path) {
 			c.RiskPaths = append(c.RiskPaths, path)
 			c.RiskLines += n

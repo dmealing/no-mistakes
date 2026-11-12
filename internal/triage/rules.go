@@ -29,8 +29,9 @@ const (
 	// RuleSmallWithSibling: a small change while a sibling branch of the
 	// project is in validation - it should ride with a sibling lane.
 	RuleSmallWithSibling Rule = "small-change-with-sibling"
-	// RuleBundleOverLimit: a bundle of fixes over MaxBundleLines production
-	// lines. A large single feature (fewer fix commits) is not stopped.
+	// RuleBundleOverLimit: a pool of separate fixes over MaxBundleLines
+	// production lines. A large coherent change (fewer fix commits) is never
+	// stopped for its size.
 	RuleBundleOverLimit Rule = "bundle-over-limit"
 )
 
@@ -181,7 +182,7 @@ func Evaluate(res Result) []Stop {
 		stops = append(stops, Stop{Rule: RuleSmallWithSibling, Detail: fmt.Sprintf("small change (%d production lines, %d or fewer) while %s of this project is in validation: ride with a sibling lane instead of a run of its own", res.Change.ProductionLines, SmallChangeLines, laneNames(res.Lanes))})
 	}
 	if c := res.Change; c != nil && c.ProductionLines > MaxBundleLines && c.FixCommits >= fixCommitsForStop {
-		stops = append(stops, Stop{Rule: RuleBundleOverLimit, Detail: fmt.Sprintf("fix bundle of %s production lines: bundles over %s cost 1.7 times a single change that size and 22%% needed a third run; split by module", groupDigits(c.ProductionLines), groupDigits(MaxBundleLines))})
+		stops = append(stops, Stop{Rule: RuleBundleOverLimit, Detail: fmt.Sprintf("pool of %d separate fixes, %s production lines: pools over %s cost 1.7 times a single change that size and 22%% needed a third run; move a fix to another bundle", c.FixCommits, groupDigits(c.ProductionLines), groupDigits(MaxBundleLines))})
 	}
 	return stops
 }
@@ -194,11 +195,11 @@ func Notes(res Result) []Note {
 		return nil
 	}
 	var notes []Note
-	if c.ProductionLines <= SmallChangeLines && len(c.RiskPaths) > 0 && 2*c.RiskLines < c.ProductionLines {
-		notes = append(notes, Note{Rule: NoteRiskPathInSmallChange, Detail: fmt.Sprintf("%d lines on a risk path move all %d lines to the strong review: ship the risk-path part with other strong-review work, or alone.", c.RiskLines, c.ProductionLines)})
+	if c.ProductionLines <= SmallChangeLines && len(c.RiskPaths) > 0 && 2*c.RiskLines < c.ProductionLines && c.FixCommits >= fixCommitsForNote {
+		notes = append(notes, Note{Rule: NoteRiskPathInSmallChange, Detail: fmt.Sprintf("%d lines on a risk path move all %d lines of this pool of %d separate fixes to the strong review: pool the risk-path fix with other strong-review work.", c.RiskLines, c.ProductionLines, c.FixCommits)})
 	}
 	if len(c.RiskPaths) == 0 && c.ProductionLines > SmallChangeLines && c.ProductionLines <= justOverCheapLines && c.FixCommits >= fixCommitsForNote {
-		notes = append(notes, Note{Rule: NoteJustOverCheapLimit, Detail: fmt.Sprintf("%d lines over the cheap-review limit: split into two bundles under %d, or move one fix out.", c.ProductionLines-SmallChangeLines, SmallChangeLines)})
+		notes = append(notes, Note{Rule: NoteJustOverCheapLimit, Detail: fmt.Sprintf("this pool of %d separate fixes is %d lines over the cheap-review limit: move a fix to another bundle to get under %d.", c.FixCommits, c.ProductionLines-SmallChangeLines, SmallChangeLines)})
 	}
 	return notes
 }
