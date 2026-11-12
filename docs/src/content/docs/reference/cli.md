@@ -325,7 +325,8 @@ The output is TOON: the tier, the review class, and the production-line count, t
 
 The `review` line says which first review the change gets, and how much room is left before the next bundle limit (production lines only; tests and docs do not count):
 
-- `cheap - 212 of 300 production lines, no risk path; room for 88 more`: 300 production lines or fewer and no risk path, or a `DOCS`/`TEST` tier.
+- `cheap - 212 of 300 production lines, no risk path; room for 88 more`: 300 production lines or fewer and no risk path.
+- `cheap - TEST tier; 450 production lines`: a `DOCS` or `TEST` tier is always cheap, whatever its line count (a repository script can set the tier).
 - `strong - 412 production lines; room to 600`: a `CODE` change over 300 production lines; a strong-review bundle should stay at or under 600.
 - `strong - risk path <first path> (1 of 3); 140 production lines; room to 600`: any risk path makes the whole change strong-review.
 - `strong - 700 production lines; past 600, room to 1,000`, and `strong - 1,240 production lines; over the 1,000-line bundle limit`.

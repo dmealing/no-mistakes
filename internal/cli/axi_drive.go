@@ -424,8 +424,9 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		}
 		// The pre-run check applies to every new run, including a
 		// continuation of a failed one: a hold, a conflict with a branch in
-		// validation, a third branch of the project, or a small change with a
-		// sibling lane stops it unless --triage-override states why not.
+		// validation, a third branch of the project, a small change with a
+		// sibling lane, or a bundle of fixes over the bundle limit stops it
+		// unless --triage-override states why not.
 		newRunCheck, err = checkTriageBeforeNewRun(cmd, env, branch, headSHA, baseBranch)
 		if err != nil {
 			return err

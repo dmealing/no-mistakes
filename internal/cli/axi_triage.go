@@ -51,7 +51,8 @@ func newAxiTriageCmd() *cobra.Command {
 			"`axi run --triage-override REASON` starts the run anyway over every stop\n" +
 			"except the hold, and records the reason in <NM_HOME>/" + triage.OverrideLogName + ".\n\n" +
 			"review: says which first review the change gets: cheap (300 production\n" +
-			"lines or fewer, no risk path) or strong (over 300, or any risk path), and\n" +
+			"lines or fewer, no risk path, or a DOCS/TEST tier) or strong (CODE over\n" +
+			"300, or any risk path), and\n" +
 			"the room left: 300 for a cheap bundle, 600 for a strong one, never over\n" +
 			"1,000. notes: (advice, never a stop) flags a small change whose minor part\n" +
 			"is on a risk path (risk-path-in-small-change) and a bundle of 2+ fixes at\n" +
