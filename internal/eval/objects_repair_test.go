@@ -226,6 +226,69 @@ func TestCaptureRecoversFromEmptyLooseObject(t *testing.T) {
 	assertPoolRepacks(t, ctx, pool)
 }
 
+// TestCaptureDropsCaseWithEmptyLooseTreeBelowItsPin covers the same crash
+// leaving a zero-byte loose object inside a case's history rather than at a
+// pin: the pinned commit is intact, so checking the pins alone keeps the case,
+// and every later repack walks into the missing tree and fails.
+func TestCaptureDropsCaseWithEmptyLooseTreeBelowItsPin(t *testing.T) {
+	ctx := context.Background()
+	p, sourceDB, run, repo, firstRound := setupCapturedRun(t, ctx)
+	defer sourceDB.Close()
+	store, err := Open(p.EvalDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	first, err := Capture(ctx, store, p, sourceDB, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := store.poolDir(first[0].RepoFingerprint)
+	headSHA := mustGit(t, ctx, pool, "rev-parse", caseRefPrefix(first[0].ID)+refHead)
+	const damagedID = "01EMPTYLOOSETREE000000000-01EMPTYLOOSETREE000000001"
+	blob := mustGitInput(t, ctx, pool, "only in the damaged case\n", "hash-object", "-w", "--stdin")
+	tree := mustGitInput(t, ctx, pool, "100644 blob "+blob+"\tdamaged.txt\n", "mktree")
+	commit := strings.TrimSpace(mustGit(t, ctx, pool, "-c", "user.name=eval", "-c", "user.email=eval@example.test", "commit-tree", tree, "-p", headSHA, "-m", "loose tree"))
+	for _, name := range caseRefNames() {
+		mustGit(t, ctx, pool, "update-ref", caseRefPrefix(damagedID)+name, commit)
+	}
+	treeFile := filepath.Join(pool, "objects", tree[:2], tree[2:])
+	if err := os.Chmod(treeFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(treeFile, 0); err != nil {
+		t.Fatal(err)
+	}
+	gcLog := writeFailedGCLog(t, pool, damagedID)
+
+	addSecondReviewRound(t, ctx, sourceDB, run.ID, repo.WorkingPath, firstRound)
+	cases, err := Capture(ctx, store, p, sourceDB, run.ID)
+	if err != nil {
+		t.Fatalf("capture is wedged by an empty loose tree: %v", err)
+	}
+	if len(cases) != 2 {
+		t.Fatalf("captured cases = %d, want 2", len(cases))
+	}
+	assertNoCasePins(t, ctx, pool, damagedID)
+	if _, err := os.Stat(gcLog); !os.IsNotExist(err) {
+		t.Fatalf("stale gc.log survived the repair and still blocks automatic gc: %v", err)
+	}
+	if got := mustGit(t, ctx, pool, "rev-parse", caseRefPrefix(first[0].ID)+refHead); got != headSHA {
+		t.Fatalf("healthy case pin moved: %s, want %s", got, headSHA)
+	}
+	for _, c := range cases {
+		restored := filepath.Join(t.TempDir(), "restore.git")
+		if err := git.InitBare(ctx, restored); err != nil {
+			t.Fatal(err)
+		}
+		if err := restoreCaseObjects(ctx, pool, restored, c.ID); err != nil {
+			t.Fatalf("healthy case %s is not restorable after repair: %v", c.ID, err)
+		}
+	}
+	assertPoolRepacks(t, ctx, pool)
+}
+
 // TestRepairLeavesGitTemporaryObjectFilesAlone pins that only files named like
 // loose objects are removed: Git's in-flight tmp_obj_* files are empty until
 // their first write, and a detached gc may still own one.

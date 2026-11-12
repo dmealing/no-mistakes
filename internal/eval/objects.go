@@ -234,7 +234,9 @@ func reclaimPoolSpace(ctx context.Context, poolPath string) error {
 //
 // The same shutdown can leave a zero-byte loose object, which fails every
 // fetch that needs that object and every gc even once no ref names it, so
-// those files are removed first. A valid loose object is never empty.
+// those files are removed first. A valid loose object is never empty. Such an
+// object can sit anywhere in a case's history, not only at a pin, so after
+// removing one every remaining case's history is walked too.
 //
 // When anything was released or removed, the pool's gc.log is removed too. A
 // detached gc that died on the damage wrote it, and Git skips automatic gc
@@ -285,6 +287,11 @@ func repairObjectPool(ctx context.Context, pool string) error {
 			}
 		}
 	}
+	if emptied {
+		if err := markIncompleteHistories(ctx, pool, readable, damaged); err != nil {
+			return err
+		}
+	}
 	if len(damaged) == 0 && !emptied {
 		return nil
 	}
@@ -307,6 +314,36 @@ func repairObjectPool(ctx context.Context, pool string) error {
 	}
 	if err := os.Remove(filepath.Join(pool, "gc.log")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("clear stale eval pool gc.log: %w", err)
+	}
+	return nil
+}
+
+// markIncompleteHistories marks every case not already damaged whose pinned
+// history lacks an object or cannot be walked. A repack walks the same
+// history, so it fails on such a case just as on a missing pin, and a fetch
+// stops at the existing pins and never re-sends what is gone.
+func markIncompleteHistories(ctx context.Context, pool string, readable map[string]string, damaged map[string]bool) error {
+	tips := map[string][]string{}
+	for ref, oid := range readable {
+		if id := caseIDOfRef(ref); !damaged[id] {
+			tips[id] = append(tips[id], oid)
+		}
+	}
+	for id, oids := range tips {
+		out, err := git.Run(ctx, pool, append([]string{"rev-list", "--objects", "--missing=print"}, oids...)...)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			damaged[id] = true
+			continue
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "?") {
+				damaged[id] = true
+				break
+			}
+		}
 	}
 	return nil
 }
