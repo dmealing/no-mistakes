@@ -159,6 +159,113 @@ func TestCaptureDropsCaseWhosePinNamesAMissingObject(t *testing.T) {
 	assertPoolRepacks(t, ctx, pool)
 }
 
+// pinLooseCommit writes a fresh loose commit object into the pool, pins every
+// pin of caseID to it, and returns the commit's loose object file.
+func pinLooseCommit(t *testing.T, ctx context.Context, pool, caseID, headSHA string) string {
+	t.Helper()
+	commit := strings.TrimSpace(mustGit(t, ctx, pool, "-c", "user.name=eval", "-c", "user.email=eval@example.test", "commit-tree", headSHA+"^{tree}", "-p", headSHA, "-m", "loose "+caseID))
+	for _, name := range caseRefNames() {
+		mustGit(t, ctx, pool, "update-ref", caseRefPrefix(caseID)+name, commit)
+	}
+	path := filepath.Join(pool, "objects", commit[:2], commit[2:])
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("pinned commit is not a loose object: %v", err)
+	}
+	return path
+}
+
+// TestCaptureRecoversFromEmptyLooseObject covers the loose-object side of the
+// same unclean shutdown: the ref survives but the loose object it names is a
+// zero-byte file. Git reports such an object as present to a plain existence
+// check, yet every fetch that needs it and every gc die on it, even after the
+// refs naming it are gone.
+func TestCaptureRecoversFromEmptyLooseObject(t *testing.T) {
+	ctx := context.Background()
+	p, sourceDB, run, repo, firstRound := setupCapturedRun(t, ctx)
+	defer sourceDB.Close()
+	store, err := Open(p.EvalDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	first, err := Capture(ctx, store, p, sourceDB, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := store.poolDir(first[0].RepoFingerprint)
+	headSHA := mustGit(t, ctx, pool, "rev-parse", caseRefPrefix(first[0].ID)+refHead)
+	const damagedID = "01EMPTYLOOSEOBJECT0000000-01EMPTYLOOSEOBJECT0000001"
+	object := pinLooseCommit(t, ctx, pool, damagedID, headSHA)
+	if err := os.Chmod(object, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(object, 0); err != nil {
+		t.Fatal(err)
+	}
+	gcLog := writeFailedGCLog(t, pool, damagedID)
+
+	addSecondReviewRound(t, ctx, sourceDB, run.ID, repo.WorkingPath, firstRound)
+	cases, err := Capture(ctx, store, p, sourceDB, run.ID)
+	if err != nil {
+		t.Fatalf("capture is wedged by an empty loose object: %v", err)
+	}
+	if len(cases) != 2 {
+		t.Fatalf("captured cases = %d, want 2", len(cases))
+	}
+	assertNoCasePins(t, ctx, pool, damagedID)
+	if _, err := os.Stat(object); !os.IsNotExist(err) {
+		t.Fatalf("empty loose object survived the repair: %v", err)
+	}
+	if _, err := os.Stat(gcLog); !os.IsNotExist(err) {
+		t.Fatalf("stale gc.log survived the repair and still blocks automatic gc: %v", err)
+	}
+	if got := mustGit(t, ctx, pool, "rev-parse", caseRefPrefix(first[0].ID)+refHead); got != headSHA {
+		t.Fatalf("healthy case pin moved: %s, want %s", got, headSHA)
+	}
+	assertPoolRepacks(t, ctx, pool)
+}
+
+// TestMissingObjectsReportsACorruptLooseObject pins that a pin naming an
+// unreadable loose object counts as damaged: a plain existence check reports
+// a corrupt loose object as present.
+func TestMissingObjectsReportsACorruptLooseObject(t *testing.T) {
+	ctx := context.Background()
+	pool := filepath.Join(t.TempDir(), "pool.git")
+	if err := initializeObjectPool(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	blob := mustGitInput(t, ctx, pool, "healthy\n", "hash-object", "-w", "--stdin")
+	corrupt := mustGitInput(t, ctx, pool, "corrupt\n", "hash-object", "-w", "--stdin")
+	path := filepath.Join(pool, "objects", corrupt[:2], corrupt[2:])
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not a zlib stream"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	missing, err := missingObjects(ctx, pool, []string{blob, corrupt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !missing[corrupt] {
+		t.Fatalf("corrupt loose object %s is reported present", corrupt)
+	}
+	if missing[blob] {
+		t.Fatalf("healthy object %s is reported missing", blob)
+	}
+}
+
+func mustGitInput(t *testing.T, ctx context.Context, dir, input string, args ...string) string {
+	t.Helper()
+	out, err := git.RunWithInput(ctx, dir, input, args...)
+	if err != nil {
+		t.Fatalf("git %v: %v", args, err)
+	}
+	return strings.TrimSpace(out)
+}
+
 // TestDropCaseObjectsRecoversFromTornCaseRef pins the retention side: Git
 // refuses to delete a ref it cannot parse, so dropping a case whose own pins
 // were torn used to fail every retention pass, and any other torn case wedged

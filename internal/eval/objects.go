@@ -222,7 +222,7 @@ func reclaimPoolSpace(ctx context.Context, poolPath string) error {
 //
 // A pin is damaged when its loose ref file cannot be parsed (a zero-byte file
 // is what an unclean shutdown leaves when refs are not fsynced) or when it
-// names an object the pool does not have. Either one fails every later fetch
+// names an object the pool does not have or cannot read. Either one fails every later fetch
 // into the pool at its connectivity check and every repack, and Git cannot
 // delete an unparseable ref itself, so nothing else would ever clear it. A
 // case missing any one pin cannot be restored, so all of that case's pins are
@@ -230,10 +230,18 @@ func reclaimPoolSpace(ctx context.Context, poolPath string) error {
 //
 // Callers hold the corpus lock, which makes them the pool's only writer.
 //
-// When anything was released, the pool's gc.log is removed too. A detached gc
-// that died on the damaged pin wrote it, and Git skips automatic gc while a
-// recent one is present; the cause it reports is gone.
+// The same shutdown can leave a zero-byte loose object, which fails every
+// fetch that needs that object and every gc even once no ref names it, so
+// those files are removed first. A valid loose object is never empty.
+//
+// When anything was released or removed, the pool's gc.log is removed too. A
+// detached gc that died on the damage wrote it, and Git skips automatic gc
+// while a recent one is present; the cause it reports is gone.
 func repairObjectPool(ctx context.Context, pool string) error {
+	emptied, err := removeEmptyLooseObjects(pool)
+	if err != nil {
+		return err
+	}
 	// Walk the loose ref files before asking Git which refs it can read: a ref
 	// written in between is then on Git's list and is never mistaken for an
 	// unreadable one.
@@ -275,7 +283,7 @@ func repairObjectPool(ctx context.Context, pool string) error {
 			}
 		}
 	}
-	if len(damaged) == 0 {
+	if len(damaged) == 0 && !emptied {
 		return nil
 	}
 
@@ -299,6 +307,27 @@ func repairObjectPool(ctx context.Context, pool string) error {
 		return fmt.Errorf("clear stale eval pool gc.log: %w", err)
 	}
 	return nil
+}
+
+// removeEmptyLooseObjects deletes zero-byte files from the pool's loose object
+// directories and reports whether it deleted any.
+func removeEmptyLooseObjects(pool string) (bool, error) {
+	paths, err := filepath.Glob(filepath.Join(pool, "objects", "[0-9a-f][0-9a-f]", "*"))
+	if err != nil {
+		return false, fmt.Errorf("inspect eval pool loose objects: %w", err)
+	}
+	removed := false
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("remove empty eval pool loose object: %w", err)
+		}
+		removed = true
+	}
+	return removed, nil
 }
 
 // looseCaseRefs maps each loose ref file under the case namespace to its path.
@@ -329,9 +358,11 @@ func looseCaseRefs(pool string) (map[string]string, error) {
 	return refs, nil
 }
 
-// missingObjects reports which of oids the pool does not contain.
+// missingObjects reports which of oids the pool does not contain or cannot
+// read. Asking for the type makes Git open each object, so a corrupt loose
+// object is reported missing instead of present.
 func missingObjects(ctx context.Context, pool string, oids []string) (map[string]bool, error) {
-	out, err := git.RunWithInput(ctx, pool, strings.Join(oids, "\n")+"\n", "cat-file", "--batch-check=%(objectname)")
+	out, err := git.RunWithInput(ctx, pool, strings.Join(oids, "\n")+"\n", "cat-file", "--batch-check=%(objectname) %(objecttype)")
 	if err != nil {
 		return nil, fmt.Errorf("check eval pool pin objects: %w", err)
 	}
