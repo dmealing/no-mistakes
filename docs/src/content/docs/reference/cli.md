@@ -214,9 +214,10 @@ Before it starts a NEW run (never when it reattaches), `axi run` applies the rul
 | `in-validation-conflict` | The branch's head cannot merge cleanly with the head of another branch of the same project that is in validation now. |
 | `third-branch` | Two other branches of the same project are already in validation. |
 | `small-change-with-sibling` | The change has 300 production lines or fewer (tests and docs do not count) while another branch of the project is in validation: it should ride with that lane. |
+| `bundle-over-limit` | The change has more than 1,000 production lines and three or more non-merge commits whose subject starts with `fix` (any case): a bundle of fixes that size costs about 1.7 times a single change of the same size and needed a third run far more often, so split it by module. A large single feature, with fewer than three `fix` commits, is not stopped. |
 
 A branch is in validation while its run is pending or running, parked at a gate or not. The same project means the same upstream URL (SSH and HTTPS spellings match), across every checkout registered with the daemon. A fact that cannot be read (a lane's commit missing from both this checkout and its gate, an unreadable database) never stops the run; it is reported as unchecked.
-The output names each stop and what to do instead. `--triage-override "<reason>"` starts the run anyway over every stop except the hold; the reason is required, shown in the run's output, and appended with the branch, head, run ID, and overridden rules to `<NM_HOME>/triage-overrides.ndjson`. A started run's output also carries the bundling facts: the tier, the production-line count, and the other branches of the project in validation.
+The output names each stop and what to do instead. `--triage-override "<reason>"` starts the run anyway over every stop except the hold; the reason is required, shown in the run's output, and appended with the branch, head, run ID, and overridden rules to `<NM_HOME>/triage-overrides.ndjson`. A started run's output also carries the bundling facts: the tier, the `review` class line, the production-line count, the other branches of the project in validation, and any bundle-shape `notes`.
 
 ### Closing issues
 
@@ -320,7 +321,24 @@ no-mistakes axi triage --post-merge [--gated SHA]
 
 The change's tier is its strictest changed file: `DOCS` (prose and agent configuration only: run with `--skip test,lint,document`), `TEST` (tests, plus docs: `--skip document`), `CODE` (anything else: a full run), or `RISK` (a code file on a risk path such as migrations, auth, crypto, payments, build manifests, workflows or deploy config: a full run and an independent review first). A repository adds risk globs, one per line, in `.nm-triage-risk`; its own `scripts/nm-triage.sh`, when present, decides the tier instead, for both `axi triage` and the `axi run` pre-run check (a risk path still lifts it to `RISK`; not consulted with `--base`). When that script fails, times out, or prints no `TIER:` line, a one-line `repo_script` note says so and the built-in tier is used.
 
-The output is TOON: the tier and production-line count, the run command, the pre-run review advice, the bundling facts (the other branches of the project in validation and whether the change is small), conflicts, and a `verdict` of `go` or `stop` with the rules of the [pre-run check](#pre-run-check) that `axi run` applies. It exits 3 on `stop`. As advice that never stops a run, it also test-merges the branch with its base and with every other open, non-draft GitHub pull request of the repository. Test merges write nothing to any repository.
+The output is TOON: the tier, the review class, and the production-line count, the run command, the pre-run review advice, the bundling facts (the other branches of the project in validation and whether the change is small), conflicts, and a `verdict` of `go` or `stop` with the rules of the [pre-run check](#pre-run-check) that `axi run` applies. It exits 3 on `stop`. As advice that never stops a run, it also test-merges the branch with its base and with every other open, non-draft GitHub pull request of the repository. Test merges write nothing to any repository.
+
+The `review` line says which first review the change gets, and how much room is left before the next bundle limit (production lines only; tests and docs do not count):
+
+- `cheap - 212 of 300 production lines, no risk path; room for 88 more`: 300 production lines or fewer and no risk path.
+- `cheap - TEST tier; 450 production lines`: a `DOCS` or `TEST` tier is always cheap, whatever its line count (a repository script can set the tier).
+- `strong - 412 production lines; room to 600`: a `CODE` change over 300 production lines; a strong-review bundle should stay at or under 600.
+- `strong - risk path <first path> (1 of 3); 140 production lines; room to 600`: any risk path makes the whole change strong-review.
+- `strong - 700 production lines; past 600, room to 1,000`, and `strong - 1,240 production lines; over the 1,000-line bundle limit`.
+
+The first word is the class (`cheap` or `strong`); an agent wrapper that routes the first review by class reads it from here, so the 300-line threshold has one owner. TOON quotes the value when it contains a comma.
+
+`notes` is bundle-shape advice. It never stops a run and never changes the exit code:
+
+| Note | When |
+| ---- | ---- |
+| `risk-path-in-small-change` | 300 production lines or fewer, at least one risk path, and the risk-path files carry less than half of the production lines: "N lines on a risk path move all M lines to the strong review: ship the risk-path part with other strong-review work, or alone." |
+| `just-over-cheap-limit` | No risk path, 301 to 450 production lines, and two or more commits whose subject starts with `fix`: "N lines over the cheap-review limit: split into two bundles under 300, or move one fix out." |
 
 `--post-merge` isolates the hand resolution of the merge's conflicts (`git show --remerge-diff`): a clean merge, or one that resolved only docs and test files, needs the repository's local test suite instead of a new run; one that resolved production files, or a `HEAD` that is not one merge of the base on top of the validated head, needs a new run. `.nm-triage-nonprod` adds globs that count as non-production there.
 

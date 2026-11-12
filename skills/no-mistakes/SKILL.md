@@ -130,9 +130,12 @@ If it shows an active run on another branch, leave that run alone and start vali
 A NEW run first passes a pre-run check (`no-mistakes axi triage` shows it, with the
 `--skip` that fits the change). `axi run` exits 3 with `verdict: stop` when new runs are
 on hold, the branch conflicts with another branch of the project in validation,
-two other branches of the project are in validation, or a small change has a
-sibling branch in validation. Do not work around a stop: report its lines to
-whoever asked for the run. Only when they give a reason, pass
+two other branches of the project are in validation, a small change has a
+sibling branch in validation, or a bundle of 3+ fix commits is over 1,000
+production lines. Its `review:` line says which first review the change
+gets (cheap: 300 production lines or fewer, no risk path; strong otherwise)
+and the room left; its `notes:` are advice and never stop a run. Do not
+work around a stop: report its lines to whoever asked for the run. Only when they give a reason, pass
 `--triage-override "<reason>"` (recorded); a hold cannot be overridden.
 
 ## Intent is required

@@ -216,6 +216,19 @@ func runAxiTriageForTest(t *testing.T) string {
 
 var reportedTier = regexp.MustCompile(`(?m)^\s*tier: (\S+)`)
 
+// reportedReview is the `review:` line; the class is its first word, which
+// is what the agent wrapper reads. TOON quotes the value when it has a comma.
+var reportedReview = regexp.MustCompile(`(?m)^\s*review: "?(.*?)"?$`)
+
+func reviewIn(t *testing.T, out string) string {
+	t.Helper()
+	m := reportedReview.FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("no review reported:\n%s", out)
+	}
+	return m[1]
+}
+
 func tierIn(t *testing.T, out string) string {
 	t.Helper()
 	m := reportedTier.FindStringSubmatch(out)
@@ -270,5 +283,89 @@ func TestAxiTriageAndAxiRunNoteAnUnusableRepositoryScript(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// commitLines commits a production file of n lines with subject msg in the
+// test's checkout.
+func commitLines(t *testing.T, name string, n int, msg string) {
+	t.Helper()
+	wd, _ := os.Getwd()
+	if err := os.WriteFile(filepath.Join(wd, name), []byte(strings.Repeat("// line\n", n)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cliGit(t, wd, "add", name)
+	cliGit(t, wd, "commit", "-m", msg)
+}
+
+func TestAxiRunStopsAFixBundleOverTheLimit(t *testing.T) {
+	launched, p := triageRunFixture(t)
+	commitLines(t, "a.go", 400, "fix(a): one")
+	commitLines(t, "b.go", 400, "fix(b): two")
+	commitLines(t, "c.go", 400, "Fix c")
+
+	out, err := runAxiRunForTriageTest(t, nil)
+	if code, ok := err.(*exitError); !ok || code.code != triageStopExitCode {
+		t.Fatalf("err = %v, want exit %d\n%s", err, triageStopExitCode, out)
+	}
+	if !strings.Contains(out, string(triage.RuleBundleOverLimit)) || !strings.Contains(out, "fix bundle of 1,200 production lines") || !strings.Contains(out, "--triage-override") {
+		t.Fatalf("output does not report the bundle-over-limit stop and how to override it:\n%s", out)
+	}
+	if len(*launched) != 0 {
+		t.Fatalf("a stopped check still launched: %v", *launched)
+	}
+
+	reason := "one module, splitting costs more"
+	out, _ = runAxiRunForTriageTest(t, &reason)
+	if len(*launched) == 0 {
+		t.Fatalf("an overridden bundle-over-limit stop did not launch the run:\n%s", out)
+	}
+	data, err := os.ReadFile(filepath.Join(p.Root(), triage.OverrideLogName))
+	if err != nil || !strings.Contains(string(data), `"rules":["bundle-over-limit"]`) || !strings.Contains(string(data), `"reason":"`+reason+`"`) {
+		t.Fatalf("override record = %s, %v", data, err)
+	}
+}
+
+// A large single feature is not a bundle of fixes: it starts, and both
+// commands report the same strong review line.
+func TestAxiRunLetsALargeSingleFeatureStart(t *testing.T) {
+	launched, _ := triageRunFixture(t)
+	commitLines(t, "feature.go", 1100, "feat: the widget")
+	commitLines(t, "fixup.go", 20, "fix: a typo in the widget")
+
+	triageOut := runAxiTriageForTest(t)
+	out, _ := runAxiRunForTriageTest(t, nil)
+	if len(*launched) == 0 {
+		t.Fatalf("a large single feature must start:\n%s", out)
+	}
+	want := "strong - 1,120 production lines; over the 1,000-line bundle limit"
+	for name, o := range map[string]string{"axi triage": triageOut, "axi run": out} {
+		if got := reviewIn(t, o); got != want {
+			t.Fatalf("%s review = %q, want %q:\n%s", name, got, want, o)
+		}
+	}
+	if !strings.Contains(triageOut, "verdict: go") {
+		t.Fatalf("axi triage must say go:\n%s", triageOut)
+	}
+}
+
+// Notes are advice: axi triage prints them and still says go with exit 0.
+func TestAxiTriageNotesAFixBundleJustOverTheCheapLimit(t *testing.T) {
+	triageRunFixture(t)
+	commitLines(t, "a.go", 170, "fix(a): one")
+	commitLines(t, "b.go", 170, "fix(b): two")
+
+	out := runAxiTriageForTest(t)
+	if got := reviewIn(t, out); got != "strong - 340 production lines; room to 600" {
+		t.Fatalf("review = %q:\n%s", got, out)
+	}
+	for _, want := range []string{
+		string(triage.NoteJustOverCheapLimit),
+		"40 lines over the cheap-review limit",
+		"verdict: go",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("axi triage output lacks %q:\n%s", want, out)
+		}
 	}
 }

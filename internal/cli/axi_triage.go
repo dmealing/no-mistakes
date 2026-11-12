@@ -45,8 +45,18 @@ func newAxiTriageCmd() *cobra.Command {
 			"  small-change-with-sibling the change has 300 production lines or fewer\n" +
 			"                            while a sibling branch is in validation: ride\n" +
 			"                            with a sibling lane instead\n" +
+			"  bundle-over-limit         a bundle of fixes (3+ commits whose subject\n" +
+			"                            starts with fix) over 1,000 production lines;\n" +
+			"                            a large single feature is not stopped\n" +
 			"`axi run --triage-override REASON` starts the run anyway over every stop\n" +
 			"except the hold, and records the reason in <NM_HOME>/" + triage.OverrideLogName + ".\n\n" +
+			"review: says which first review the change gets: cheap (300 production\n" +
+			"lines or fewer, no risk path, or a DOCS/TEST tier) or strong (CODE over\n" +
+			"300, or any risk path), and\n" +
+			"the room left: 300 for a cheap bundle, 600 for a strong one, never over\n" +
+			"1,000. notes: (advice, never a stop) flags a small change whose minor part\n" +
+			"is on a risk path (risk-path-in-small-change) and a bundle of 2+ fixes at\n" +
+			"301-450 production lines (just-over-cheap-limit).\n\n" +
 			"As advice only, it also test-merges the branch against its base and\n" +
 			"against every other open GitHub pull request (skipped by --offline).\n\n" +
 			"Tiers (the strictest changed file wins):\n" +
@@ -304,6 +314,7 @@ func runAxiTriage(cmd *cobra.Command, opts triageOptions, skipOnly bool) error {
 		{Key: "branch", Value: env.branch},
 		{Key: "base", Value: fmt.Sprintf("%s (%s)", shortSHA(base), baseRef)},
 		{Key: "tier", Value: string(tier)},
+		{Key: "review", Value: triage.ReviewLine(tier, change)},
 		{Key: "files", Value: len(change.Files)},
 		{Key: "production_files", Value: change.ProductionFiles},
 		{Key: "production_lines", Value: change.ProductionLines},
@@ -338,6 +349,7 @@ func runAxiTriage(cmd *cobra.Command, opts triageOptions, skipOnly bool) error {
 	if len(unchecked) > 0 {
 		fields = append(fields, toon.Field{Key: "unchecked", Value: unchecked})
 	}
+	fields = append(fields, triageNotesFields(res)...)
 	fields = append(fields, triageVerdictFields(res)...)
 	var help []string
 	for _, c := range advisory {
@@ -402,6 +414,23 @@ func triageBundlingField(res triage.Result, haveDB bool) toon.Field {
 		fields = append(fields, toon.Field{Key: "small_change", Value: fmt.Sprintf("%s: %d production lines (small is %d or fewer)", size, res.Change.ProductionLines, triage.SmallChangeLines)})
 	}
 	return toon.Field{Key: "bundling", Value: toon.NewObject(fields...)}
+}
+
+type triageNoteRow struct {
+	Rule   string `toon:"rule"`
+	Detail string `toon:"detail"`
+}
+
+// triageNotesFields is the bundle-shape advice; it never stops a run.
+func triageNotesFields(res triage.Result) []toon.Field {
+	if len(res.Notes) == 0 {
+		return nil
+	}
+	rows := make([]triageNoteRow, 0, len(res.Notes))
+	for _, n := range res.Notes {
+		rows = append(rows, triageNoteRow{Rule: string(n.Rule), Detail: n.Detail})
+	}
+	return []toon.Field{{Key: "notes", Value: rows}}
 }
 
 func triageVerdictFields(res triage.Result) []toon.Field {
@@ -597,7 +626,10 @@ func checkTriageBeforeNewRun(cmd *cobra.Command, env *axiEnv, branch, headSHA, b
 	facts := []toon.Field{}
 	if res.Change != nil {
 		tier, scriptTier, scriptNote := triageTier(ctx, root, *res.Change, false)
-		facts = append(facts, toon.Field{Key: "tier", Value: string(tier)})
+		facts = append(facts,
+			toon.Field{Key: "tier", Value: string(tier)},
+			toon.Field{Key: "review", Value: triage.ReviewLine(tier, *res.Change)},
+		)
 		if scriptTier != "" {
 			facts = append(facts, toon.Field{Key: "repo_script_tier", Value: string(scriptTier)})
 		}
@@ -620,6 +652,7 @@ func checkTriageBeforeNewRun(cmd *cobra.Command, env *axiEnv, branch, headSHA, b
 		}
 		facts = append(facts, toon.Field{Key: "in_validation", Value: inValidation})
 	}
+	facts = append(facts, triageNotesFields(res)...)
 	gate := &newRunTriage{}
 	if len(res.Stops) > 0 {
 		if reason == "" || !res.Overridable() {
