@@ -79,6 +79,8 @@ A case with no finding-level gold is unlabeled / pending, never a pass. True-neg
 
 Cases from the same repository share one local Git object pool under `<NM_HOME>/eval/pools/`. The first case from a repository stores its history once; every later case adds only the objects its own commits introduced, which is normally a few kilobytes.
 
+Every capture and retention pass checks the pool before using it. A case whose pins Git cannot read (such as the zero-byte ref an unclean shutdown can leave) or whose pinned commits are missing can no longer be replayed, so its pins are released and the `gc.log` that the failed gc left is removed, which lets Git's automatic gc reclaim the pool again. Pool refs are fsynced (`core.fsync=committed,reference`) so a crash right after a capture does not leave one behind.
+
 `eval.max_cases` (default 200) is the retention target enforced after automatic collection. When it is exceeded the oldest unprotected cases are dropped first. A case that has a replay in progress or already has recorded candidate replays is never dropped - an eval report's cohort pins the case IDs it compared, so reclaiming one would invalidate a comparison you already paid for. Protected cases can therefore keep the corpus above the target. Set it to `0` to keep every case.
 
 Because the objects live in the pool rather than inside each case, a case directory is not a portable archive: copying it elsewhere does not carry the code it replays.

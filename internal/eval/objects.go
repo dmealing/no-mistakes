@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,12 +79,28 @@ func initializeObjectPool(ctx context.Context, pool string) error {
 	if _, err := git.Run(ctx, pool, "config", "core.longpaths", "true"); err != nil {
 		return fmt.Errorf("enable long paths in eval object pool: %w", err)
 	}
+	// The case refs are the only thing keeping a case's objects alive, so they
+	// are hardened like the objects themselves. Git's platform default fsyncs
+	// packs but neither references nor loose objects, and an unclean shutdown
+	// just after a capture then leaves a zero-byte ref file (or a ref naming a
+	// loose object that never reached the disk). One such ref made a pool fail
+	// every later fetch and every repack. Set on every capture, so pools created
+	// before this setting existed pick it up too.
+	if _, err := git.Run(ctx, pool, "config", "core.fsync", "committed,reference"); err != nil {
+		return fmt.Errorf("harden eval object pool refs: %w", err)
+	}
 	return nil
 }
 
 func (s *Store) storeCaseObjects(ctx context.Context, gateDir, repoFingerprint, caseID string, refs map[string]string) error {
 	pool := s.poolDir(repoFingerprint)
 	if err := initializeObjectPool(ctx, pool); err != nil {
+		return err
+	}
+	// A damaged pin anywhere in the pool fails this fetch's connectivity check
+	// after the pack has already landed, so without the repair every capture
+	// from the repository leaks a pack and records nothing.
+	if err := repairObjectPool(ctx, pool); err != nil {
 		return err
 	}
 	// The staging clone goes under the eval root rather than the system temp
@@ -118,9 +135,17 @@ func (s *Store) storeCaseObjects(ctx context.Context, gateDir, repoFingerprint, 
 	}
 	// --no-tags keeps the pool's refs to exactly the case pins. A tag ref
 	// would pin objects no case needs and survive every retention pass,
-	// quietly making the pool unreclaimable.
-	if _, err := git.Run(ctx, pool, "fetch", "--no-tags", clone, "+"+prefix+"*:"+prefix+"*"); err != nil {
-		return fmt.Errorf("store case objects: %w", err)
+	// quietly making the pool unreclaimable. --atomic writes the case's four
+	// pins together or not at all, so a failed fetch cannot strand a partial
+	// case. Fetch's own automatic maintenance is off because reclaimPoolSpace
+	// below owns pool maintenance: Git silently skips that built-in pass while
+	// a stale objects/maintenance.lock is present.
+	_, fetchErr := git.Run(ctx, pool, "-c", "maintenance.auto=false", "fetch", "--atomic", "--no-tags", clone, "+"+prefix+"*:"+prefix+"*")
+	// Best effort, and after a failed fetch too: a failure past the pack
+	// transfer still leaves the received pack in the pool for gc to reclaim.
+	_ = reclaimPoolSpace(ctx, pool)
+	if fetchErr != nil {
+		return fmt.Errorf("store case objects: %w", fetchErr)
 	}
 	return nil
 }
@@ -152,6 +177,11 @@ func dropCaseObjects(ctx context.Context, poolPath, caseID string) error {
 	if err := git.ValidateBareRepository(ctx, poolPath); err != nil {
 		return fmt.Errorf("validate eval object pool: %w", err)
 	}
+	// Git refuses to delete a ref it cannot parse, and any damaged pin fails
+	// the gc below, so repair first or retention stays wedged.
+	if err := repairObjectPool(ctx, poolPath); err != nil {
+		return err
+	}
 	prefix := caseRefPrefix(caseID)
 	var failures []string
 	for _, name := range caseRefNames() {
@@ -172,11 +202,149 @@ func dropCaseObjects(ctx context.Context, poolPath, caseID string) error {
 		}
 		return nil
 	}
-	// --auto respects Git's own maintenance thresholds, so a retention pass
-	// stays cheap: it schedules repacking when the pool has actually grown
-	// instead of paying a full repack for every dropped case.
+	return reclaimPoolSpace(ctx, poolPath)
+}
+
+// reclaimPoolSpace runs Git's automatic gc on a pool. --auto respects Git's own
+// maintenance thresholds, so it stays cheap: it repacks when the pool has
+// actually grown instead of paying a full repack on every call. Git detaches
+// it, so a failure surfaces only as the pool's gc.log, which repairObjectPool
+// clears once it has removed the damaged pin that caused it.
+func reclaimPoolSpace(ctx context.Context, poolPath string) error {
 	if _, err := git.Run(ctx, poolPath, "gc", "--auto", "--quiet"); err != nil {
 		return fmt.Errorf("reclaim eval pool space: %w", err)
 	}
 	return nil
+}
+
+// repairObjectPool releases every case whose pins Git can no longer use, so
+// one damaged case cannot wedge a whole pool.
+//
+// A pin is damaged when its loose ref file cannot be parsed (a zero-byte file
+// is what an unclean shutdown leaves when refs are not fsynced) or when it
+// names an object the pool does not have. Either one fails every later fetch
+// into the pool at its connectivity check and every repack, and Git cannot
+// delete an unparseable ref itself, so nothing else would ever clear it. A
+// case missing any one pin cannot be restored, so all of that case's pins are
+// released rather than leaving the rest to keep dead objects alive.
+//
+// Callers hold the corpus lock, which makes them the pool's only writer.
+//
+// When anything was released, the pool's gc.log is removed too. A detached gc
+// that died on the damaged pin wrote it, and Git skips automatic gc while a
+// recent one is present; the cause it reports is gone.
+func repairObjectPool(ctx context.Context, pool string) error {
+	// Walk the loose ref files before asking Git which refs it can read: a ref
+	// written in between is then on Git's list and is never mistaken for an
+	// unreadable one.
+	looseRefs, err := looseCaseRefs(pool)
+	if err != nil {
+		return err
+	}
+	listing, err := git.Run(ctx, pool, "for-each-ref", "--format=%(objectname) %(refname)", caseRefNamespace)
+	if err != nil {
+		return fmt.Errorf("inspect eval pool pins: %w", err)
+	}
+	readable := map[string]string{}
+	var oids []string
+	for _, line := range strings.Split(listing, "\n") {
+		oid, ref, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok {
+			continue
+		}
+		readable[ref] = oid
+		oids = append(oids, oid)
+	}
+
+	damaged := map[string]bool{}
+	var unreadable []string
+	for ref, path := range looseRefs {
+		if _, ok := readable[ref]; !ok {
+			unreadable = append(unreadable, path)
+			damaged[caseIDOfRef(ref)] = true
+		}
+	}
+	if len(oids) > 0 {
+		missing, err := missingObjects(ctx, pool, oids)
+		if err != nil {
+			return err
+		}
+		for ref, oid := range readable {
+			if missing[oid] {
+				damaged[caseIDOfRef(ref)] = true
+			}
+		}
+	}
+	if len(damaged) == 0 {
+		return nil
+	}
+
+	for _, path := range unreadable {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove unreadable eval pool pin: %w", err)
+		}
+	}
+	var deletes strings.Builder
+	for ref := range readable {
+		if damaged[caseIDOfRef(ref)] {
+			deletes.WriteString("delete " + ref + "\n")
+		}
+	}
+	if deletes.Len() > 0 {
+		if _, err := git.RunWithInput(ctx, pool, deletes.String(), "update-ref", "--stdin"); err != nil {
+			return fmt.Errorf("release damaged eval pool pins: %w", err)
+		}
+	}
+	if err := os.Remove(filepath.Join(pool, "gc.log")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clear stale eval pool gc.log: %w", err)
+	}
+	return nil
+}
+
+// looseCaseRefs maps each loose ref file under the case namespace to its path.
+// Lock files are Git's in-flight writes, not refs.
+func looseCaseRefs(pool string) (map[string]string, error) {
+	root := filepath.Join(pool, filepath.FromSlash(strings.TrimSuffix(caseRefNamespace, "/")))
+	refs := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if !d.Type().IsRegular() || strings.HasSuffix(d.Name(), ".lock") {
+			return nil
+		}
+		rel, err := filepath.Rel(pool, path)
+		if err != nil {
+			return err
+		}
+		refs[filepath.ToSlash(rel)] = path
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("inspect eval pool pin files: %w", err)
+	}
+	return refs, nil
+}
+
+// missingObjects reports which of oids the pool does not contain.
+func missingObjects(ctx context.Context, pool string, oids []string) (map[string]bool, error) {
+	out, err := git.RunWithInput(ctx, pool, strings.Join(oids, "\n")+"\n", "cat-file", "--batch-check=%(objectname)")
+	if err != nil {
+		return nil, fmt.Errorf("check eval pool pin objects: %w", err)
+	}
+	missing := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		if oid, ok := strings.CutSuffix(strings.TrimSpace(line), " missing"); ok {
+			missing[oid] = true
+		}
+	}
+	return missing, nil
+}
+
+func caseIDOfRef(ref string) string {
+	id, _, _ := strings.Cut(strings.TrimPrefix(ref, caseRefNamespace), "/")
+	return id
 }
