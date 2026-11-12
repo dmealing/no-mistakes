@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -175,8 +176,8 @@ type Change struct {
 	// whose lines are excluded still lands in RiskPaths (it keeps the strong
 	// review) but adds nothing here.
 	RiskLines int
-	// FixCommits counts the non-merge commits of base..head whose subject
-	// starts with "fix" (any case): a bundle of fixes, not one feature.
+	// FixCommits counts the non-merge commits of base..head that isPoolFix
+	// reads as a separate fix: a bundle of fixes, not one feature.
 	FixCommits int
 	Tier       Tier
 }
@@ -207,6 +208,35 @@ func ReadPatternFile(path string) ([]string, error) {
 	return out, sc.Err()
 }
 
+// reviewFollowUp is the rest of a fix subject, after "fix", an optional
+// "(scope)", "!" and ":", that answers review on the same change: "Fix review
+// comments", "fix: address PR feedback", "fix: the code review findings".
+var reviewFollowUp = regexp.MustCompile(`^(address(es|ed|ing)?\s+)?(the\s+)?(code\s+)?(review|pr)\s+(comments?|feedback|findings|nits)\b`)
+
+var fixPrefix = regexp.MustCompile(`^fix(es|ed)?(\([^)]*\))?!?:?\s*`)
+
+// isPoolFix reports whether a commit subject reads as one separate fix of a
+// pool rather than part of one change. It is a subject that starts with "fix"
+// (any case), except a git autosquash commit ("fixup! ", "squash! ",
+// "amend! ") and a fix subject that answers review comments or feedback
+// (reviewFollowUp). The pipeline's own fix-round commits use the
+// commit.fix_message subject, by default "no-mistakes(<step>): ...", so they
+// never start with "fix"; a custom commit.fix_message that does start with
+// "fix" counts its commits.
+func isPoolFix(subject string) bool {
+	s := strings.ToLower(strings.TrimSpace(subject))
+	for _, autosquash := range []string{"fixup!", "squash!", "amend!"} {
+		if strings.HasPrefix(s, autosquash) {
+			return false
+		}
+	}
+	prefix := fixPrefix.FindString(s)
+	if prefix == "" {
+		return false
+	}
+	return !reviewFollowUp.MatchString(s[len(prefix):])
+}
+
 // RiskPatterns returns the default risk globs plus the repository's own
 // .nm-triage-risk list.
 func RiskPatterns(repoRoot string) ([]string, error) {
@@ -228,6 +258,12 @@ func DiffChange(ctx context.Context, dir, base, head string, risk []string) (Cha
 	if err != nil {
 		return c, err
 	}
+	type numstat struct {
+		path  string
+		lines int
+	}
+	var production []numstat
+	var productionPaths []string
 	for _, rec := range strings.Split(out, "\x00") {
 		if rec == "" {
 			continue
@@ -247,7 +283,16 @@ func DiffChange(ctx context.Context, dir, base, head string, risk []string) (Cha
 			deleted, _ := strconv.Atoi(parts[1])
 			n = added + deleted
 		}
-		if gen.Excluded(path) {
+		production = append(production, numstat{path, n})
+		productionPaths = append(productionPaths, path)
+	}
+	excluded, err := gen.Excluded(productionPaths)
+	if err != nil {
+		return c, err
+	}
+	for _, f := range production {
+		n := f.lines
+		if excluded[f.path] {
 			c.ExcludedFiles++
 			c.ExcludedLines += n
 			n = 0
@@ -255,8 +300,8 @@ func DiffChange(ctx context.Context, dir, base, head string, risk []string) (Cha
 			c.ProductionFiles++
 			c.ProductionLines += n
 		}
-		if matchAny(risk, path) {
-			c.RiskPaths = append(c.RiskPaths, path)
+		if matchAny(risk, f.path) {
+			c.RiskPaths = append(c.RiskPaths, f.path)
 			c.RiskLines += n
 		}
 	}
@@ -269,7 +314,7 @@ func DiffChange(ctx context.Context, dir, base, head string, risk []string) (Cha
 		return c, err
 	}
 	for _, subject := range strings.Split(log, "\n") {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(subject)), "fix") {
+		if isPoolFix(subject) {
 			c.FixCommits++
 		}
 	}

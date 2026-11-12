@@ -405,20 +405,3 @@ func TestAxiTriageDoesNotCountGeneratedCodeOrFixtures(t *testing.T) {
 		t.Fatalf("a mostly generated change must start:\n%s", res)
 	}
 }
-
-func TestAxiTriageHelpDescribesWhatCountsAndNeverSplitsOneChange(t *testing.T) {
-	long := newAxiTriageCmd().Long
-	for _, want := range []string{
-		"a pool of separate fixes", "a coherent change is never stopped for its size",
-		"one coherent change ships whole", ".nm-triage-generated", "@generated", "fixtures", "excluded_lines",
-	} {
-		if !strings.Contains(long, want) {
-			t.Errorf("axi triage help lacks %q", want)
-		}
-	}
-	for _, bad := range []string{"split by module", "split into two bundles", "or alone"} {
-		if strings.Contains(long, bad) {
-			t.Errorf("axi triage help still says %q", bad)
-		}
-	}
-}

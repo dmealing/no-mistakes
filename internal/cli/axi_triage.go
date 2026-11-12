@@ -46,8 +46,10 @@ func newAxiTriageCmd() *cobra.Command {
 			"                            while a sibling branch is in validation: ride\n" +
 			"                            with a sibling lane instead\n" +
 			"  bundle-over-limit         a pool of separate fixes (3+ commits whose subject\n" +
-			"                            starts with fix) over 1,000 production lines;\n" +
-			"                            a coherent change is never stopped for its size\n" +
+			"                            starts with fix, not fixup!/squash!/amend! or a\n" +
+			"                            fix of review comments or feedback) over 1,000\n" +
+			"                            production lines; a coherent change is never\n" +
+			"                            stopped for its size\n" +
 			"`axi run --triage-override REASON` starts the run anyway over every stop\n" +
 			"except the hold, and records the reason in <NM_HOME>/" + triage.OverrideLogName + ".\n\n" +
 			"review: says which first review the change gets: cheap (300 production\n" +
@@ -63,8 +65,10 @@ func newAxiTriageCmd() *cobra.Command {
 			"or testdata/ directories), generated code, lockfiles and spec or registry\n" +
 			"JSON (*.json under spec/, specs/, registry/, schema/, schemas/) never count;\n" +
 			"excluded_lines reports them. Generated code is found by a generator header\n" +
-			"(\"Code generated ... DO NOT EDIT.\" or \"@generated\" in the first 20 lines),\n" +
-			"a linguist-generated entry in the root .gitattributes, or a glob in the\n" +
+			"on a comment line in the first 20 lines (\"// Code generated ... DO NOT EDIT.\"\n" +
+			"in Go; a comment token, then \"Code generated ... DO NOT EDIT\" or\n" +
+			"\"@generated\" elsewhere), a linguist-generated entry in the root\n" +
+			".gitattributes, or a glob in the\n" +
 			"repository's .nm-triage-generated (one per line). A risk path still makes the\n" +
 			"review strong even when its lines are excluded.\n\n" +
 			"As advice only, it also test-merges the branch against its base and\n" +

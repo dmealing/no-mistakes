@@ -179,3 +179,46 @@ func TestAdviceNeverSuggestsSplittingOneChange(t *testing.T) {
 		}
 	}
 }
+
+// The bundle-over-limit stop reads a pool of separate fixes from commit
+// subjects, so commits that are part of one change must not be counted:
+// autosquash commits (git's own "fixup! "/"squash! "/"amend! " prefixes), the
+// pipeline's fix rounds (default subject "no-mistakes(<step>): ..."), and
+// review follow-ups.
+func TestDiffChange_OneChangeWithFollowUpCommitsIsNotAPool(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		subjects []string
+		stopped  bool
+	}{
+		{"autosquash commits", []string{"fixup! feat: add the widget", "fixup! feat: add the widget", "fixup! feat: add the widget"}, false},
+		{"other autosquash commits", []string{"squash! fix: nil check", "amend! fix: nil check", "squash! fix: wrap errors"}, false},
+		{"pipeline fix rounds", []string{"no-mistakes(review): fix the nil check", "no-mistakes(test): fix flaky widget test", "no-mistakes(review): fix error wrapping"}, false},
+		{"review follow-ups", []string{"Fix review comments", "fix: address PR feedback", "fix(widget): the code review findings"}, false},
+		{"a real pool of fixes", []string{"fix: nil check in parser", "fix(widget): wrap errors", "Fix review step drops findings"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			git(t, repo, "init", "-q", "-b", "main")
+			base := commit(t, repo, "base", map[string]string{"main.go": "package x\n"})
+			head := commit(t, repo, "feat: add the widget", map[string]string{"widget.go": lines(1200, "// w")})
+			for i, s := range tc.subjects {
+				head = commit(t, repo, s, map[string]string{"widget.go": lines(1200-i-1, "// w")})
+			}
+			c, err := DiffChange(context.Background(), repo, base, head, DefaultRiskPatterns)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.ProductionLines <= MaxBundleLines {
+				t.Fatalf("production=%d, want over %d", c.ProductionLines, MaxBundleLines)
+			}
+			got := stopRules(Result{Stops: Evaluate(Result{Change: &c})})
+			if tc.stopped && got != string(RuleBundleOverLimit) {
+				t.Fatalf("fixes=%d stops=%q, want %s", c.FixCommits, got, RuleBundleOverLimit)
+			}
+			if !tc.stopped && got != "" {
+				t.Fatalf("fixes=%d stops=%q, want none", c.FixCommits, got)
+			}
+		})
+	}
+}
