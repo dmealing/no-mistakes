@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -47,6 +48,11 @@ func (t Tier) rank() int {
 	}
 }
 
+// A change's "production lines" are the lines of hand-written source: docs,
+// tests and fixtures, generated code, lockfiles and spec or registry JSON
+// never count (see generated.go). The size only decides which small fixes
+// pool together; a coherent change ships whole whatever it weighs.
+
 // SmallChangeLines is the production-line size at or under which a change
 // counts as small: it gets no pre-run review, and it should ride with a
 // sibling lane rather than take a validation run of its own.
@@ -74,6 +80,8 @@ var testPatterns = []string{
 	"*_test.go", "*_test.py", "test_*.py", "*/test_*.py",
 	"*.test.[jt]s", "*.test.[jt]sx", "*.spec.[jt]s", "*.spec.[jt]sx",
 	"*Test.java", "*Tests.java", "*IT.java", "*Test.kt", "*Tests.kt", "*_spec.rb",
+	// Fixtures are test data: they are never counted, never risk paths.
+	"fixtures/*", "*/fixtures/*", "testdata/*", "*/testdata/*",
 }
 
 // DefaultRiskPatterns are production paths where a small diff can still do
@@ -90,7 +98,7 @@ var DefaultRiskPatterns = []string{
 // IsDocs reports whether path is prose or agent configuration.
 func IsDocs(path string) bool { return matchAny(docsPatterns, path) }
 
-// IsTest reports whether path is test source.
+// IsTest reports whether path is test source or a test fixture.
 func IsTest(path string) bool { return matchAny(testPatterns, path) }
 
 // IsProduction reports whether path is neither docs nor test.
@@ -160,10 +168,16 @@ type Change struct {
 	ProductionFiles int
 	ProductionLines int
 	RiskPaths       []string
-	// RiskLines is the share of ProductionLines on RiskPaths.
+	// ExcludedFiles and ExcludedLines are the generated, lockfile and spec
+	// or registry JSON files kept out of ProductionFiles and ProductionLines.
+	ExcludedFiles int
+	ExcludedLines int
+	// RiskLines is the share of ProductionLines on RiskPaths. A risk path
+	// whose lines are excluded still lands in RiskPaths (it keeps the strong
+	// review) but adds nothing here.
 	RiskLines int
-	// FixCommits counts the non-merge commits of base..head whose subject
-	// starts with "fix" (any case): a bundle of fixes, not one feature.
+	// FixCommits counts the non-merge commits of base..head that isPoolFix
+	// reads as a separate fix: a bundle of fixes, not one feature.
 	FixCommits int
 	Tier       Tier
 }
@@ -194,6 +208,35 @@ func ReadPatternFile(path string) ([]string, error) {
 	return out, sc.Err()
 }
 
+// reviewFollowUp is the rest of a fix subject, after "fix", an optional
+// "(scope)", "!" and ":", that answers review on the same change: "Fix review
+// comments", "fix: address PR feedback", "fix: the code review findings".
+var reviewFollowUp = regexp.MustCompile(`^(address(es|ed|ing)?\s+)?(the\s+)?(code\s+)?(review|pr)\s+(comments?|feedback|findings|nits)\b`)
+
+var fixPrefix = regexp.MustCompile(`^fix(es|ed)?(\([^)]*\))?!?:?\s*`)
+
+// isPoolFix reports whether a commit subject reads as one separate fix of a
+// pool rather than part of one change. It is a subject that starts with "fix"
+// (any case), except a git autosquash commit ("fixup! ", "squash! ",
+// "amend! ") and a fix subject that answers review comments or feedback
+// (reviewFollowUp). The pipeline's own fix-round commits use the
+// commit.fix_message subject, by default "no-mistakes(<step>): ...", so they
+// never start with "fix"; a custom commit.fix_message that does start with
+// "fix" counts its commits.
+func isPoolFix(subject string) bool {
+	s := strings.ToLower(strings.TrimSpace(subject))
+	for _, autosquash := range []string{"fixup!", "squash!", "amend!"} {
+		if strings.HasPrefix(s, autosquash) {
+			return false
+		}
+	}
+	prefix := fixPrefix.FindString(s)
+	if prefix == "" {
+		return false
+	}
+	return !reviewFollowUp.MatchString(s[len(prefix):])
+}
+
 // RiskPatterns returns the default risk globs plus the repository's own
 // .nm-triage-risk list.
 func RiskPatterns(repoRoot string) ([]string, error) {
@@ -207,10 +250,20 @@ func RiskPatterns(repoRoot string) ([]string, error) {
 // DiffChange classifies base..head in the repository at dir.
 func DiffChange(ctx context.Context, dir, base, head string, risk []string) (Change, error) {
 	c := Change{Base: base}
+	gen, err := newGeneratedDetector(ctx, dir, base, head)
+	if err != nil {
+		return c, fmt.Errorf("read %s: %w", GeneratedOverrideFile, err)
+	}
 	out, _, err := gitOutput(ctx, dir, nil, "-c", "core.quotePath=false", "diff", "--no-renames", "--no-ext-diff", "--numstat", "-z", base+".."+head)
 	if err != nil {
 		return c, err
 	}
+	type numstat struct {
+		path  string
+		lines int
+	}
+	var production []numstat
+	var productionPaths []string
 	for _, rec := range strings.Split(out, "\x00") {
 		if rec == "" {
 			continue
@@ -224,16 +277,31 @@ func DiffChange(ctx context.Context, dir, base, head string, risk []string) (Cha
 		if !IsProduction(path) {
 			continue
 		}
-		c.ProductionFiles++
 		n := 0
 		if parts[0] != "-" {
 			added, _ := strconv.Atoi(parts[0])
 			deleted, _ := strconv.Atoi(parts[1])
 			n = added + deleted
 		}
-		c.ProductionLines += n
-		if matchAny(risk, path) {
-			c.RiskPaths = append(c.RiskPaths, path)
+		production = append(production, numstat{path, n})
+		productionPaths = append(productionPaths, path)
+	}
+	excluded, err := gen.Excluded(productionPaths)
+	if err != nil {
+		return c, err
+	}
+	for _, f := range production {
+		n := f.lines
+		if excluded[f.path] {
+			c.ExcludedFiles++
+			c.ExcludedLines += n
+			n = 0
+		} else {
+			c.ProductionFiles++
+			c.ProductionLines += n
+		}
+		if matchAny(risk, f.path) {
+			c.RiskPaths = append(c.RiskPaths, f.path)
 			c.RiskLines += n
 		}
 	}
@@ -246,7 +314,7 @@ func DiffChange(ctx context.Context, dir, base, head string, risk []string) (Cha
 		return c, err
 	}
 	for _, subject := range strings.Split(log, "\n") {
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(subject)), "fix") {
+		if isPoolFix(subject) {
 			c.FixCommits++
 		}
 	}

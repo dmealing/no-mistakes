@@ -57,12 +57,14 @@ func TestNotes(t *testing.T) {
 		want   string
 		detail string
 	}{
-		{"risk path is the minor part of a small change", Change{ProductionLines: 120, RiskPaths: []string{"go.mod"}, RiskLines: 4}, string(NoteRiskPathInSmallChange),
-			"4 lines on a risk path move all 120 lines to the strong review: ship the risk-path part with other strong-review work, or alone."},
+		{"risk path is the minor part of a small change", Change{ProductionLines: 120, RiskPaths: []string{"go.mod"}, RiskLines: 4, FixCommits: 2}, string(NoteRiskPathInSmallChange),
+			"4 lines on a risk path move all 120 lines of this pool of 2 separate fixes to the strong review: pool the risk-path fix with other strong-review work."},
+		{"one coherent change with a small risk-path part gets no note", Change{ProductionLines: 120, RiskPaths: []string{"go.mod"}, RiskLines: 4, FixCommits: 1}, "", ""},
+		{"a feature with a small risk-path part gets no note", Change{ProductionLines: 120, RiskPaths: []string{"go.mod"}, RiskLines: 4}, "", ""},
 		{"risk path is the change", Change{ProductionLines: 120, RiskPaths: []string{"auth.go"}, RiskLines: 60}, "", ""},
 		{"risk path in a large change", Change{ProductionLines: 301, RiskPaths: []string{"go.mod"}, RiskLines: 2}, "", ""},
 		{"fix bundle just over the cheap limit", Change{ProductionLines: 340, FixCommits: 2}, string(NoteJustOverCheapLimit),
-			"40 lines over the cheap-review limit: split into two bundles under 300, or move one fix out."},
+			"this pool of 2 separate fixes is 40 lines over the cheap-review limit: move a fix to another bundle to get under 300."},
 		{"top of the band", Change{ProductionLines: 450, FixCommits: 5}, string(NoteJustOverCheapLimit), ""},
 		{"past the band", Change{ProductionLines: 451, FixCommits: 5}, "", ""},
 		{"one fix just over", Change{ProductionLines: 340, FixCommits: 1}, "", ""},
@@ -110,7 +112,7 @@ func TestEvaluate_BundleOverLimit(t *testing.T) {
 			if got := stopRules(res); got != string(RuleBundleOverLimit) {
 				t.Fatalf("stops = %q, want only %s", got, RuleBundleOverLimit)
 			}
-			want := "fix bundle of 1,240 production lines: bundles over 1,000 cost 1.7 times a single change that size and 22% needed a third run; split by module"
+			want := "pool of 3 separate fixes, 1,240 production lines: pools over 1,000 cost 1.7 times a single change that size and 22% needed a third run; move a fix to another bundle"
 			if res.Stops[0].Detail != want {
 				t.Fatalf("detail =\n  %q\nwant\n  %q", res.Stops[0].Detail, want)
 			}
@@ -141,5 +143,82 @@ func TestDiffChange_CountsRiskLinesAndFixCommits(t *testing.T) {
 	}
 	if got := noteRules(Notes(Result{Change: &c})); got != string(NoteRiskPathInSmallChange) {
 		t.Fatalf("notes = %q, want %s", got, NoteRiskPathInSmallChange)
+	}
+}
+
+// No advice may tell anyone to split or trim one coherent change to fit a
+// size: the notes and the stop speak only about pools of separate fixes.
+func TestAdviceNeverSuggestsSplittingOneChange(t *testing.T) {
+	for _, c := range []Change{
+		{ProductionLines: 120, RiskPaths: []string{"go.mod"}, RiskLines: 4, FixCommits: 2},
+		{ProductionLines: 340, FixCommits: 3},
+		{ProductionLines: 1240, FixCommits: 3},
+	} {
+		c := c
+		res := Result{Change: &c}
+		res.Stops = Evaluate(res)
+		var texts []string
+		for _, n := range Notes(res) {
+			texts = append(texts, n.Detail)
+		}
+		for _, s := range res.Stops {
+			texts = append(texts, s.Detail)
+		}
+		if len(texts) == 0 {
+			t.Fatalf("%+v produced no advice to check", c)
+		}
+		for _, text := range texts {
+			for _, bad := range []string{"split", "trim", "alone", "by module"} {
+				if strings.Contains(text, bad) {
+					t.Errorf("advice %q contains %q", text, bad)
+				}
+			}
+			if !strings.Contains(text, "separate fixes") {
+				t.Errorf("advice %q does not name a pool of separate fixes", text)
+			}
+		}
+	}
+}
+
+// The bundle-over-limit stop reads a pool of separate fixes from commit
+// subjects, so commits that are part of one change must not be counted:
+// autosquash commits (git's own "fixup! "/"squash! "/"amend! " prefixes), the
+// pipeline's fix rounds (default subject "no-mistakes(<step>): ..."), and
+// review follow-ups.
+func TestDiffChange_OneChangeWithFollowUpCommitsIsNotAPool(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		subjects []string
+		stopped  bool
+	}{
+		{"autosquash commits", []string{"fixup! feat: add the widget", "fixup! feat: add the widget", "fixup! feat: add the widget"}, false},
+		{"other autosquash commits", []string{"squash! fix: nil check", "amend! fix: nil check", "squash! fix: wrap errors"}, false},
+		{"pipeline fix rounds", []string{"no-mistakes(review): fix the nil check", "no-mistakes(test): fix flaky widget test", "no-mistakes(review): fix error wrapping"}, false},
+		{"review follow-ups", []string{"Fix review comments", "fix: address PR feedback", "fix(widget): the code review findings"}, false},
+		{"a real pool of fixes", []string{"fix: nil check in parser", "fix(widget): wrap errors", "Fix review step drops findings"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := t.TempDir()
+			git(t, repo, "init", "-q", "-b", "main")
+			base := commit(t, repo, "base", map[string]string{"main.go": "package x\n"})
+			head := commit(t, repo, "feat: add the widget", map[string]string{"widget.go": lines(1200, "// w")})
+			for i, s := range tc.subjects {
+				head = commit(t, repo, s, map[string]string{"widget.go": lines(1200-i-1, "// w")})
+			}
+			c, err := DiffChange(context.Background(), repo, base, head, DefaultRiskPatterns)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.ProductionLines <= MaxBundleLines {
+				t.Fatalf("production=%d, want over %d", c.ProductionLines, MaxBundleLines)
+			}
+			got := stopRules(Result{Stops: Evaluate(Result{Change: &c})})
+			if tc.stopped && got != string(RuleBundleOverLimit) {
+				t.Fatalf("fixes=%d stops=%q, want %s", c.FixCommits, got, RuleBundleOverLimit)
+			}
+			if !tc.stopped && got != "" {
+				t.Fatalf("fixes=%d stops=%q, want none", c.FixCommits, got)
+			}
+		})
 	}
 }

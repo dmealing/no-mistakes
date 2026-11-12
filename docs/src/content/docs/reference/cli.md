@@ -213,8 +213,8 @@ Before it starts a NEW run (never when it reattaches), `axi run` applies the rul
 | `hold` | `<NM_HOME>/hold` exists (an install is waiting for runs to leave their steps). Cannot be overridden; the daemon refuses the run too. |
 | `in-validation-conflict` | The branch's head cannot merge cleanly with the head of another branch of the same project that is in validation now. |
 | `third-branch` | Two other branches of the same project are already in validation. |
-| `small-change-with-sibling` | The change has 300 production lines or fewer (tests and docs do not count) while another branch of the project is in validation: it should ride with that lane. |
-| `bundle-over-limit` | The change has more than 1,000 production lines and three or more non-merge commits whose subject starts with `fix` (any case): a bundle of fixes that size costs about 1.7 times a single change of the same size and needed a third run far more often, so split it by module. A large single feature, with fewer than three `fix` commits, is not stopped. |
+| `small-change-with-sibling` | The change has 300 production lines or fewer ([what counts](#production-lines)) while another branch of the project is in validation: it should ride with that lane. |
+| `bundle-over-limit` | The change has more than 1,000 production lines and three or more separate fix commits (see below): a pool of separate fixes that size costs about 1.7 times a single change of the same size and needed a third run far more often, so move a fix to another bundle. A coherent change, with fewer than three separate fix commits, is never stopped for its size: it ships whole. |
 
 A branch is in validation while its run is pending or running, parked at a gate or not. The same project means the same upstream URL (SSH and HTTPS spellings match), across every checkout registered with the daemon. A fact that cannot be read (a lane's commit missing from both this checkout and its gate, an unreadable database) never stops the run; it is reported as unchecked.
 The output names each stop and what to do instead. `--triage-override "<reason>"` starts the run anyway over every stop except the hold; the reason is required, shown in the run's output, and appended with the branch, head, run ID, and overridden rules to `<NM_HOME>/triage-overrides.ndjson`. A started run's output also carries the bundling facts: the tier, the `review` class line, the production-line count, the other branches of the project in validation, and any bundle-shape `notes`.
@@ -321,9 +321,9 @@ no-mistakes axi triage --post-merge [--gated SHA]
 
 The change's tier is its strictest changed file: `DOCS` (prose and agent configuration only: run with `--skip test,lint,document`), `TEST` (tests, plus docs: `--skip document`), `CODE` (anything else: a full run), or `RISK` (a code file on a risk path such as migrations, auth, crypto, payments, build manifests, workflows or deploy config: a full run and an independent review first). A repository adds risk globs, one per line, in `.nm-triage-risk`; its own `scripts/nm-triage.sh`, when present, decides the tier instead, for both `axi triage` and the `axi run` pre-run check (a risk path still lifts it to `RISK`; not consulted with `--base`). When that script fails, times out, or prints no `TIER:` line, a one-line `repo_script` note says so and the built-in tier is used.
 
-The output is TOON: the tier, the review class, and the production-line count, the run command, the pre-run review advice, the bundling facts (the other branches of the project in validation and whether the change is small), conflicts, and a `verdict` of `go` or `stop` with the rules of the [pre-run check](#pre-run-check) that `axi run` applies. It exits 3 on `stop`. As advice that never stops a run, it also test-merges the branch with its base and with every other open, non-draft GitHub pull request of the repository. Test merges write nothing to any repository.
+The output is TOON: the tier, the review class, and the production-line and excluded-line counts, the run command, the pre-run review advice, the bundling facts (the other branches of the project in validation and whether the change is small), conflicts, and a `verdict` of `go` or `stop` with the rules of the [pre-run check](#pre-run-check) that `axi run` applies. It exits 3 on `stop`. As advice that never stops a run, it also test-merges the branch with its base and with every other open, non-draft GitHub pull request of the repository. Test merges write nothing to any repository.
 
-The `review` line says which first review the change gets, and how much room is left before the next bundle limit (production lines only; tests and docs do not count):
+The `review` line says which first review the change gets, and how much room is left before the next bundle limit ([production lines](#production-lines) only):
 
 - `cheap - 212 of 300 production lines, no risk path; room for 88 more`: 300 production lines or fewer and no risk path.
 - `cheap - TEST tier; 450 production lines`: a `DOCS` or `TEST` tier is always cheap, whatever its line count (a repository script can set the tier).
@@ -337,8 +337,20 @@ The first word is the class (`cheap` or `strong`); an agent wrapper that routes 
 
 | Note | When |
 | ---- | ---- |
-| `risk-path-in-small-change` | 300 production lines or fewer, at least one risk path, and the risk-path files carry less than half of the production lines: "N lines on a risk path move all M lines to the strong review: ship the risk-path part with other strong-review work, or alone." |
-| `just-over-cheap-limit` | No risk path, 301 to 450 production lines, and two or more commits whose subject starts with `fix`: "N lines over the cheap-review limit: split into two bundles under 300, or move one fix out." |
+| `risk-path-in-small-change` | A pool of two or more separate fix commits, 300 production lines or fewer, at least one risk path, and the risk-path files carry less than half of the production lines: "N lines on a risk path move all M lines of this pool of K separate fixes to the strong review: pool the risk-path fix with other strong-review work." |
+| `just-over-cheap-limit` | No risk path, 301 to 450 production lines, and two or more separate fix commits: "this pool of K separate fixes is N lines over the cheap-review limit: move a fix to another bundle to get under 300." |
+
+Both notes, and the `bundle-over-limit` stop, describe pools of separate fixes only. A separate fix commit is a non-merge commit whose subject starts with `fix` (any case), except a `git commit --fixup`/`--squash` autosquash commit (`fixup! `, `squash! `, `amend! `) and a fix that answers review on the same change: after `fix`, an optional `(scope)`, `!` and `:`, a subject such as `review comments`, `address PR feedback` or `the code review findings` (an optional `address`, `the` and `code`, then `review` or `PR`, then `comments`, `feedback`, `findings` or `nits`). Other review follow-ups, such as `fix: typo the reviewer spotted`, still count. The pipeline's own fix-round commits use the `commit.fix_message` subject, by default `no-mistakes(<step>): ...`, so they never count; a custom `commit.fix_message` that starts with `fix` makes them count. Sizes decide which small fixes pool together; one coherent change ships whole, in one pull request and one run, and no advice asks for it to be split or trimmed.
+
+#### Production lines
+
+The size counts hand-written source only. These never count toward the `review` class, the notes, or the stops:
+
+- docs and tests (`*_test.go`, `test/`, `e2e/`, and so on), and fixtures: any file under a `fixtures/` or `testdata/` directory, which is treated as test data (never a risk path);
+- generated code, found by evidence: a lockfile name (`go.sum`, `package-lock.json`, `yarn.lock`, `Cargo.lock`, and similar), a generator header on a comment line in the first 20 lines and first 64 KiB (in a Go file, a line that is exactly `// Code generated ... DO NOT EDIT.`; in any other file, a line opening with a comment token, `//`, `#`, `/*`, `*`, `--` or `<!--`, then `Code generated ... DO NOT EDIT` or `@generated`; a marker named in prose or a string literal does not count), a `linguist-generated` entry in the root `.gitattributes` (a `-linguist-generated` entry re-includes a file), or a glob in `.nm-triage-generated`, one per line, in the repository root (same style as `.nm-triage-risk`);
+- spec or registry JSON: `*.json` under a `spec/`, `specs/`, `registry/`, `schema/` or `schemas/` directory. Other JSON counts; add anything else to `.nm-triage-generated`.
+
+A generated or JSON file on a risk path still makes the review strong, but its lines do not count. The `excluded_lines` field reports what was left out.
 
 `--post-merge` isolates the hand resolution of the merge's conflicts (`git show --remerge-diff`): a clean merge, or one that resolved only docs and test files, needs the repository's local test suite instead of a new run; one that resolved production files, or a `HEAD` that is not one merge of the base on top of the validated head, needs a new run. `.nm-triage-nonprod` adds globs that count as non-production there.
 
