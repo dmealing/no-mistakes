@@ -228,7 +228,9 @@ func reclaimPoolSpace(ctx context.Context, poolPath string) error {
 // case missing any one pin cannot be restored, so all of that case's pins are
 // released rather than leaving the rest to keep dead objects alive.
 //
-// Callers hold the corpus lock, which makes them the pool's only writer.
+// Callers hold the corpus lock, which makes them the only writer except for a
+// detached gc a previous call started, so only files named like loose objects
+// are touched and Git's in-flight temporary files are left alone.
 //
 // The same shutdown can leave a zero-byte loose object, which fails every
 // fetch that needs that object and every gc even once no ref names it, so
@@ -318,6 +320,9 @@ func removeEmptyLooseObjects(pool string) (bool, error) {
 	}
 	removed := false
 	for _, path := range paths {
+		if !isLooseObjectName(filepath.Base(path)) {
+			continue
+		}
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() || info.Size() != 0 {
 			continue
@@ -328,6 +333,20 @@ func removeEmptyLooseObjects(pool string) (bool, error) {
 		removed = true
 	}
 	return removed, nil
+}
+
+// isLooseObjectName reports whether name is the 38 (SHA-1) or 62 (SHA-256)
+// hex characters that follow the two-character directory of a loose object.
+func isLooseObjectName(name string) bool {
+	if len(name) != 38 && len(name) != 62 {
+		return false
+	}
+	for _, c := range name {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // looseCaseRefs maps each loose ref file under the case namespace to its path.

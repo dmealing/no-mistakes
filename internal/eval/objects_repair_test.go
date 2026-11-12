@@ -226,6 +226,38 @@ func TestCaptureRecoversFromEmptyLooseObject(t *testing.T) {
 	assertPoolRepacks(t, ctx, pool)
 }
 
+// TestRepairLeavesGitTemporaryObjectFilesAlone pins that only files named like
+// loose objects are removed: Git's in-flight tmp_obj_* files are empty until
+// their first write, and a detached gc may still own one.
+func TestRepairLeavesGitTemporaryObjectFilesAlone(t *testing.T) {
+	ctx := context.Background()
+	pool := filepath.Join(t.TempDir(), "pool.git")
+	if err := initializeObjectPool(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(pool, "objects", "ab")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(dir, "tmp_obj_Xk39sd")
+	empty := filepath.Join(dir, strings.Repeat("c", 38))
+	for _, path := range []string{tmp, empty} {
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := repairObjectPool(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(tmp); err != nil {
+		t.Fatalf("in-flight temporary object file was removed: %v", err)
+	}
+	if _, err := os.Stat(empty); !os.IsNotExist(err) {
+		t.Fatalf("empty loose object file survived the repair: %v", err)
+	}
+}
+
 // TestMissingObjectsReportsACorruptLooseObject pins that a pin naming an
 // unreadable loose object counts as damaged: a plain existence check reports
 // a corrupt loose object as present.
