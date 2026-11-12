@@ -289,6 +289,46 @@ func TestCaptureDropsCaseWithEmptyLooseTreeBelowItsPin(t *testing.T) {
 	assertPoolRepacks(t, ctx, pool)
 }
 
+// TestRepairKeepsCaseWhenHistoryWalkFails pins that a history walk which fails
+// without naming a missing object fails the repair instead of releasing the
+// case: such a failure says nothing about whether the case is replayable.
+func TestRepairKeepsCaseWhenHistoryWalkFails(t *testing.T) {
+	ctx := context.Background()
+	pool := filepath.Join(t.TempDir(), "pool.git")
+	if err := initializeObjectPool(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	blob := mustGitInput(t, ctx, pool, "content\n", "hash-object", "-w", "--stdin")
+	tree := mustGitInput(t, ctx, pool, "100644 blob "+blob+"\tfile.txt\n", "mktree")
+	commit := strings.TrimSpace(mustGit(t, ctx, pool, "-c", "user.name=eval", "-c", "user.email=eval@example.test", "commit-tree", tree, "-m", "pinned"))
+	const caseID = "01UNWALKABLEHISTORY000000-01UNWALKABLEHISTORY000001"
+	for _, name := range caseRefNames() {
+		mustGit(t, ctx, pool, "update-ref", caseRefPrefix(caseID)+name, commit)
+	}
+	treeFile := filepath.Join(pool, "objects", tree[:2], tree[2:])
+	if err := os.Chmod(treeFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(treeFile, []byte("not a zlib stream"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(pool, "objects", "ab")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, strings.Repeat("c", 38)), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repairObjectPool(ctx, pool); err == nil {
+		t.Fatal("repair succeeded although the pinned history could not be walked")
+	}
+	refs := mustGit(t, ctx, pool, "for-each-ref", "--format=%(refname)", caseRefNamespace)
+	if got := len(strings.Fields(refs)); got != len(caseRefNames()) {
+		t.Fatalf("case pins after a failed walk = %d, want %d: %s", got, len(caseRefNames()), refs)
+	}
+}
+
 // TestRepairLeavesGitTemporaryObjectFilesAlone pins that only files named like
 // loose objects are removed: Git's in-flight tmp_obj_* files are empty until
 // their first write, and a detached gc may still own one.

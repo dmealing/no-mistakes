@@ -319,33 +319,52 @@ func repairObjectPool(ctx context.Context, pool string) error {
 }
 
 // markIncompleteHistories marks every case not already damaged whose pinned
-// history lacks an object or cannot be walked. A repack walks the same
-// history, so it fails on such a case just as on a missing pin, and a fetch
-// stops at the existing pins and never re-sends what is gone.
+// history lacks an object. A repack walks the same history, so it fails on
+// such a case just as on a missing pin, and a fetch stops at the existing pins
+// and never re-sends what is gone. Cases share most of their history, so one
+// walk over every pin settles the usual outcome, where nothing is missing; only
+// a hit pays for a walk per case to find which cases lost the object.
 func markIncompleteHistories(ctx context.Context, pool string, readable map[string]string, damaged map[string]bool) error {
 	tips := map[string][]string{}
+	var all []string
 	for ref, oid := range readable {
 		if id := caseIDOfRef(ref); !damaged[id] {
 			tips[id] = append(tips[id], oid)
+			all = append(all, oid)
 		}
 	}
+	if len(all) == 0 {
+		return nil
+	}
+	if incomplete, err := historyIncomplete(ctx, pool, all); err != nil || !incomplete {
+		return err
+	}
 	for id, oids := range tips {
-		out, err := git.Run(ctx, pool, append([]string{"rev-list", "--objects", "--missing=print"}, oids...)...)
+		incomplete, err := historyIncomplete(ctx, pool, oids)
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			damaged[id] = true
-			continue
+			return err
 		}
-		for _, line := range strings.Split(out, "\n") {
-			if strings.HasPrefix(line, "?") {
-				damaged[id] = true
-				break
-			}
+		if incomplete {
+			damaged[id] = true
 		}
 	}
 	return nil
+}
+
+// historyIncomplete reports whether any object reachable from oids is missing.
+// A walk that fails without naming a missing object proves nothing about the
+// history, so it is an error rather than a reason to release a case.
+func historyIncomplete(ctx context.Context, pool string, oids []string) (bool, error) {
+	out, err := git.Run(ctx, pool, append([]string{"rev-list", "--objects", "--missing=print"}, oids...)...)
+	if err != nil {
+		return false, fmt.Errorf("walk eval pool pin history: %w", err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "?") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // removeEmptyLooseObjects deletes zero-byte files from the pool's loose object
