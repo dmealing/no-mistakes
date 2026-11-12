@@ -3,8 +3,10 @@
 // command and the pre-run review, and applies the fleet rules that decide
 // whether a NEW run may start at all: a hold on new runs (an install in
 // progress), a conflict with a branch already in validation, a third branch of
-// the same project in validation, and a small change that has a sibling lane
-// to ride with.
+// the same project in validation, a small change that has a sibling lane to
+// ride with, and a bundle of fixes over the bundle limit. It also says which
+// first review the change gets (ReviewFor) and gives bundle-shape notes that
+// never stop a run.
 //
 // Everything here is deterministic and path-based on purpose: the decisions
 // that matter are properties of the changed paths, the run database, and git,
@@ -49,6 +51,14 @@ func (t Tier) rank() int {
 // counts as small: it gets no pre-run review, and it should ride with a
 // sibling lane rather than take a validation run of its own.
 const SmallChangeLines = 300
+
+// StrongBundleLines is the production-line size a strong-review bundle should
+// stay at or under: past it a bundle costs more than the work it pools saves.
+const StrongBundleLines = 600
+
+// MaxBundleLines is the bundle limit: fix bundles over it cost about 1.7 times
+// a single change that size and needed a third run three times as often.
+const MaxBundleLines = 1000
 
 // MaxOtherBranchesInValidation is how many OTHER branches of one project may be in
 // validation when a new one starts; the next would be the third.
@@ -150,7 +160,12 @@ type Change struct {
 	ProductionFiles int
 	ProductionLines int
 	RiskPaths       []string
-	Tier            Tier
+	// RiskLines is the share of ProductionLines on RiskPaths.
+	RiskLines int
+	// FixCommits counts the non-merge commits of base..head whose subject
+	// starts with "fix" (any case): a bundle of fixes, not one feature.
+	FixCommits int
+	Tier       Tier
 }
 
 // Small reports whether the change is small enough to ride with a sibling.
@@ -210,18 +225,30 @@ func DiffChange(ctx context.Context, dir, base, head string, risk []string) (Cha
 			continue
 		}
 		c.ProductionFiles++
+		n := 0
 		if parts[0] != "-" {
 			added, _ := strconv.Atoi(parts[0])
 			deleted, _ := strconv.Atoi(parts[1])
-			c.ProductionLines += added + deleted
+			n = added + deleted
 		}
+		c.ProductionLines += n
 		if matchAny(risk, path) {
 			c.RiskPaths = append(c.RiskPaths, path)
+			c.RiskLines += n
 		}
 	}
 	c.Tier = Classify(c.Files, risk)
 	if len(c.RiskPaths) > 0 {
 		c.Tier = TierRisk
+	}
+	log, _, err := gitOutput(ctx, dir, nil, "log", "--no-merges", "--format=%s", base+".."+head)
+	if err != nil {
+		return c, err
+	}
+	for _, subject := range strings.Split(log, "\n") {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(subject)), "fix") {
+			c.FixCommits++
+		}
 	}
 	return c, nil
 }

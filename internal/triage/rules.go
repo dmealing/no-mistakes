@@ -29,7 +29,40 @@ const (
 	// RuleSmallWithSibling: a small change while a sibling branch of the
 	// project is in validation - it should ride with a sibling lane.
 	RuleSmallWithSibling Rule = "small-change-with-sibling"
+	// RuleBundleOverLimit: a bundle of fixes over MaxBundleLines production
+	// lines. A large single feature (fewer fix commits) is not stopped.
+	RuleBundleOverLimit Rule = "bundle-over-limit"
 )
+
+// Bundle-shape thresholds. A note never stops a run; only bundle-over-limit
+// does.
+const (
+	// justOverCheapLines is the top of the "just over the cheap limit" band.
+	justOverCheapLines = 450
+	// fixCommitsForNote and fixCommitsForStop are how many commits whose
+	// subject starts with "fix" make a change a bundle of fixes.
+	fixCommitsForNote = 2
+	fixCommitsForStop = 3
+)
+
+// NoteRule names advice about a change's bundle shape. It never stops a run
+// and never changes an exit code.
+type NoteRule string
+
+const (
+	// NoteRiskPathInSmallChange: a small change whose minor part sits on a
+	// risk path, which moves all of it to the strong review.
+	NoteRiskPathInSmallChange NoteRule = "risk-path-in-small-change"
+	// NoteJustOverCheapLimit: a bundle of fixes just over the cheap-review
+	// limit, which two bundles under it would each stay within.
+	NoteJustOverCheapLimit NoteRule = "just-over-cheap-limit"
+)
+
+// Note is one piece of bundle-shape advice.
+type Note struct {
+	Rule   NoteRule
+	Detail string
+}
 
 // Stop is one rule that stops the run.
 type Stop struct {
@@ -70,6 +103,7 @@ type Result struct {
 	Unchecked    []string
 	ConflictsErr error
 	Stops        []Stop
+	Notes        []Note
 }
 
 // Overridable reports whether every stop may be overridden with a reason.
@@ -124,6 +158,7 @@ func Check(ctx context.Context, in Input) Result {
 		}
 	}
 	res.Stops = Evaluate(res)
+	res.Notes = Notes(res)
 	return res
 }
 
@@ -145,7 +180,27 @@ func Evaluate(res Result) []Stop {
 	if res.Change != nil && res.Change.Small() && len(res.Lanes) > 0 {
 		stops = append(stops, Stop{Rule: RuleSmallWithSibling, Detail: fmt.Sprintf("small change (%d production lines, %d or fewer) while %s of this project is in validation: ride with a sibling lane instead of a run of its own", res.Change.ProductionLines, SmallChangeLines, laneNames(res.Lanes))})
 	}
+	if c := res.Change; c != nil && c.ProductionLines > MaxBundleLines && c.FixCommits >= fixCommitsForStop {
+		stops = append(stops, Stop{Rule: RuleBundleOverLimit, Detail: fmt.Sprintf("fix bundle of %s production lines: bundles over %s cost 1.7 times a single change that size and 22%% needed a third run; split by module", groupDigits(c.ProductionLines), groupDigits(MaxBundleLines))})
+	}
 	return stops
+}
+
+// Notes applies the bundle-shape advice to gathered facts. Notes never stop a
+// run.
+func Notes(res Result) []Note {
+	c := res.Change
+	if c == nil {
+		return nil
+	}
+	var notes []Note
+	if c.ProductionLines <= SmallChangeLines && len(c.RiskPaths) > 0 && 2*c.RiskLines < c.ProductionLines {
+		notes = append(notes, Note{Rule: NoteRiskPathInSmallChange, Detail: fmt.Sprintf("%d lines on a risk path move all %d lines to the strong review: ship the risk-path part with other strong-review work, or alone.", c.RiskLines, c.ProductionLines)})
+	}
+	if len(c.RiskPaths) == 0 && c.ProductionLines > SmallChangeLines && c.ProductionLines <= justOverCheapLines && c.FixCommits >= fixCommitsForNote {
+		notes = append(notes, Note{Rule: NoteJustOverCheapLimit, Detail: fmt.Sprintf("%d lines over the cheap-review limit: split into two bundles under %d, or move one fix out.", c.ProductionLines-SmallChangeLines, SmallChangeLines)})
+	}
+	return notes
 }
 
 func laneNames(lanes []Lane) string {
