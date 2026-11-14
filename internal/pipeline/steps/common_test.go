@@ -1060,6 +1060,50 @@ func TestStepCmd_AppliesRunForgeEnvironmentAfterInjectedEnvironment(t *testing.T
 	}
 }
 
+// TestStepCmd_AppliesRunEnvironmentUnderTheForgeEnvironment covers the
+// package-manager stores the daemon picks per run: every step subprocess gets
+// them, including one run with no injected or forge environment at all, and a
+// forge profile's value for the same key still wins.
+func TestStepCmd_AppliesRunEnvironmentUnderTheForgeEnvironment(t *testing.T) {
+	t.Parallel()
+	stores := runenv.Overlay{Set: map[string]string{
+		"npm_config_store_dir":  "/nm/package-stores/pnpm",
+		"BUN_INSTALL_CACHE_DIR": "/nm/package-stores/bun",
+	}}
+	envOf := func(sctx *pipeline.StepContext) map[string]string {
+		values := make(map[string]string)
+		for _, entry := range stepCmd(sctx, filepath.Join(string(filepath.Separator), "usr", "bin", "env")).Env {
+			if key, value, ok := strings.Cut(entry, "="); ok {
+				values[key] = value
+			}
+		}
+		return values
+	}
+
+	plain := envOf(&pipeline.StepContext{Ctx: context.Background(), WorkDir: t.TempDir(), RunEnvironment: stores})
+	if plain["npm_config_store_dir"] != "/nm/package-stores/pnpm" || plain["BUN_INSTALL_CACHE_DIR"] != "/nm/package-stores/bun" {
+		t.Fatalf("step env lacks the run's package stores: pnpm=%q bun=%q", plain["npm_config_store_dir"], plain["BUN_INSTALL_CACHE_DIR"])
+	}
+	if plain["PATH"] == "" {
+		t.Fatal("applying the run environment dropped the inherited environment")
+	}
+
+	forged := envOf(&pipeline.StepContext{
+		Ctx:            context.Background(),
+		WorkDir:        t.TempDir(),
+		RunEnvironment: stores,
+		ForgeContext: &forgecontext.Context{Environment: runenv.Overlay{
+			Set: map[string]string{"BUN_INSTALL_CACHE_DIR": "/profile/bun"},
+		}},
+	})
+	if forged["BUN_INSTALL_CACHE_DIR"] != "/profile/bun" {
+		t.Fatalf("BUN_INSTALL_CACHE_DIR = %q, want the forge profile's value", forged["BUN_INSTALL_CACHE_DIR"])
+	}
+	if forged["npm_config_store_dir"] != "/nm/package-stores/pnpm" {
+		t.Fatalf("npm_config_store_dir = %q, want the run's store", forged["npm_config_store_dir"])
+	}
+}
+
 func TestStepCmdPreservesAmbientMultiAccountSelectionWithoutProfiles(t *testing.T) {
 	t.Parallel()
 	profileDir := t.TempDir()

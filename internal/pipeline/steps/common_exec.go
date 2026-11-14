@@ -183,6 +183,9 @@ func stepEnvironment(sctx *pipeline.StepContext) []string {
 	if len(sctx.Env) > 0 {
 		env = mergeEnv(sctx.Env)
 	}
+	if !sctx.RunEnvironment.Empty() {
+		env = sctx.RunEnvironment.Apply(env)
+	}
 	if sctx.ForgeContext != nil && !sctx.ForgeContext.Environment.Empty() {
 		env = sctx.ForgeContext.Environment.Apply(env)
 	}

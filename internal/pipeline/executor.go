@@ -24,6 +24,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/quotarouting"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/testslots"
@@ -91,6 +92,7 @@ type Executor struct {
 	paths  *paths.Paths
 	config *config.Config
 	forge  *forgecontext.Context
+	runEnv runenv.Overlay
 	agent  agent.Agent
 	steps  []Step
 	// skips maps each step marked skipped without running to its recorded
@@ -186,6 +188,12 @@ func (e *Executor) SetHandoffPending(fn func(runID string) bool) {
 // subprocess in this run. A nil context preserves ambient behavior.
 func (e *Executor) SetForgeContext(ctx *forgecontext.Context) {
 	e.forge = ctx
+}
+
+// SetRunEnvironment configures the run's own environment overlay for step
+// subprocesses (see StepContext.RunEnvironment).
+func (e *Executor) SetRunEnvironment(overlay runenv.Overlay) {
+	e.runEnv = overlay.Clone()
 }
 
 // SetSkippedSteps configures steps that should be marked skipped without running.
@@ -882,18 +890,19 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
 	}
 	reconcileCtx := &StepContext{
-		Ctx:          ctx,
-		Run:          run,
-		Repo:         repo,
-		WorkDir:      workDir,
-		GateDir:      e.paths.RepoDir(repo.ID),
-		Config:       e.config,
-		ForgeContext: e.forge,
-		DB:           e.db,
-		StepResultID: gate.stepResult.ID,
-		Agent:        e.agent,
-		Sessions:     e.sessions,
-		Shared:       e.shared,
+		Ctx:            ctx,
+		Run:            run,
+		Repo:           repo,
+		WorkDir:        workDir,
+		GateDir:        e.paths.RepoDir(repo.ID),
+		Config:         e.config,
+		ForgeContext:   e.forge,
+		RunEnvironment: e.runEnv,
+		DB:             e.db,
+		StepResultID:   gate.stepResult.ID,
+		Agent:          e.agent,
+		Sessions:       e.sessions,
+		Shared:         e.shared,
 		// The same value executeStep supplies. A reconciler or resumer that
 		// reads the run's evidence - ReviewStep.ResumeApprovalGate resolves the
 		// conversation directory from it - would otherwise decline on every tick
@@ -1565,6 +1574,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Agent:                stepAgent,
 		Config:               e.config,
 		ForgeContext:         e.forge,
+		RunEnvironment:       e.runEnv,
 		DB:                   e.db,
 		StepResultID:         sr.ID,
 		UserIntent:           userIntent,

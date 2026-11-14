@@ -174,6 +174,7 @@ type recoveredRunPlan struct {
 	agent   agent.Agent
 	steps   []pipeline.Step
 	forge   *forgecontext.Context
+	stores  runenv.Overlay
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
@@ -256,7 +257,8 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if quotaRecord == nil {
 		cfg.QuotaRouting.Enabled = false
 	}
-	ag, _, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx), quotaRecord)
+	stores := packageStoreEnvironment(m.paths, workDir)
+	ag, _, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, withPackageStores(forgeEnvironment(forgeCtx), stores), quotaRecord)
 	if err != nil {
 		return nil, err
 	}
@@ -275,6 +277,7 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		agent:   ag,
 		steps:   execSteps,
 		forge:   forgeCtx,
+		stores:  stores,
 	}, nil
 }
 
@@ -559,6 +562,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		}()
 	})
 	executor.SetForgeContext(plan.forge)
+	executor.SetRunEnvironment(plan.stores)
 	applyCIMode(executor, plan.cfg.CIMode)
 	done := make(chan struct{})
 	spawn := func() {
@@ -2007,7 +2011,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// wires review-role routing plus the trusted-opt-out gate-neutralization
 	// fail-closed check. The quota-aware record is fresh-read here (a nil
 	// input) and persisted beside the gates pin below.
-	ag, quotaRecord, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx), nil)
+	// Package-manager stores on the worktree's filesystem make every install
+	// of this run hardlinks instead of copies (see packageStoreEnvironment).
+	stores := packageStoreEnvironment(m.paths, wtDir)
+	ag, quotaRecord, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, withPackageStores(forgeEnvironment(forgeCtx), stores), nil)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("create_agent")
@@ -2052,6 +2059,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := m.newExecutor(cfg, ag, execSteps)
 	executor.SetForgeContext(forgeCtx)
+	executor.SetRunEnvironment(stores)
 	executor.SetSkippedSteps(skipSteps)
 	if retry != nil {
 		executor.SetRetrySource(retry.source.ID)
