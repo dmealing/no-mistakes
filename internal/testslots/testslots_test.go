@@ -2,6 +2,7 @@ package testslots
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -174,14 +175,24 @@ func TestCancelledWaitReportsItsLengthAndLeavesTheQueue(t *testing.T) {
 	const timeout = 50 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	lease, waited, err := p.Acquire(ctx, 1, "cancelled", nil)
+	deadline, _ := ctx.Deadline()
+	var queuedAt time.Time
+	called := time.Now()
+	lease, waited, err := p.Acquire(ctx, 1, "cancelled", func([]Holder, bool) {
+		if queuedAt.IsZero() {
+			queuedAt = time.Now()
+		}
+	})
 	if err != context.DeadlineExceeded || lease != nil {
 		t.Fatalf("lease %v, err %v, want no lease and deadline exceeded", lease, err)
 	}
 	// The caller subtracts the wait from its own clock, so a wait that ends
-	// without a slot must still report how long it lasted.
-	if waited < timeout {
-		t.Fatalf("waited = %v for a wait that lasted the whole %v timeout", waited, timeout)
+	// without a slot must still report how long it lasted. The timeout's
+	// clock started before Acquire did, so the exact bounds are: from no
+	// later than the first onWait call to the deadline, and no more than the
+	// whole call.
+	if minWait := deadline.Sub(queuedAt); waited < minWait || waited > time.Since(called) {
+		t.Fatalf("waited = %v, want between %v (queued to deadline) and the whole call", waited, minWait)
 	}
 
 	// The cancelled waiter is gone: the freed slot is free for the next caller.
@@ -273,4 +284,114 @@ func TestOnWaitNamesHoldersOnChangeAndHeartbeats(t *testing.T) {
 		}
 		return
 	}
+}
+
+type acquired struct {
+	lease *Lease
+	err   error
+}
+
+// enqueue is queue with a caller-owned context and the Acquire error kept, so
+// a test can cancel one waiter and see how its wait ended.
+func enqueue(t *testing.T, p *Pool, ctx context.Context, limit int, label string) <-chan acquired {
+	t.Helper()
+	queued := make(chan struct{})
+	var once sync.Once
+	got := make(chan acquired, 1)
+	go func() {
+		lease, _, err := p.Acquire(ctx, limit, label, func([]Holder, bool) {
+			once.Do(func() { close(queued) })
+		})
+		got <- acquired{lease, err}
+	}()
+	select {
+	case <-queued:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("waiter %s never queued", label)
+	}
+	return got
+}
+
+// queueState reads who holds a slot and who waits, in queue order, straight
+// from the pool, so an ordering test asserts the grant Release made rather
+// than racing the waiters' goroutines to observe it.
+func queueState(p *Pool) (holders, waiters []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, l := range p.holders {
+		holders = append(holders, l.holder.Label)
+	}
+	for _, w := range p.waiters {
+		waiters = append(waiters, w.label)
+	}
+	return holders, waiters
+}
+
+func requireQueueState(t *testing.T, p *Pool, wantHolders, wantWaiters []string) {
+	t.Helper()
+	holders, waiters := queueState(p)
+	if !slices.Equal(holders, wantHolders) || !slices.Equal(waiters, wantWaiters) {
+		t.Fatalf("holders %v, waiters %v; want holders %v, waiters %v", holders, waiters, wantHolders, wantWaiters)
+	}
+}
+
+// Slots go to waiters strictly in the order they started waiting, across
+// every caller the pool serves: a waiter that gives up in the middle of the
+// queue leaves it without holding or freeing a slot, the waiters behind it
+// keep their places, and a caller arriving after that queues at the back.
+// Each grant is read from the pool the moment Release returns, so the order
+// is proven by the pool's own state, not by goroutine timing.
+func TestSlotsGoToWaitersInTheOrderTheyStartedWaiting(t *testing.T) {
+	p := NewPool()
+	lease, _, err := p.Acquire(context.Background(), 1, "holder", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]<-chan acquired{}
+	cancelMiddle := func() {}
+	for _, label := range []string{"w1", "w2", "w3", "w4", "w5"} {
+		ctx := context.Background()
+		if label == "w3" {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithCancel(ctx)
+			defer cancel()
+			cancelMiddle = cancel
+		}
+		got[label] = enqueue(t, p, ctx, 1, label)
+	}
+	requireQueueState(t, p, []string{"holder"}, []string{"w1", "w2", "w3", "w4", "w5"})
+
+	cancelMiddle()
+	select {
+	case r := <-got["w3"]:
+		if r.lease != nil || r.err != context.Canceled {
+			t.Fatalf("cancelled waiter: lease %v, err %v; want no lease and canceled", r.lease, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled waiter never returned")
+	}
+	// It left the queue and took nothing with it: the slot is still held by
+	// the same holder, and nobody behind it moved up into a slot.
+	requireQueueState(t, p, []string{"holder"}, []string{"w1", "w2", "w4", "w5"})
+
+	got["w6"] = enqueue(t, p, context.Background(), 1, "w6")
+	requireQueueState(t, p, []string{"holder"}, []string{"w1", "w2", "w4", "w5", "w6"})
+
+	order := []string{"w1", "w2", "w4", "w5", "w6"}
+	for i, label := range order {
+		lease.Release()
+		requireQueueState(t, p, []string{label}, order[i+1:])
+		select {
+		case r := <-got[label]:
+			if r.err != nil || r.lease == nil {
+				t.Fatalf("waiter %s: lease %v, err %v", label, r.lease, r.err)
+			}
+			lease = r.lease
+		case <-time.After(5 * time.Second):
+			t.Fatalf("waiter %s was granted the slot but never returned", label)
+		}
+	}
+	lease.Release()
+	requireQueueState(t, p, nil, nil)
 }
