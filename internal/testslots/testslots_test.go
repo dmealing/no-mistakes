@@ -17,7 +17,7 @@ func queue(t *testing.T, p *Pool, limit int, label string) <-chan *Lease {
 	var once sync.Once
 	got := make(chan *Lease, 1)
 	go func() {
-		lease, _, err := p.Acquire(context.Background(), limit, label, func([]Holder, bool) {
+		lease, _, err := p.Acquire(context.Background(), limit, label, func(WaitState, bool) {
 			once.Do(func() { close(queued) })
 		})
 		if err != nil {
@@ -90,7 +90,7 @@ func TestPoolNeverAdmitsMoreThanTheLimit(t *testing.T) {
 func TestFreeSlotIsTakenAtOnceWithNoWait(t *testing.T) {
 	p := NewPool()
 	for _, label := range []string{"a", "b"} {
-		lease, waited, err := p.Acquire(context.Background(), 2, label, func([]Holder, bool) {
+		lease, waited, err := p.Acquire(context.Background(), 2, label, func(WaitState, bool) {
 			t.Errorf("%s: onWait called although a slot was free", label)
 		})
 		if err != nil || lease == nil || waited != 0 {
@@ -178,7 +178,7 @@ func TestCancelledWaitReportsItsLengthAndLeavesTheQueue(t *testing.T) {
 	deadline, _ := ctx.Deadline()
 	var queuedAt time.Time
 	called := time.Now()
-	lease, waited, err := p.Acquire(ctx, 1, "cancelled", func([]Holder, bool) {
+	lease, waited, err := p.Acquire(ctx, 1, "cancelled", func(WaitState, bool) {
 		if queuedAt.IsZero() {
 			queuedAt = time.Now()
 		}
@@ -215,7 +215,7 @@ func TestCancelledHeadWaiterDoesNotBlockTheNext(t *testing.T) {
 	var once sync.Once
 	headDone := make(chan error, 1)
 	go func() {
-		_, _, err := p.Acquire(ctx, 1, "head", func([]Holder, bool) { once.Do(func() { close(headQueued) }) })
+		_, _, err := p.Acquire(ctx, 1, "head", func(WaitState, bool) { once.Do(func() { close(headQueued) }) })
 		headDone <- err
 	}()
 	<-headQueued
@@ -230,8 +230,9 @@ func TestCancelledHeadWaiterDoesNotBlockTheNext(t *testing.T) {
 	requireAdmitted(t, next, "next").Release()
 }
 
-// The queued line a run shows must name who holds the slots, be refreshed
-// when that changes, and be repeated as a heartbeat when it does not.
+// The queued line a run shows must name who holds the slots and where the
+// run stands in the queue, be refreshed when either changes, and be repeated
+// as a heartbeat when neither does.
 func TestOnWaitNamesHoldersOnChangeAndHeartbeats(t *testing.T) {
 	p := NewPool()
 	p.notifyInterval = 20 * time.Millisecond
@@ -239,19 +240,20 @@ func TestOnWaitNamesHoldersOnChangeAndHeartbeats(t *testing.T) {
 	first := queue(t, p, 1, "run b (two)")
 
 	type call struct {
-		labels  []string
-		changed bool
+		labels           []string
+		position, queued int
+		changed          bool
 	}
 	calls := make(chan call, 64)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		_, _, _ = p.Acquire(ctx, 1, "run c (three)", func(holders []Holder, changed bool) {
-			labels := make([]string, 0, len(holders))
-			for _, h := range holders {
+		_, _, _ = p.Acquire(ctx, 1, "run c (three)", func(state WaitState, changed bool) {
+			labels := make([]string, 0, len(state.Holders))
+			for _, h := range state.Holders {
 				labels = append(labels, h.Label)
 			}
-			calls <- call{labels, changed}
+			calls <- call{labels, state.Position, state.Queued, changed}
 		})
 	}()
 	next := func() call {
@@ -265,11 +267,11 @@ func TestOnWaitNamesHoldersOnChangeAndHeartbeats(t *testing.T) {
 		}
 	}
 
-	if c := next(); !c.changed || len(c.labels) != 1 || c.labels[0] != "run a (one)" {
-		t.Fatalf("first call = %+v, want changed and naming run a (one)", c)
+	if c := next(); !c.changed || len(c.labels) != 1 || c.labels[0] != "run a (one)" || c.position != 2 || c.queued != 2 {
+		t.Fatalf("first call = %+v, want changed, naming run a (one), position 2 of 2", c)
 	}
-	if c := next(); c.changed || len(c.labels) != 1 || c.labels[0] != "run a (one)" {
-		t.Fatalf("heartbeat = %+v, want unchanged and still naming run a (one)", c)
+	if c := next(); c.changed || len(c.labels) != 1 || c.labels[0] != "run a (one)" || c.position != 2 {
+		t.Fatalf("heartbeat = %+v, want unchanged and still naming run a (one) at position 2", c)
 	}
 
 	held.Release()
@@ -279,8 +281,8 @@ func TestOnWaitNamesHoldersOnChangeAndHeartbeats(t *testing.T) {
 		if !c.changed {
 			continue
 		}
-		if len(c.labels) != 1 || c.labels[0] != "run b (two)" {
-			t.Fatalf("after the slot changed hands = %+v, want run b (two)", c)
+		if len(c.labels) != 1 || c.labels[0] != "run b (two)" || c.position != 1 || c.queued != 1 {
+			t.Fatalf("after the slot changed hands = %+v, want run b (two) holding and position 1 of 1", c)
 		}
 		return
 	}
@@ -299,7 +301,7 @@ func enqueue(t *testing.T, p *Pool, ctx context.Context, limit int, label string
 	var once sync.Once
 	got := make(chan acquired, 1)
 	go func() {
-		lease, _, err := p.Acquire(ctx, limit, label, func([]Holder, bool) {
+		lease, _, err := p.Acquire(ctx, limit, label, func(WaitState, bool) {
 			once.Do(func() { close(queued) })
 		})
 		got <- acquired{lease, err}
@@ -394,4 +396,64 @@ func TestSlotsGoToWaitersInTheOrderTheyStartedWaiting(t *testing.T) {
 	}
 	lease.Release()
 	requireQueueState(t, p, nil, nil)
+}
+
+// A waiter ahead of this one cancelling moves it up a place, and that is a
+// change worth logging even though no slot changed hands.
+func TestWaiterAheadCancellingIsReportedAsAChange(t *testing.T) {
+	p := NewPool()
+	held, _, _ := p.Acquire(context.Background(), 1, "holder", nil)
+	defer held.Release()
+	ctx, cancelAhead := context.WithCancel(context.Background())
+	defer cancelAhead()
+	ahead := enqueue(t, p, ctx, 1, "ahead")
+
+	positions := make(chan WaitState, 64)
+	behindCtx, cancelBehind := context.WithCancel(context.Background())
+	defer cancelBehind()
+	go func() {
+		_, _, _ = p.Acquire(behindCtx, 1, "behind", func(state WaitState, changed bool) {
+			if changed {
+				positions <- state
+			}
+		})
+	}()
+	next := func() WaitState {
+		t.Helper()
+		select {
+		case s := <-positions:
+			return s
+		case <-time.After(5 * time.Second):
+			t.Fatal("onWait did not report a change")
+			return WaitState{}
+		}
+	}
+	if s := next(); s.Position != 2 || s.Queued != 2 {
+		t.Fatalf("queued at position %d of %d, want 2 of 2", s.Position, s.Queued)
+	}
+	cancelAhead()
+	<-ahead
+	if s := next(); s.Position != 1 || s.Queued != 1 {
+		t.Fatalf("after the waiter ahead left: position %d of %d, want 1 of 1", s.Position, s.Queued)
+	}
+}
+
+// The rendered line must not let a holder's age pass for a queue position or
+// a newcomer: it names this run's own place and wait, and labels each
+// holder's age as time spent holding its slot.
+func TestWaitStateDescribeLabelsEveryDuration(t *testing.T) {
+	now := time.Now()
+	got := WaitState{
+		Position: 2,
+		Queued:   3,
+		Waited:   4*time.Minute + 300*time.Millisecond,
+		Holders: []Holder{
+			{Label: "run a (one)", Since: now.Add(-12 * time.Minute)},
+			{Label: "run b (two)", Since: now},
+		},
+	}.Describe()
+	want := "position 2 of 3 in the queue, waiting 4m0s; slot holders: run a (one), slot held 12m0s; run b (two), slot held 0s"
+	if got != want {
+		t.Fatalf("Describe() =\n  %q\nwant\n  %q", got, want)
+	}
 }

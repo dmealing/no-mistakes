@@ -41,8 +41,13 @@ func TestExecutor_TestStepQueuesForSlotAndDoesNotCountWait(t *testing.T) {
 			break
 		}
 	}
-	if !strings.Contains(activity, "run other (feature)") {
-		t.Fatalf("queued activity = %q, want it to name the holder", activity)
+	// The line says where this run stands and labels the holder's age as
+	// time holding its slot, so a holder that was just admitted after a long
+	// wait cannot read as a newcomer that jumped the queue.
+	for _, want := range []string{"position 1 of 1 in the queue, waiting ", "slot holders: run other (feature), slot held "} {
+		if !strings.Contains(activity, want) {
+			t.Fatalf("queued activity = %q, want it to contain %q", activity, want)
+		}
 	}
 	if step.callCount() != 0 {
 		t.Fatal("test step executed while no slot was free")
