@@ -16,6 +16,30 @@ import (
 	"time"
 )
 
+// groupActiveProbeAttempts is how many times the tests below re-attempt a
+// ShellCommandGroupActive verdict that returned context.DeadlineExceeded.
+// Under full-suite -race load the ps probe can outrun the per-probe context
+// budget the check allots it (100ms for a zero-window snapshot, the remaining
+// window otherwise), and that deadline cannot be widened from the test side
+// for a zero-window call. The deadline verdict means "unverified", not wrong,
+// so the test waits for the machine to give the probe a fair shot instead of
+// failing the suite under load.
+const groupActiveProbeAttempts = 10
+
+// groupActiveWithRetry retries only the unverified verdict: every other
+// result, including a real error, is returned as-is.
+func groupActiveWithRetry(cmd *exec.Cmd, window time.Duration) (bool, string, error) {
+	var active bool
+	var detail string
+	for attempt := 0; ; attempt++ {
+		var err error
+		active, detail, err = ShellCommandGroupActive(cmd, window)
+		if attempt == groupActiveProbeAttempts || !errors.Is(err, context.DeadlineExceeded) {
+			return active, detail, err
+		}
+	}
+}
+
 func TestShellCommandGroupActiveIgnoresZombiesButKeepsLiveChildren(t *testing.T) {
 	for _, live := range []bool{false, true} {
 		t.Run(strconv.FormatBool(live), func(t *testing.T) {
@@ -70,7 +94,7 @@ func TestShellCommandGroupActiveIgnoresZombiesButKeepsLiveChildren(t *testing.T)
 			if err := syscall.Kill(-leader.Process.Pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
 				t.Fatalf("fixture group must still exist: %v", err)
 			}
-			active, _, err := ShellCommandGroupActive(leader, 300*time.Millisecond)
+			active, _, err := groupActiveWithRetry(leader, 300*time.Millisecond)
 			if live && errors.Is(err, context.DeadlineExceeded) {
 				// A ps probe that exhausts the remaining window refuses
 				// completion as unverified, rather than declaring inactivity.
@@ -103,7 +127,7 @@ func TestShellCommandGroupActiveAcceptsMemberFinishingInsideWindow(t *testing.T)
 		t.Fatal(err)
 	}
 
-	active, detail, err := ShellCommandGroupActive(cmd, 0)
+	active, detail, err := groupActiveWithRetry(cmd, 0)
 	if err != nil || !active {
 		t.Fatalf("single probe: active=%v detail=%q err=%v, want the finishing member reported", active, detail, err)
 	}
@@ -143,7 +167,7 @@ func TestShellCommandGroupActiveRefusesMemberSurvivingWindow(t *testing.T) {
 
 	// Check identity independently of the bounded wait: a last ps probe
 	// may legitimately time out and refuse completion as unverified instead.
-	active, detail, err := ShellCommandGroupActive(cmd, 0)
+	active, detail, err := groupActiveWithRetry(cmd, 0)
 	if err != nil || !active || !strings.Contains(detail, "pid "+strconv.Itoa(memberPID)) || !strings.Contains(detail, "(sleep 30)") {
 		t.Fatalf("active=%v detail=%q err=%v, want pid %d and its command named", active, detail, err, memberPID)
 	}
