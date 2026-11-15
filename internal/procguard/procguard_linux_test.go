@@ -123,6 +123,27 @@ func TestGuardedPgrepFeedsKillOnlyThisRunsProcesses(t *testing.T) {
 	}
 }
 
+// TestGuardedPgrepNewestIgnoresANewerSiblingRunProcess: the sibling's process
+// started after this run's own match, so the real `pgrep -n` answers with the
+// sibling's PID; the guard must still return this run's own match.
+func TestGuardedPgrepNewestIgnoresANewerSiblingRunProcess(t *testing.T) {
+	env := installedGuard(t)
+	tag := fmt.Sprintf("%d.%d", 7000+os.Getpid()%1000, time.Now().UnixNano()%1000000)
+	own := startTagged(t, tag, "run-own")
+	time.Sleep(50 * time.Millisecond)
+	_ = startTagged(t, tag, "run-sibling")
+
+	shell := exec.Command("sh", "-c", "pgrep -n -f 'sleep "+tag+"'")
+	shell.Env = env
+	out, err := shell.Output()
+	if err != nil {
+		t.Fatalf("pgrep -n failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != fmt.Sprint(own.Process.Pid) {
+		t.Fatalf("pgrep -n = %q, want this run's own process %d", got, own.Process.Pid)
+	}
+}
+
 // TestProcessStopRuleCommandStopsTheWholeGroup proves the command the Test
 // prompt prescribes: a suite started under setsid is stopped, children and
 // all, by signalling its process group.

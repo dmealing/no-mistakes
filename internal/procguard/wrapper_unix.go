@@ -35,6 +35,7 @@ func HandleArgs(args []string) (handled bool, exitCode int) {
 		stderr: os.Stderr,
 		owned:  processHasMarker,
 		parent: parentPID,
+		start:  startTime,
 		signal: func(pid int, sig syscall.Signal) error { return syscall.Kill(pid, sig) },
 		run:    runReal,
 	}
@@ -51,6 +52,7 @@ type guard struct {
 	stderr io.Writer
 	owned  func(pid int, marker string) bool
 	parent func(pid int) int
+	start  func(pid int) uint64
 	signal func(pid int, sig syscall.Signal) error
 	run    func(path string, args []string, stderr io.Writer) ([]byte, int, error)
 }
@@ -131,13 +133,13 @@ func runReal(path string, args []string, stderr io.Writer) ([]byte, int, error) 
 // from a shell whose command line holds the pattern would otherwise kill that
 // shell.
 func (g *guard) pgrep(args []string) int {
-	rest, count, delim := splitPgrepOutputFlags(args)
+	rest, count, delim, pick := splitPgrepOutputFlags(args)
 	out, code := g.list("pgrep", rest)
 	if code >= 2 {
 		return code
 	}
 	ancestors := g.ancestors()
-	var kept []string
+	var kept []match
 	hidden := 0
 	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -148,17 +150,22 @@ func (g *guard) pgrep(args []string) int {
 			continue
 		}
 		if ok && g.mine(pid) {
-			kept = append(kept, line)
+			kept = append(kept, match{pid, line})
 			continue
 		}
 		hidden++
 	}
 	g.noteHidden("pgrep", hidden)
+	kept = g.pickOne(kept, pick)
 	switch {
 	case count:
 		fmt.Fprintln(g.stdout, len(kept))
 	case len(kept) > 0:
-		fmt.Fprintln(g.stdout, strings.Join(kept, delim))
+		lines := make([]string, len(kept))
+		for i, m := range kept {
+			lines[i] = m.line
+		}
+		fmt.Fprintln(g.stdout, strings.Join(lines, delim))
 	}
 	if len(kept) == 0 {
 		return 1
@@ -181,7 +188,8 @@ func (g *guard) pidof(args []string) int {
 			sep = a[2:]
 		}
 	}
-	out, code := g.list("pidof", args)
+	rest, single := splitPidofSingleShot(args)
+	out, code := g.list("pidof", rest)
 	if code >= 2 {
 		return code
 	}
@@ -210,6 +218,9 @@ func (g *guard) pidof(args []string) int {
 	if len(kept) == 0 {
 		return 1
 	}
+	if single {
+		kept = kept[:1]
+	}
 	fmt.Fprintln(g.stdout, strings.Join(kept, sep))
 	return 0
 }
@@ -222,12 +233,14 @@ func (g *guard) pkill(args []string) int {
 		fmt.Fprintf(g.stderr, "pkill: %v\n", err)
 		return 2
 	}
+	rest, _, _, pick := splitPgrepOutputFlags(rest)
 	out, code := g.list("pgrep", rest)
 	if code >= 2 {
 		return code
 	}
 	ancestors := g.ancestors()
 	var spared []int
+	var targets []match
 	signalled := 0
 	for _, line := range strings.Split(string(out), "\n") {
 		pid, ok := leadingPID(line)
@@ -238,6 +251,10 @@ func (g *guard) pkill(args []string) int {
 			spared = append(spared, pid)
 			continue
 		}
+		targets = append(targets, match{pid, line})
+	}
+	for _, target := range g.pickOne(targets, pick) {
+		pid := target.pid
 		if err := g.signal(pid, sig); err != nil {
 			if !errors.Is(err, syscall.ESRCH) {
 				fmt.Fprintf(g.stderr, "pkill: killing pid %d failed: %v\n", pid, err)
@@ -296,6 +313,31 @@ func (g *guard) ancestors() map[int]bool {
 	return found
 }
 
+// match is one of this run's processes the real tool listed, with its line.
+type match struct {
+	pid  int
+	line string
+}
+
+// pickOne applies pgrep's --newest ('n') or --oldest ('o') to this run's own
+// matches. The real tool picks among every process on the machine, so a
+// sibling run's newer process would win and the agent's own match would
+// vanish.
+func (g *guard) pickOne(matches []match, pick byte) []match {
+	if pick == 0 || len(matches) < 2 {
+		return matches
+	}
+	best := matches[0]
+	for _, m := range matches[1:] {
+		bs, ms := g.start(best.pid), g.start(m.pid)
+		later := ms > bs || (ms == bs && m.pid > best.pid)
+		if (pick == 'n') == later {
+			best = m
+		}
+	}
+	return []match{best}
+}
+
 func leadingPID(line string) (int, bool) {
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
@@ -322,18 +364,22 @@ func pidList(pids []int) string {
 // pgrepValueFlags are pgrep's short options that take a value.
 const pgrepValueFlags = "dgGPstuUFr"
 
-// splitPgrepOutputFlags removes the count and delimiter options, which the
-// guard applies itself to the filtered result, and returns the selection
-// arguments for the real pgrep.
-func splitPgrepOutputFlags(args []string) (rest []string, count bool, delim string) {
+// splitPgrepOutputFlags removes the count, delimiter, newest and oldest
+// options, which the guard applies itself to the filtered result, and returns
+// the selection arguments for the real pgrep. pick is 'n', 'o' or 0.
+func splitPgrepOutputFlags(args []string) (rest []string, count bool, delim string, pick byte) {
 	delim = "\n"
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--":
-			return append(rest, args[i:]...), count, delim
+			return append(rest, args[i:]...), count, delim, pick
 		case a == "--count":
 			count = true
+		case a == "--newest":
+			pick = 'n'
+		case a == "--oldest":
+			pick = 'o'
 		case a == "--delimiter" && i+1 < len(args):
 			delim = args[i+1]
 			i++
@@ -347,6 +393,10 @@ func splitPgrepOutputFlags(args []string) (rest []string, count bool, delim stri
 				c := a[j]
 				if c == 'c' {
 					count = true
+					continue
+				}
+				if c == 'n' || c == 'o' {
+					pick = c
 					continue
 				}
 				if c == 'd' {
@@ -377,7 +427,51 @@ func splitPgrepOutputFlags(args []string) (rest []string, count bool, delim stri
 			rest = append(rest, a)
 		}
 	}
-	return rest, count, delim
+	return rest, count, delim, pick
+}
+
+// pidofValueFlags are pidof's short options that take a value.
+const pidofValueFlags = "odS"
+
+// splitPidofSingleShot removes -s/--single-shot, which the guard applies
+// itself to the filtered result: the real pidof would return one process of
+// the whole machine.
+func splitPidofSingleShot(args []string) (rest []string, single bool) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return append(rest, args[i:]...), single
+		case a == "--single-shot":
+			single = true
+		case strings.HasPrefix(a, "--") || len(a) < 2 || a[0] != '-':
+			rest = append(rest, a)
+		default:
+			kept := []byte{'-'}
+			for j := 1; j < len(a); j++ {
+				c := a[j]
+				if c == 's' {
+					single = true
+					continue
+				}
+				kept = append(kept, c)
+				if strings.IndexByte(pidofValueFlags, c) >= 0 {
+					kept = append(kept, a[j+1:]...)
+					if j+1 == len(a) && i+1 < len(args) {
+						rest = append(rest, string(kept))
+						kept = nil
+						rest = append(rest, args[i+1])
+						i++
+					}
+					break
+				}
+			}
+			if len(kept) > 1 {
+				rest = append(rest, string(kept))
+			}
+		}
+	}
+	return rest, single
 }
 
 // splitPkillFlags separates pkill's own options (signal, echo, count) from

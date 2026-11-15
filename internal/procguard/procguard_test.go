@@ -31,6 +31,7 @@ type fakeGuard struct {
 	stdout    bytes.Buffer
 	stderr    bytes.Buffer
 	gotArgs   []string
+	starts    map[int]uint64
 }
 
 func newFakeGuard(t *testing.T, owner map[int]string, parents map[int]int, pgrepOut string, pgrepCode int) *fakeGuard {
@@ -53,6 +54,7 @@ func newFakeGuard(t *testing.T, owner map[int]string, parents map[int]int, pgrep
 			return MarkerEnv+"="+owner[pid] == marker
 		},
 		parent: func(pid int) int { return parents[pid] },
+		start:  func(pid int) uint64 { return f.starts[pid] },
 		signal: func(pid int, sig syscall.Signal) error {
 			f.signalled = append(f.signalled, pid)
 			return nil
@@ -254,6 +256,85 @@ func TestInstallWritesExecutableWrappersAndLeavesUnchangedOnesAlone(t *testing.T
 		info, _ := os.Stat(filepath.Join(dir, tool))
 		if !info.ModTime().Equal(old) {
 			t.Fatalf("%s was rewritten although its bytes were unchanged", tool)
+		}
+	}
+}
+
+// A sibling run's process that is newer than this run's own match must not
+// win --newest, and an older one must not win --oldest: the real tool picks
+// among the whole machine, so the guard picks among this run's matches.
+func TestNewestAndOldestPickAmongThisRunsMatchesOnly(t *testing.T) {
+	owner := map[int]string{200: "run-own", 201: "run-own", 300: "run-sibling", 301: "run-sibling"}
+	starts := map[int]uint64{200: 20, 201: 30, 300: 50, 301: 10}
+	const listing = "200\n201\n300\n301\n"
+	cases := []struct {
+		tool     string
+		args     []string
+		wantOut  string
+		wantArgs []string
+		signal   []int
+	}{
+		{"pgrep", []string{"-n", "bun"}, "201\n", []string{"bun"}, nil},
+		{"pgrep", []string{"--newest", "-f", "bun"}, "201\n", []string{"-f", "bun"}, nil},
+		{"pgrep", []string{"-fo", "bun"}, "200\n", []string{"-f", "bun"}, nil},
+		{"pgrep", []string{"--oldest", "bun"}, "200\n", []string{"bun"}, nil},
+		{"pgrep", []string{"-c", "-n", "bun"}, "1\n", []string{"bun"}, nil},
+		{"pkill", []string{"-n", "bun"}, "", []string{"bun"}, []int{201}},
+		{"pkill", []string{"-9", "-fo", "bun"}, "", []string{"-f", "bun"}, []int{200}},
+	}
+	for _, tc := range cases {
+		f := newFakeGuard(t, owner, nil, listing, 0)
+		f.starts = starts
+		if code := f.main(tc.tool, tc.args); code != 0 {
+			t.Fatalf("%s %q: exit = %d, want 0; stderr=%s", tc.tool, tc.args, code, f.stderr.String())
+		}
+		if f.stdout.String() != tc.wantOut {
+			t.Errorf("%s %q: stdout = %q, want %q", tc.tool, tc.args, f.stdout.String(), tc.wantOut)
+		}
+		if !reflect.DeepEqual(f.gotArgs, tc.wantArgs) {
+			t.Errorf("%s %q: real pgrep got %q, want %q", tc.tool, tc.args, f.gotArgs, tc.wantArgs)
+		}
+		if !reflect.DeepEqual(f.signalled, tc.signal) {
+			t.Errorf("%s %q: signalled %v, want %v", tc.tool, tc.args, f.signalled, tc.signal)
+		}
+	}
+}
+
+func TestPidofSingleShotPicksAmongThisRunsMatchesOnly(t *testing.T) {
+	owner := map[int]string{200: "run-own", 201: "run-own", 300: "run-sibling"}
+	for _, args := range [][]string{{"-s", "bun"}, {"--single-shot", "bun"}, {"-sx", "bun"}} {
+		f := newFakeGuard(t, owner, nil, "300 200 201\n", 0)
+		if code := f.main("pidof", args); code != 0 {
+			t.Fatalf("pidof %q: exit = %d", args, code)
+		}
+		if f.stdout.String() != "200\n" {
+			t.Errorf("pidof %q: stdout = %q, want this run's single PID 200", args, f.stdout.String())
+		}
+		for _, a := range f.gotArgs {
+			if a == "-s" || a == "--single-shot" || a == "-sx" {
+				t.Errorf("pidof %q: real pidof still got %q", args, f.gotArgs)
+			}
+		}
+	}
+}
+
+func TestSplitPidofSingleShot(t *testing.T) {
+	cases := []struct {
+		args   []string
+		rest   []string
+		single bool
+	}{
+		{[]string{"-s", "bun"}, []string{"bun"}, true},
+		{[]string{"-sx", "bun"}, []string{"-x", "bun"}, true},
+		{[]string{"-o", "s", "bun"}, []string{"-o", "s", "bun"}, false},
+		{[]string{"-S,", "bun"}, []string{"-S,", "bun"}, false},
+		{[]string{"-S", ",", "-s", "bun"}, []string{"-S", ",", "bun"}, true},
+		{[]string{"--", "-s"}, []string{"--", "-s"}, false},
+	}
+	for _, tc := range cases {
+		rest, single := splitPidofSingleShot(tc.args)
+		if !reflect.DeepEqual(rest, tc.rest) || single != tc.single {
+			t.Errorf("splitPidofSingleShot(%q) = %q %v, want %q %v", tc.args, rest, single, tc.rest, tc.single)
 		}
 	}
 }

@@ -10,3 +10,7 @@ func processHasMarker(pid int, marker string) bool { return false }
 // parentPID is not tracked here; with nothing counted as this run's, pkill
 // signals nothing and needs no ancestor exclusion.
 func parentPID(pid int) int { return 0 }
+
+// startTime is not tracked here; nothing counts as this run's, so there is
+// nothing to order.
+func startTime(pid int) uint64 { return 0 }
