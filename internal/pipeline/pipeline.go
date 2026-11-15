@@ -8,6 +8,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -92,6 +93,11 @@ type StepContext struct {
 	// in embeddings that never gather evidence.
 	EvidenceDir string
 	Env         []string // extra environment variables for subprocesses (used in tests)
+	// RunEnvironment is the run's own environment overlay for step
+	// subprocesses beyond the forge profile's: the package-manager store
+	// locations the daemon picked for this run's worktree (local fork patch).
+	// ForgeContext's environment is applied after it and wins on a shared key.
+	RunEnvironment runenv.Overlay
 	// UserIntent is a short, possibly-empty summary of what the change author
 	// was trying to accomplish. It's surfaced in step prompts so agents have
 	// context beyond the diff. Its authority depends on IntentSource: an

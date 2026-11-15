@@ -36,8 +36,8 @@ func (e *Executor) executeWithTestSlot(step Step, sctx *StepContext, execute fun
 		outcome, err := execute()
 		return outcome, 0, err
 	}
-	lease, waited, err := e.testSlots.Acquire(sctx.Ctx, e.config.TestSlots, fmt.Sprintf("run %s (%s)", sctx.Run.ID, sctx.Run.Branch), func(holders []testslots.Holder, changed bool) {
-		msg := fmt.Sprintf("queued for a test slot (test_slots=%d); held by %s", e.config.TestSlots, testslots.DescribeHolders(holders))
+	lease, waited, err := e.testSlots.Acquire(sctx.Ctx, e.config.TestSlots, fmt.Sprintf("run %s (%s)", sctx.Run.ID, sctx.Run.Branch), func(state testslots.WaitState, changed bool) {
+		msg := fmt.Sprintf("queued for a test slot (test_slots=%d): %s", e.config.TestSlots, state.Describe())
 		if changed {
 			sctx.Log(msg)
 			return

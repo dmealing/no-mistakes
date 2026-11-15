@@ -8,6 +8,7 @@ package testslots
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -25,9 +26,12 @@ type Holder struct {
 	Since time.Time
 }
 
-// Describe renders the holder for a human, e.g. "run abc (feature), 3m0s".
+// Describe renders the holder for a human, e.g. "run abc (feature), slot
+// held 3m0s". The age is how long it has held its slot, and says so: a bare
+// age read as a newcomer that had just taken a slot ahead of the queue, when
+// it was a run that had waited longer and had only just been admitted.
 func (h Holder) Describe() string {
-	return h.Label + ", " + time.Since(h.Since).Truncate(time.Second).String()
+	return h.Label + ", slot held " + time.Since(h.Since).Truncate(time.Second).String()
 }
 
 // DescribeHolders renders holders as one "; "-joined line.
@@ -37,6 +41,25 @@ func DescribeHolders(holders []Holder) string {
 		parts = append(parts, h.Describe())
 	}
 	return strings.Join(parts, "; ")
+}
+
+// WaitState is what a queued caller sees: its own place in the queue, how
+// long it has waited, and who holds the slots it is waiting for.
+type WaitState struct {
+	// Position is the caller's 1-based place in the queue; position 1 is
+	// admitted next.
+	Position int
+	// Queued is how many callers are waiting, the caller included.
+	Queued  int
+	Waited  time.Duration
+	Holders []Holder
+}
+
+// Describe renders the state for a human, e.g. "position 2 of 3 in the queue,
+// waiting 4m0s; slot holders: run abc (feature), slot held 12m0s".
+func (s WaitState) Describe() string {
+	return fmt.Sprintf("position %d of %d in the queue, waiting %s; slot holders: %s",
+		s.Position, s.Queued, s.Waited.Truncate(time.Second), DescribeHolders(s.Holders))
 }
 
 // Pool is the shared set of held slots and the queue behind them. The zero
@@ -67,7 +90,8 @@ type waiter struct {
 	label string
 	// lease is set under Pool.mu when the waiter is admitted.
 	lease *Lease
-	// wake is signalled when the waiter is admitted or the holder set changed.
+	// wake is signalled when the waiter is admitted or the holder set or its
+	// place in the queue changed.
 	wake chan struct{}
 }
 
@@ -95,16 +119,16 @@ func (l *Lease) Release() {
 // A limit <= 0, or a nil pool, means unlimited: it returns at once with a nil
 // Lease.
 //
-// onWait, when non-nil, is called with the current holders when the wait
-// starts and whenever the holder set changes (changed true), and again after
-// DefaultNotifyInterval when nothing changed (changed false), so a caller can
-// log on changes and heartbeat on the rest.
+// onWait, when non-nil, is called with the caller's WaitState when the wait
+// starts and whenever the holder set or its place in the queue changes
+// (changed true), and again after DefaultNotifyInterval when nothing changed
+// (changed false), so a caller can log on changes and heartbeat on the rest.
 //
 // It returns the time spent waiting, zero when a slot was free at once, so
 // the caller can start its own budget clocks at acquisition. A wait that ends
 // without a slot reports its length too, so the caller never books queue
 // time as its own.
-func (p *Pool) Acquire(ctx context.Context, limit int, label string, onWait func([]Holder, bool)) (*Lease, time.Duration, error) {
+func (p *Pool) Acquire(ctx context.Context, limit int, label string, onWait func(WaitState, bool)) (*Lease, time.Duration, error) {
 	if p == nil || limit <= 0 {
 		return nil, 0, nil
 	}
@@ -117,20 +141,20 @@ func (p *Pool) Acquire(ctx context.Context, limit int, label string, onWait func
 		p.mu.Unlock()
 		return lease, 0, nil
 	}
+	start := time.Now()
 	w := &waiter{limit: limit, label: label, wake: make(chan struct{}, 1)}
 	p.waiters = append(p.waiters, w)
-	holders := p.holdersLocked()
+	state := p.waitStateLocked(w, start)
 	interval := p.notifyInterval
 	p.mu.Unlock()
 	if interval <= 0 {
 		interval = DefaultNotifyInterval
 	}
 
-	start := time.Now()
 	changed := true
 	for {
 		if onWait != nil {
-			onWait(holders, changed)
+			onWait(state, changed)
 		}
 		timer := time.NewTimer(interval)
 		select {
@@ -139,9 +163,13 @@ func (p *Pool) Acquire(ctx context.Context, limit int, label string, onWait func
 			p.mu.Lock()
 			lease := w.lease
 			if lease == nil {
-				p.waiters = slices.DeleteFunc(p.waiters, func(o *waiter) bool { return o == w })
-				if p.admitLocked() {
-					for _, o := range p.waiters {
+				i := slices.Index(p.waiters, w)
+				p.waiters = slices.Delete(p.waiters, i, i+1)
+				admitted := p.admitLocked()
+				// Every waiter that was behind this one moved up a place;
+				// if a slot was handed out, every waiter's holders changed.
+				for j, o := range p.waiters {
+					if admitted || j >= i {
 						o.signal()
 					}
 				}
@@ -157,7 +185,9 @@ func (p *Pool) Acquire(ctx context.Context, limit int, label string, onWait func
 		}
 		p.mu.Lock()
 		lease := w.lease
-		holders = p.holdersLocked()
+		if lease == nil {
+			state = p.waitStateLocked(w, start)
+		}
 		p.mu.Unlock()
 		if lease != nil {
 			return lease, time.Since(start), nil
@@ -191,6 +221,16 @@ func (p *Pool) admitLocked() bool {
 		admitted = true
 	}
 	return admitted
+}
+
+// waitStateLocked reports where the queued waiter w stands.
+func (p *Pool) waitStateLocked(w *waiter, start time.Time) WaitState {
+	return WaitState{
+		Position: slices.Index(p.waiters, w) + 1,
+		Queued:   len(p.waiters),
+		Waited:   time.Since(start),
+		Holders:  p.holdersLocked(),
+	}
 }
 
 func (p *Pool) holdersLocked() []Holder {

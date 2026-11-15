@@ -23,10 +23,37 @@ When set, everything else moves under this root:
 - The socket path must fit the platform's Unix socket limit: 103 bytes on macOS, 107 on Linux. `daemon start`, `daemon restart`, `daemon status`, `init`, `attach`, `rerun`, `axi run`, and the push hook fail with a message that names the path, its length, and the limit when it is too long. Use a shorter `NM_HOME`. The physical path counts: a symbolic link to a long directory does not help, because the push hook dials the resolved path.
 - Managed agent server PID records: `$NM_HOME/servers/`
 - Hold on new runs: `$NM_HOME/hold` (see [Holding new runs](/no-mistakes/concepts/daemon/#holding-new-runs)); pre-run check overrides: `$NM_HOME/triage-overrides.ndjson`; install database backups: `$NM_HOME/backups/`
+- Shared package-manager stores for runs: `$NM_HOME/package-stores/` (see [Package-manager stores](#package-manager-stores-npm_config_store_dir-bun_install_cache_dir))
+- Process-guard wrappers for run agents: `$NM_HOME/proc-guard/bin/` (see [Process guard](#process-guard-no_mistakes_proc_guard))
 - Local evaluation cases and registry: `$NM_HOME/eval/` (created by automatic collection or an explicit `no-mistakes eval` command)
 - Managed service names get a short stable suffix derived from `$NM_HOME` so multiple installs don't collide.
 
 A push is handled by the root that owns the gate it was pushed to, not by the root `NM_HOME` names. Git does not set `NM_HOME` for a hook, so the managed `pre-receive` and `post-receive` hooks would otherwise reach whichever daemon the pushing shell happened to point at - usually the default `~/.no-mistakes`, since the variable is normally unset. Instead the CLI resolves its root from the gate path the hook passes it: a gate always lives at `$NM_HOME/repos/<id>.git`, so the owning root is a property of where the gate sits. A push to a gate under one root therefore reaches that root's daemon even when `NM_HOME` is unset or names a different root. A path that is not a managed gate is refused rather than resolved against the default root, so `pre-receive` fails the push and `post-receive` stays non-blocking and records the skipped notification in the gate's `notify-push.log`. The daemon enforces the same ownership on its own side of both calls, refusing to admit or to start a run for a gate that does not sit under its root. Existing installs get this by updating the binary; the hook scripts are unchanged, so no gate needs regenerating.
+
+## Package-manager stores (`npm_config_store_dir`, `BUN_INSTALL_CACHE_DIR`)
+
+The daemon sets these two variables for every agent and step subprocess of a run (local fork build only), pointing pnpm at `$NM_HOME/package-stores/pnpm` and bun at `$NM_HOME/package-stores/bun`.
+
+Every run installs dependencies into a fresh worktree. pnpm and bun install by hardlinking files out of a shared store, but a hardlink cannot cross filesystems: when the store lives on a different filesystem from the run worktree (pnpm's default data directory, or bun's `~/.bun/install/cache`, on another disk), both silently fall back to copying every file, so each run rewrote its whole `node_modules` to disk. A store inside `$NM_HOME`, on the same filesystem as `$NM_HOME/worktrees`, makes each install hardlinks. The stores are shared and persist across runs; a package version is written to them once.
+
+- A store someone chose on purpose is never overridden. If the daemon's own environment already sets `npm_config_store_dir` (any letter case), `pnpm_config_store_dir`, or `BUN_INSTALL_CACHE_DIR`, or the repository names a store in its `.npmrc` (`store-dir`), `pnpm-workspace.yaml` (`storeDir`), or `bunfig.toml` (`[install.cache] dir`), that package manager is left alone for the run. A forge profile's environment also outranks these values. A user-level `~/.npmrc` `store-dir` is not such a choice and is overridden for runs: it names the machine-wide store whose filesystem is the problem.
+- A run whose worktree is not on `$NM_HOME`'s filesystem (a [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) placement on another disk) gets neither variable, since a store in `$NM_HOME` would not hardlink there either.
+- npm is not covered: it always extracts its cache into `node_modules`, so no cache location turns an npm install into hardlinks.
+- The values are chosen when a run starts or is recovered, from the run's recorded worktree, so a daemon restart keeps them.
+- No-mistakes does not prune the stores; `pnpm store prune` (with `npm_config_store_dir` set) and `bun pm cache rm` (with `BUN_INSTALL_CACHE_DIR` set) reclaim them.
+
+## Process guard (`NO_MISTAKES_PROC_GUARD`)
+
+On Linux the daemon sets this variable to the run's ID for every agent subprocess of a run (local fork build only), and puts `$NM_HOME/proc-guard/bin` first on that agent's `PATH`. Every process the agent starts inherits both.
+
+Several gate runs share one machine and run the same commands, so an agent that stops its own suite with `pkill -f "bun test"`, or with `kill` on `pgrep` output, also kills another run's suite. The directory holds `pkill`, `killall`, `pgrep`, and `pidof` wrappers that re-enter the `no-mistakes` binary. They still match with the real tools, but act only on processes whose environment carries the same `NO_MISTAKES_PROC_GUARD` value:
+
+- `pgrep` and `pidof` print only the run's own processes and say on stderr how many matches they hid. `pgrep -n`/`-o` and `pidof -s` choose among those, never among every process on the machine.
+- `pkill` signals only the run's own processes and names the PIDs it left alone.
+- None of them offers the wrapper's own ancestors, so a `pkill -f` pattern that also matches the agent's shell command line no longer kills that shell.
+- `killall` is refused; its `--list` and `--version` forms still work.
+
+A process whose environment cannot be read, or that was started with a scrubbed environment, counts as not the run's own, so the guard errs toward sparing it. The shell's builtin `kill` on PIDs taken from `ps` is out of a `PATH` wrapper's reach; the [Test step's prompts](/no-mistakes/reference/pipeline-steps/#test) carry the matching rule. Configured `commands.*` do not get the guard: the daemon stops those by their own process group. The guard is rebuilt with the run's agent on start and recovery, so a daemon restart keeps it. On other platforms, or if the wrappers cannot be written, nothing is set (a failed install is logged).
 
 ## `NM_DAEMON_CONNECT_TIMEOUT`
 

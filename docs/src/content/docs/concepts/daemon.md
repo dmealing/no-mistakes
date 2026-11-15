@@ -89,7 +89,7 @@ As an independent safety layer, the daemon also refuses to bind the Unix socket 
 When a push arrives via the post-receive hook:
 
 1. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`, or at `<root>/<runID>` when [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) names a directory for that repository. The placement is resolved once, at run creation, and recorded on the run, so editing the setting never retargets a run that already exists
-2. Admits the pipeline executor in that worktree subject to [`max_concurrent_runs`](/no-mistakes/reference/global-config/#max_concurrent_runs)
+2. Admits the pipeline executor in that worktree subject to [`max_concurrent_runs`](/no-mistakes/reference/global-config/#max_concurrent_runs), with pnpm and bun pointed at [shared stores on the worktree's filesystem](/no-mistakes/reference/environment/#package-manager-stores-npm_config_store_dir-bun_install_cache_dir) so installs hardlink instead of copying
 3. Streams events to any connected TUI clients and serves request/response state to AXI clients
 4. Cleans up the worktree when the run finishes (success or failure), subject to the retention rules below
 
