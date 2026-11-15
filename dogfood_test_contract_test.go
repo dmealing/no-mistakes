@@ -59,7 +59,7 @@ func TestRepoConfigDocs_CommandsTestIsTargetedContract(t *testing.T) {
 		"### commands.test",
 		"targeted validation",
 		"not a CI-parity repository-wide regression command",
-		"Broad regression belongs in remote CI",
+		"broad regression belongs in remote CI",
 		"does not guess whether an arbitrary shell string is \"too broad\"",
 	} {
 		if !strings.Contains(content, want) {
