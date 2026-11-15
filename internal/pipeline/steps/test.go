@@ -60,6 +60,42 @@ var localRegressionScope = testRegressionScope{
 	evidenceOverrideRule: "Run the targeted scenarios first and the complete regression suite second. A driver or user instruction asking for broad confirmation never replaces the per-scenario evidence this step must still produce.",
 }
 
+// localSuitePassedEvidenceRules replace localRegressionScope's evidence rules
+// when the repository's configured commands.test already passed at the head
+// this evidence turn validates. That run IS the broad regression for this
+// change, so a second complete-suite walk by the agent repeats it at the same
+// commit for no new evidence. The %[1]s verb is the configured command.
+const (
+	localSuitePassedEvidenceRule = "Broad regression for this change is the configured test command `%[1]s`, which already ran and passed at this target commit (see the baseline above). Do NOT run this repository's complete regression test suite again in this turn. Run it once more only if you change source or test files in this turn: then re-run `%[1]s` after your last change and report a failure as a finding even when this change did not obviously cause it. Record in \"tested\" that broad regression came from the configured test command `%[1]s` with its passing outcome, and say so in \"testing_summary\". No later step and no external system runs broad regression for this change."
+	localSuitePassedOverrideRule = "Run the targeted scenarios only; the configured test command's passing run at this commit already supplied broad regression. A driver or user instruction asking for broad or full-suite confirmation is answered by that run: it neither moves a second complete-suite run into this turn nor replaces the per-scenario evidence this step must still produce."
+)
+
+// withConfiguredSuiteResult narrows a local-mode scope's evidence rules when
+// the repository's configured test command passed at evidenceHead, the head
+// the evidence turn validates. Every other case keeps the scope unchanged:
+// github mode (remote CI owns regression), no configured command (the
+// evidence turn is the only broad run), a failed configured command, and a
+// configured run at any other head, because broad regression is never skipped
+// on a head no suite passed on. Machine-local additional checks are the
+// operator's additions, not the repository's suite, so they never count.
+func (scope testRegressionScope) withConfiguredSuiteResult(testCmd string, baseline []checkResult, baselineHead, evidenceHead string) testRegressionScope {
+	if scope != localRegressionScope || testCmd == "" || baselineHead == "" || baselineHead != evidenceHead {
+		return scope
+	}
+	for _, result := range baseline {
+		if result.Local || result.Command != testCmd {
+			continue
+		}
+		if result.ExitCode != 0 {
+			return scope
+		}
+		scope.evidenceSuiteRule = fmt.Sprintf(localSuitePassedEvidenceRule, testCmd)
+		scope.evidenceOverrideRule = localSuitePassedOverrideRule
+		return scope
+	}
+	return scope
+}
+
 // regressionScopeForRun resolves the scope from the run's effective CI mode.
 // An unset mode is local, matching config.DefaultCIMode, so only an explicit
 // github mode keeps the remote-CI wording.
@@ -206,6 +242,11 @@ Previous test findings to address:
 	var baselineSummary string
 	var baselineExitCode int
 	var attributionSection string
+	// baselineHead is the head the configured checks ran at. A fix round above
+	// has already committed and advanced sctx.Run.HeadSHA, so in today's order
+	// it always equals the head the evidence turn validates; the evidence
+	// rules still compare the two rather than assume it.
+	var baselineHead string
 	if testCmd != "" || len(sctx.Config.CommandOverrides["test"].Additional) > 0 {
 		if err := ensurePrepared(sctx, s.Name()); err != nil {
 			return nil, fmt.Errorf("prepare test dependencies: %w", err)
@@ -214,6 +255,7 @@ Previous test findings to address:
 		if testCmd != "" {
 			sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
 		}
+		baselineHead = sctx.Run.HeadSHA
 		output, results, err := runConfiguredChecks(sctx, "test", testCmd)
 		if err != nil {
 			logConfiguredCommandOutput(sctx, output, types.StepTest)
@@ -295,6 +337,7 @@ Previous test findings to address:
 	} else if len(failedBaseline) == 0 {
 		sctx.Log("baseline tests passed, asking agent to gather live evidence...")
 	}
+	evidenceScope := scope.withConfiguredSuiteResult(testCmd, baselineResults, baselineHead, sctx.Run.HeadSHA)
 	reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + testguidance.Rule
 	evidenceGuidance := fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree: %s", evidenceDir)
 	if sctx.Config.Test.Evidence.StoreInRepo {
@@ -401,9 +444,9 @@ Rules:
 		runbook,
 		max(testAgentTimeout(sctx), testAgentWorkingTimeout(sctx)),
 		evidenceGuidance,
-		scope.evidenceSuiteRule,
+		evidenceScope.evidenceSuiteRule,
 		fallbackGuidance,
-		scope.evidenceOverrideRule,
+		evidenceScope.evidenceOverrideRule,
 		reassessHistory,
 		agent.MemoryFilesRule,
 	) + testRepairScopeRules
