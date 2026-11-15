@@ -47,9 +47,9 @@ func TestLocalCIModeConfiguredSuiteBroadRegressionJourney(t *testing.T) {
 			wantPassedRule: true,
 		},
 		{
-			name:    "local_failed_configured_suite_still_gets_complete_suite_run",
-			ciMode:  "local",
-			testCmd: "echo 'not ok 1 - broken'\nexit 3\n",
+			name:     "local_failed_configured_suite_still_gets_complete_suite_run",
+			ciMode:   "local",
+			testCmd:  "echo 'not ok 1 - broken'\nexit 3\n",
 			wantPark: true,
 		},
 		{
