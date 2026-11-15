@@ -406,7 +406,8 @@ Explicit **targeted** local test command. Run via the platform shell - `sh -c` o
 | Default | Empty (agent derives and drives targeted end-user scenarios) |
 
 `commands.test` is local **targeted validation** of the change and requested intent, not a CI-parity repository-wide regression command.
-Broad regression belongs in remote CI and remains mandatory before a PR is ready; do not put a complete-suite walk here just to mirror CI.
+Under [`ci_mode: github`](/no-mistakes/reference/global-config/#ci_mode), broad regression belongs in remote CI and remains mandatory before a PR is ready; do not put a complete-suite walk here just to mirror CI.
+Under `ci_mode: local` there is no remote CI, and a passing run of this command at the head the Test step validates counts as the broad regression, so the evidence turn skips its own complete-suite walk; a failing or absent run leaves that walk to the evidence turn ([Test](/no-mistakes/reference/pipeline-steps/#test)).
 no-mistakes does not guess whether an arbitrary shell string is "too broad" - the contract is documented and dogfooded, not enforced with language- or filename-specific heuristics.
 
 When set, the test step runs this exact command first as the baseline and checks the exit code.
