@@ -258,7 +258,8 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		cfg.QuotaRouting.Enabled = false
 	}
 	stores := packageStoreEnvironment(m.paths, workDir)
-	ag, _, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, withPackageStores(forgeEnvironment(forgeCtx), stores), quotaRecord)
+	agentEnv := withProcGuard(withPackageStores(forgeEnvironment(forgeCtx), stores), procGuardEnvironment(m.paths, run.ID))
+	ag, _, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, agentEnv, quotaRecord)
 	if err != nil {
 		return nil, err
 	}
@@ -2013,8 +2014,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// input) and persisted beside the gates pin below.
 	// Package-manager stores on the worktree's filesystem make every install
 	// of this run hardlinks instead of copies (see packageStoreEnvironment).
+	// The process guard keeps this run's agents from signalling another run's
+	// processes (see procGuardEnvironment).
 	stores := packageStoreEnvironment(m.paths, wtDir)
-	ag, quotaRecord, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, withPackageStores(forgeEnvironment(forgeCtx), stores), nil)
+	agentEnv := withProcGuard(withPackageStores(forgeEnvironment(forgeCtx), stores), procGuardEnvironment(m.paths, run.ID))
+	ag, quotaRecord, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, agentEnv, nil)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("create_agent")

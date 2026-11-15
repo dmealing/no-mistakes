@@ -17,6 +17,16 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+// processStopRule keeps a Test agent's kills inside its own run (local fork
+// patch). Other gate runs on the same machine run the same commands, so a kill
+// that selects by name or pattern also stops their suites: one run's Test
+// agent killed another run's six `bun test --shard` processes with
+// `pkill -f "bun test"` and then `kill` on pgrep output. The daemon's PATH
+// guard (internal/procguard) catches pkill, killall, pgrep and pidof; this rule
+// also covers what a PATH wrapper cannot see (the shell's builtin kill on PIDs
+// read from ps).
+const processStopRule = "Stop only processes you started, by their PID or process group. Never select processes to stop by name or pattern (pkill, killall, or kill on PIDs from pgrep, pidof, or ps | grep): other runs on this machine run the same commands, and a name match stops their work too. Start each background suite or server in its own process group and keep its id, then stop that whole group: `setsid <command> > <log> 2>&1 & echo $! > <pidfile>`, and later `kill -TERM -\"$(cat <pidfile>)\"`."
+
 // TestStep runs baseline tests, gathers evidence for user intent, and optionally asks the agent to fix failures.
 type TestStep struct{}
 
@@ -187,6 +197,7 @@ Rules:
 - Await every required check and read its actual exit status. Stop disposable browser and server children before returning success. Report incomplete verification honestly.
 - %s
 - %s
+- %s
 - Never treat "do not run everything" as permission to run nothing: if you cannot reproduce or re-verify with a targeted check, report that honestly in the summary rather than inventing a full-suite pass.
 - Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories) so they are not committed and pushed. Do not remove intentional source or test-file changes. Do not remove dependencies materialized by commands.prepare; later configured commands share them.
 - Return JSON with a single "summary" field when you are done.
@@ -195,6 +206,7 @@ Rules:
 			baseSHA,
 			sctx.Run.HeadSHA,
 			testRunbookSections(sctx),
+			processStopRule,
 			scope.fixSuiteRule,
 			scope.fixOverrideRule,
 			fixSummaryRules(sctx, s.Name()),
@@ -399,6 +411,7 @@ Drive each scenario:
 - Await every required production build, browser run, and other check child before reporting a final "go". A background launch, early structured result, or completion notification does not prove that a check passed.
 - Nothing you started may still be running in the background when you return your result. Before returning, wait for or stop every background shell or job, monitor or watch, and scheduled wake-up you started. Background work that outlives the result keeps the turn open until the budget cuts it, and the finished result is lost.
 - Stop disposable browser and server children before exiting. The native boundary refuses successful exits with children still in its owned process group.
+- %s
 - Read each required child's actual exit status and retained result evidence. Do not mask a failed check with a later successful shell command or report detached work as completed.
 - If any required check is still running, has an unknown result, or lacks evidence, do not report "go". Use "no-go" for a known failure or unsafe change, and "inconclusive" when completion or evidence cannot be established. Record the outstanding check and the missing result.
 - Return a "verdict": "go" when every scenario you could drive passed and nothing untested puts the intent in doubt, "no-go" when a scenario failed or the change is not safe to ship, "inconclusive" when the change has a live-exercisable product surface but too little could be driven live to judge, "no-surface" when this change has no runtime product surface no-mistakes can drive live (a CI-workflow-only change, a docs-only change, a pure non-runtime refactor, or anything else with no live-exercisable scenario).
@@ -443,6 +456,7 @@ Rules:
 		configuredTestCommand,
 		runbook,
 		max(testAgentTimeout(sctx), testAgentWorkingTimeout(sctx)),
+		processStopRule,
 		evidenceGuidance,
 		evidenceScope.evidenceSuiteRule,
 		fallbackGuidance,

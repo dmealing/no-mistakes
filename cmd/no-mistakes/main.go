@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/cli"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/procguard"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/update"
@@ -32,6 +33,11 @@ func run() int {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 		}
+		return exitCode
+	}
+	// A gate agent's pkill/killall/pgrep/pidof wrapper re-enters the binary
+	// here; it must not touch update state or start anything.
+	if handled, exitCode := procguard.HandleArgs(os.Args[1:]); handled {
 		return exitCode
 	}
 

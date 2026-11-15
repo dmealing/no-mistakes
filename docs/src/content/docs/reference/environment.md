@@ -24,6 +24,7 @@ When set, everything else moves under this root:
 - Managed agent server PID records: `$NM_HOME/servers/`
 - Hold on new runs: `$NM_HOME/hold` (see [Holding new runs](/no-mistakes/concepts/daemon/#holding-new-runs)); pre-run check overrides: `$NM_HOME/triage-overrides.ndjson`; install database backups: `$NM_HOME/backups/`
 - Shared package-manager stores for runs: `$NM_HOME/package-stores/` (see [Package-manager stores](#package-manager-stores-npm_config_store_dir-bun_install_cache_dir))
+- Process-guard wrappers for run agents: `$NM_HOME/proc-guard/bin/` (see [Process guard](#process-guard-no_mistakes_proc_guard))
 - Local evaluation cases and registry: `$NM_HOME/eval/` (created by automatic collection or an explicit `no-mistakes eval` command)
 - Managed service names get a short stable suffix derived from `$NM_HOME` so multiple installs don't collide.
 
@@ -40,6 +41,19 @@ Every run installs dependencies into a fresh worktree. pnpm and bun install by h
 - npm is not covered: it always extracts its cache into `node_modules`, so no cache location turns an npm install into hardlinks.
 - The values are chosen when a run starts or is recovered, from the run's recorded worktree, so a daemon restart keeps them.
 - No-mistakes does not prune the stores; `pnpm store prune` (with `npm_config_store_dir` set) and `bun pm cache rm` (with `BUN_INSTALL_CACHE_DIR` set) reclaim them.
+
+## Process guard (`NO_MISTAKES_PROC_GUARD`)
+
+On Linux the daemon sets this variable to the run's ID for every agent subprocess of a run (local fork build only), and puts `$NM_HOME/proc-guard/bin` first on that agent's `PATH`. Every process the agent starts inherits both.
+
+Several gate runs share one machine and run the same commands, so an agent that stops its own suite with `pkill -f "bun test"`, or with `kill` on `pgrep` output, also kills another run's suite. The directory holds `pkill`, `killall`, `pgrep`, and `pidof` wrappers that re-enter the `no-mistakes` binary. They still match with the real tools, but act only on processes whose environment carries the same `NO_MISTAKES_PROC_GUARD` value:
+
+- `pgrep` and `pidof` print only the run's own processes and say on stderr how many matches they hid.
+- `pkill` signals only the run's own processes and names the PIDs it left alone.
+- None of them offers the wrapper's own ancestors, so a `pkill -f` pattern that also matches the agent's shell command line no longer kills that shell.
+- `killall` is refused; its `--list` and `--version` forms still work.
+
+A process whose environment cannot be read, or that was started with a scrubbed environment, counts as not the run's own, so the guard errs toward sparing it. The shell's builtin `kill` on PIDs taken from `ps` is out of a `PATH` wrapper's reach; the [Test step's prompts](/no-mistakes/reference/pipeline-steps/#test) carry the matching rule. Configured `commands.*` do not get the guard: the daemon stops those by their own process group. The guard is rebuilt with the run's agent on start and recovery, so a daemon restart keeps it. On other platforms, or if the wrappers cannot be written, nothing is set (a failed install is logged).
 
 ## `NM_DAEMON_CONNECT_TIMEOUT`
 
