@@ -48,7 +48,7 @@ On Linux the daemon sets this variable to the run's ID for every agent subproces
 
 Several gate runs share one machine and run the same commands, so an agent that stops its own suite with `pkill -f "bun test"`, or with `kill` on `pgrep` output, also kills another run's suite. The directory holds `pkill`, `killall`, `pgrep`, and `pidof` wrappers that re-enter the `no-mistakes` binary. They still match with the real tools, but act only on processes whose environment carries the same `NO_MISTAKES_PROC_GUARD` value:
 
-- `pgrep` and `pidof` print only the run's own processes and say on stderr how many matches they hid.
+- `pgrep` and `pidof` print only the run's own processes and say on stderr how many matches they hid. `pgrep -n`/`-o` and `pidof -s` choose among those, never among every process on the machine.
 - `pkill` signals only the run's own processes and names the PIDs it left alone.
 - None of them offers the wrapper's own ancestors, so a `pkill -f` pattern that also matches the agent's shell command line no longer kills that shell.
 - `killall` is refused; its `--list` and `--version` forms still work.
