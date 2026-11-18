@@ -1691,7 +1691,12 @@ func TestReinstallManagedServiceSkipsNonDefaultRoot(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	drifted := renderSystemdUnit("/old/no-mistakes", other, home)
+	// Seed genuine drift: the unit is rendered with a stale home, and home is
+	// baked into Environment=HOME/PATH, so the drift check's byte comparison
+	// falls through to the reinstall path instead of returning at the
+	// no-drift equality check (executable and proxy are both inherited from
+	// the existing unit, so differing on those alone would be invisible).
+	drifted := renderSystemdUnit("/old/no-mistakes", other, t.TempDir())
 	if err := os.WriteFile(unitPath, []byte(drifted), 0o600); err != nil {
 		t.Fatal(err)
 	}
