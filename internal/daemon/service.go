@@ -39,6 +39,7 @@ var serviceCurrentUser = user.Current
 var serviceExecutablePath = os.Executable
 var serviceCommandRunner = runServiceCommand
 var serviceManagerBypassed = defaultServiceManagerBypassed
+var serviceRootIsDefault = defaultServiceRootIsDefault
 var prepareManagedDaemonLaunch = managedDaemonLaunch
 var inspectManagedDaemonService = managedDaemonServiceState
 
@@ -342,8 +343,29 @@ func windowsTaskName(p *paths.Paths) string {
 	return windowsTaskNameBase + "-" + serviceInstanceSuffix(p)
 }
 
+// defaultServiceRootIsDefault reports whether p is the per-user default root
+// (~/.no-mistakes). Only that root is a long-lived install worth a managed,
+// enabled, auto-restarting service. A non-default root (a temp directory used
+// by tests or a manual build) is throwaway: its unit is never removed, and once
+// the root is deleted the unit crash-loops forever.
+func defaultServiceRootIsDefault(p *paths.Paths) bool {
+	if p == nil {
+		return false
+	}
+	home, err := serviceUserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	return canonicalRoot(p.Root()) == canonicalRoot(filepath.Join(home, ".no-mistakes"))
+}
+
 func installManagedService(p *paths.Paths) (bool, error) {
 	if serviceManagerBypassed() {
+		return false, nil
+	}
+	// Never install a persistent unit for a throwaway root; Start falls back to
+	// a detached daemon that dies with its process tree and leaves nothing enabled.
+	if !serviceRootIsDefault(p) {
 		return false, nil
 	}
 	exe, err := serviceExecutablePath()

@@ -1616,7 +1616,9 @@ func stubServiceRuntime(t *testing.T) func() {
 	oldInspectManagedDaemonService := inspectManagedDaemonService
 	oldHealthCheck := daemonHealthCheck
 	oldServiceBypass := serviceManagerBypassed
+	oldRootIsDefault := serviceRootIsDefault
 	serviceManagerBypassed = func() bool { return false }
+	serviceRootIsDefault = func(*paths.Paths) bool { return true }
 	prepareManagedDaemonLaunch = func(*paths.Paths) (managedServiceLaunch, error) {
 		return managedServiceLaunch{}, nil
 	}
@@ -1633,5 +1635,39 @@ func stubServiceRuntime(t *testing.T) func() {
 		inspectManagedDaemonService = oldInspectManagedDaemonService
 		daemonHealthCheck = oldHealthCheck
 		serviceManagerBypassed = oldServiceBypass
+		serviceRootIsDefault = oldRootIsDefault
+	}
+}
+
+func TestInstallManagedServiceSkipsNonDefaultRoot(t *testing.T) {
+	restore := stubServiceRuntime(t)
+	defer restore()
+	serviceRootIsDefault = defaultServiceRootIsDefault
+	home := t.TempDir()
+	runtimeGOOS = "linux"
+	serviceUserHomeDir = func() (string, error) { return home, nil }
+	serviceExecutablePath = func() (string, error) { return "/bin/no-mistakes", nil }
+	var calls []string
+	serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return nil, nil
+	}
+
+	other := paths.WithRoot(t.TempDir())
+	managed, err := installManagedService(other)
+	if err != nil || managed {
+		t.Fatalf("non-default root: managed=%v err=%v, want false,nil", managed, err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("non-default root ran service commands: %v", calls)
+	}
+	if _, err := os.Stat(systemdUserServicePath(other)); !os.IsNotExist(err) {
+		t.Fatalf("unit file written for non-default root: %v", err)
+	}
+
+	def := paths.WithRoot(filepath.Join(home, ".no-mistakes"))
+	managed, err = installManagedService(def)
+	if err != nil || !managed {
+		t.Fatalf("default root: managed=%v err=%v, want true,nil", managed, err)
 	}
 }
