@@ -1616,7 +1616,9 @@ func stubServiceRuntime(t *testing.T) func() {
 	oldInspectManagedDaemonService := inspectManagedDaemonService
 	oldHealthCheck := daemonHealthCheck
 	oldServiceBypass := serviceManagerBypassed
+	oldRootIsDefault := serviceRootIsDefault
 	serviceManagerBypassed = func() bool { return false }
+	serviceRootIsDefault = func(*paths.Paths) bool { return true }
 	prepareManagedDaemonLaunch = func(*paths.Paths) (managedServiceLaunch, error) {
 		return managedServiceLaunch{}, nil
 	}
@@ -1633,5 +1635,93 @@ func stubServiceRuntime(t *testing.T) func() {
 		inspectManagedDaemonService = oldInspectManagedDaemonService
 		daemonHealthCheck = oldHealthCheck
 		serviceManagerBypassed = oldServiceBypass
+		serviceRootIsDefault = oldRootIsDefault
+	}
+}
+
+func TestInstallManagedServiceSkipsNonDefaultRoot(t *testing.T) {
+	restore := stubServiceRuntime(t)
+	defer restore()
+	serviceRootIsDefault = defaultServiceRootIsDefault
+	home := t.TempDir()
+	runtimeGOOS = "linux"
+	serviceUserHomeDir = func() (string, error) { return home, nil }
+	serviceExecutablePath = func() (string, error) { return "/bin/no-mistakes", nil }
+	var calls []string
+	serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return nil, nil
+	}
+
+	other := paths.WithRoot(t.TempDir())
+	managed, err := installManagedService(other)
+	if err != nil || managed {
+		t.Fatalf("non-default root: managed=%v err=%v, want false,nil", managed, err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("non-default root ran service commands: %v", calls)
+	}
+	if _, err := os.Stat(systemdUserServicePath(other)); !os.IsNotExist(err) {
+		t.Fatalf("unit file written for non-default root: %v", err)
+	}
+
+	def := paths.WithRoot(filepath.Join(home, ".no-mistakes"))
+	managed, err = installManagedService(def)
+	if err != nil || !managed {
+		t.Fatalf("default root: managed=%v err=%v, want true,nil", managed, err)
+	}
+}
+
+// TestReinstallManagedServiceSkipsNonDefaultRoot reproduces the observed state
+// from the intent: an already-enabled unit for a throwaway --root whose
+// executable has drifted (e.g. a manual rebuild). `daemon start` against the
+// live daemon must not rewrite the unit, re-enable it, or restart it under the
+// service manager for a non-default root.
+func TestReinstallManagedServiceSkipsNonDefaultRoot(t *testing.T) {
+	restore := stubServiceRuntime(t)
+	defer restore()
+	serviceRootIsDefault = defaultServiceRootIsDefault
+	home := t.TempDir()
+	runtimeGOOS = "linux"
+	serviceUserHomeDir = func() (string, error) { return home, nil }
+	serviceExecutablePath = func() (string, error) { return "/bin/no-mistakes", nil }
+
+	other := paths.WithRoot(t.TempDir())
+	unitPath := systemdUserServicePath(other)
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Seed genuine drift: the unit is rendered with a stale home, and home is
+	// baked into Environment=HOME/PATH, so the drift check's byte comparison
+	// falls through to the reinstall path instead of returning at the
+	// no-drift equality check (executable and proxy are both inherited from
+	// the existing unit, so differing on those alone would be invisible).
+	drifted := renderSystemdUnit("/old/no-mistakes", other, t.TempDir())
+	if err := os.WriteFile(unitPath, []byte(drifted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls []string
+	serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return nil, nil
+	}
+
+	changed, err := reinstallManagedServiceIfChanged(other)
+	if err != nil {
+		t.Fatalf("reinstallManagedServiceIfChanged: %v", err)
+	}
+	if changed {
+		t.Fatal("reinstall re-enabled a managed unit for a non-default root")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("non-default root ran service commands: %v", calls)
+	}
+	data, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != drifted {
+		t.Fatalf("drifted unit was rewritten for a non-default root:\n%s", data)
 	}
 }

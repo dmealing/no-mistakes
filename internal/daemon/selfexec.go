@@ -140,6 +140,9 @@ func reinstallManagedServiceIfChanged(p *paths.Paths) (bool, error) {
 	if serviceManagerBypassed() {
 		return false, nil
 	}
+	if !serviceRootIsDefault(p) {
+		return false, nil
+	}
 	exe, err := serviceExecutablePath()
 	if err != nil {
 		return false, fmt.Errorf("resolve executable: %w", err)
