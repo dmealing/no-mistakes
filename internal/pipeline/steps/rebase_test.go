@@ -264,6 +264,11 @@ func TestRebaseStep_FixModeNonConflictFailureReturnsError(t *testing.T) {
 	gitCmd(t, dir, "init")
 	gitCmd(t, dir, "config", "user.name", "test")
 	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	// This test depends on git refusing to rebase over the dirty working tree
+	// below; a developer machine with rebase.autoStash=true in ~/.gitconfig
+	// would autostash, succeed, and defeat the simulated failure. Repo-local
+	// config overrides the ambient global setting.
+	gitCmd(t, dir, "config", "rebase.autoStash", "false")
 	gitCmd(t, dir, "checkout", "-b", "main")
 	gitCmd(t, dir, "remote", "add", "origin", upstream)
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("base\n"), 0o644)
@@ -314,6 +319,9 @@ func TestRebaseStep_NonConflictFailureWithRebaseMetadataReturnsError(t *testing.
 	gitCmd(t, dir, "init")
 	gitCmd(t, dir, "config", "user.name", "test")
 	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	// Same ambient rebase.autoStash isolation as the fix-mode test above: the
+	// dirty working tree below must make the rebase fail, not autostash.
+	gitCmd(t, dir, "config", "rebase.autoStash", "false")
 	gitCmd(t, dir, "checkout", "-b", "main")
 	gitCmd(t, dir, "remote", "add", "origin", upstream)
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("base\n"), 0o644)
