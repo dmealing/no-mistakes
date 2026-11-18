@@ -77,7 +77,7 @@ If the socket file exists but nothing answers at all (a dead socket left behind 
 
 ### `NM_HOME` collisions
 
-If you have multiple installs with different `NM_HOME` roots, each gets its own scoped service name (with a short suffix derived from the path). Make sure you're looking at the right one - `no-mistakes daemon status` reports which.
+Only the default `~/.no-mistakes` root gets a managed service; any other `NM_HOME` root always runs a detached daemon ([Daemon & Worktrees](/no-mistakes/concepts/daemon/) owns that rule). A unit that an older version enabled for a non-default root is not removed automatically - disable it manually, for example `systemctl --user disable --now no-mistakes-daemon-<suffix>.service` on Linux. Service names carry a short suffix derived from the root path, so the globs above and `no-mistakes daemon status` identify which unit belongs to which root.
 
 ## `no-mistakes update` refuses or aborts
 
