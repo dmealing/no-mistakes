@@ -376,6 +376,9 @@ func installManagedService(p *paths.Paths) (bool, error) {
 }
 
 func installManagedServiceWithExecutable(p *paths.Paths, exe string) (bool, error) {
+	if !serviceRootIsDefault(p) {
+		return false, nil
+	}
 	switch runtimeGOOS {
 	case "darwin":
 		return true, installLaunchAgent(p, exe)

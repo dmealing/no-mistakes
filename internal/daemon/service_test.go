@@ -1671,3 +1671,52 @@ func TestInstallManagedServiceSkipsNonDefaultRoot(t *testing.T) {
 		t.Fatalf("default root: managed=%v err=%v, want true,nil", managed, err)
 	}
 }
+
+// TestReinstallManagedServiceSkipsNonDefaultRoot reproduces the observed state
+// from the intent: an already-enabled unit for a throwaway --root whose
+// executable has drifted (e.g. a manual rebuild). `daemon start` against the
+// live daemon must not rewrite the unit, re-enable it, or restart it under the
+// service manager for a non-default root.
+func TestReinstallManagedServiceSkipsNonDefaultRoot(t *testing.T) {
+	restore := stubServiceRuntime(t)
+	defer restore()
+	serviceRootIsDefault = defaultServiceRootIsDefault
+	home := t.TempDir()
+	runtimeGOOS = "linux"
+	serviceUserHomeDir = func() (string, error) { return home, nil }
+	serviceExecutablePath = func() (string, error) { return "/bin/no-mistakes", nil }
+
+	other := paths.WithRoot(t.TempDir())
+	unitPath := systemdUserServicePath(other)
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	drifted := renderSystemdUnit("/old/no-mistakes", other, home)
+	if err := os.WriteFile(unitPath, []byte(drifted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls []string
+	serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return nil, nil
+	}
+
+	changed, err := reinstallManagedServiceIfChanged(other)
+	if err != nil {
+		t.Fatalf("reinstallManagedServiceIfChanged: %v", err)
+	}
+	if changed {
+		t.Fatal("reinstall re-enabled a managed unit for a non-default root")
+	}
+	if len(calls) != 0 {
+		t.Fatalf("non-default root ran service commands: %v", calls)
+	}
+	data, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != drifted {
+		t.Fatalf("drifted unit was rewritten for a non-default root:\n%s", data)
+	}
+}
