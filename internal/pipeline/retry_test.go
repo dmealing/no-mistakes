@@ -198,6 +198,54 @@ func TestPlanRetryCheckpointContinuesARunTheDaemonStoppedMidStep(t *testing.T) {
 	}
 }
 
+func TestExecutor_CleanDaemonStopMidStepLeavesTheRunContinuable(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	started := make(chan struct{})
+	review := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		close(started)
+		<-sctx.Ctx.Done()
+		return nil, fmt.Errorf("review agent: %w", sctx.Ctx.Err())
+	}}
+	steps := []Step{newPassStep(types.StepRebase), review, newPassStep(types.StepTest)}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	done := make(chan error, 1)
+	go func() { done <- NewExecutor(database, p, nil, nil, steps, nil).Execute(ctx, run, repo, t.TempDir()) }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("review step did not start")
+	}
+	cancel(ErrDaemonShutdown)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("execute succeeded, want the interrupted step to fail the run")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("execute did not stop after the daemon shutdown")
+	}
+
+	rows, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[1].Status != types.StepStatusFailed || rows[1].FailureCause == nil || *rows[1].FailureCause != db.StepFailureCauseDaemonInterrupted {
+		t.Fatalf("review step = %s cause %v, want failed with cause %q", rows[1].Status, rows[1].FailureCause, db.StepFailureCauseDaemonInterrupted)
+	}
+	failed, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := PlanRetryCheckpoint(database, failed, stepsNamed(types.StepRebase, types.StepReview, types.StepTest))
+	if err != nil {
+		t.Fatalf("PlanRetryCheckpoint refused a run a clean daemon stop interrupted: %v", err)
+	}
+	if checkpoint.Failed().StepName != types.StepReview || checkpoint.Index != 1 {
+		t.Fatalf("checkpoint = failed %s, restart index %d; want review failed, restart at Review (1)", checkpoint.Failed().StepName, checkpoint.Index)
+	}
+}
+
 func TestPlanRetryCheckpointRefusesAnUnprovenBoundary(t *testing.T) {
 	core := []types.StepName{types.StepRebase, types.StepReview, types.StepTest, types.StepDocument}
 	for _, tc := range []struct {

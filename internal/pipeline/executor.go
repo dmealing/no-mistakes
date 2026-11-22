@@ -1731,6 +1731,8 @@ rounds:
 			cause := ""
 			var baseFetch *BaseFetchError
 			switch {
+			case errors.Is(contextCause, ErrDaemonShutdown):
+				cause = db.StepFailureCauseDaemonInterrupted
 			case errors.Is(err, ErrAgentInvocationFailed):
 				cause = db.StepFailureCauseAgentInvocation
 			case errors.As(err, &baseFetch):

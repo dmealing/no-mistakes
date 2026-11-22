@@ -138,7 +138,7 @@ Before a new run, `axi run` also applies the [pre-run check](/no-mistakes/refere
 
 ## Crash recovery
 
-A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. A clean stop still fails a run that is in the middle of a step.
+A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. A clean stop still fails a run that is in the middle of a step, recording the daemon stop as the step's failure cause so [`axi retry`](/no-mistakes/reference/cli/#no-mistakes-axi-retry) can continue it.
 
 On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon stopped while they were active):
 

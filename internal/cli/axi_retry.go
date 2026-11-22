@@ -29,7 +29,8 @@ func newAxiRetryCmd() *cobra.Command {
 			"invocation itself failed - a provider error, a usage limit, a transport\n" +
 			"failure, or the agent process exiting - or because fetching the base\n" +
 			"branch still failed after its retries, or because the daemon stopped (a\n" +
-			"host reset, an OOM kill, a crash) while a step was running, instead of\n" +
+			"daemon restart or update, a service stop, a host reset, an OOM kill, a\n" +
+			"crash) while a step was running, instead of\n" +
 			"starting the whole pipeline again with `no-mistakes rerun`. `axi run`\n" +
 			"does the same on its own when the branch's latest run qualifies and\n" +
 			"nothing about the run request changed.\n\n" +

@@ -47,9 +47,10 @@ type StepResult struct {
 	// the step. Fix selections store their origin on the answered round.
 	ResponseOrigin types.ResponseOrigin
 	// FailureCause is set on a failed step only when the executor recorded why
-	// (StepFailureCauseAgentInvocation, StepFailureCauseBaseFetch) or daemon
-	// startup recovery failed the step because the daemon stopped while it ran
-	// (StepFailureCauseDaemonInterrupted); nil means no recorded cause.
+	// (StepFailureCauseAgentInvocation, StepFailureCauseBaseFetch) or the
+	// daemon stopped while it ran (StepFailureCauseDaemonInterrupted, recorded
+	// by the executor on a clean stop and by startup recovery on an unclean
+	// one); nil means no recorded cause.
 	FailureCause *string
 	// CarriedFrom names the source run's step row that a retried run carried
 	// instead of executing.
@@ -67,8 +68,10 @@ const StepFailureCauseAgentInvocation = "agent_invocation"
 const StepFailureCauseBaseFetch = "base_fetch"
 
 // StepFailureCauseDaemonInterrupted records a step that was still in flight
-// when the daemon stopped - a host reset, an OOM kill, a crash - and that
-// startup recovery failed because it could not be resumed. Like an agent
+// when the daemon stopped: a clean stop (daemon restart, update, a service
+// manager stopping it) that the executor failed the step on, or an unclean
+// one (a host reset, an OOM kill, a crash) that startup recovery failed
+// because it could not be resumed. Like an agent
 // invocation failure it says nothing about the change: the step never
 // finished judging it.
 const StepFailureCauseDaemonInterrupted = "daemon_interrupted"

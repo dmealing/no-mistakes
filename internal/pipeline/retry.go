@@ -89,8 +89,8 @@ func (c *RetryCheckpoint) Failed() *db.StepResult { return c.Steps[c.FailedIndex
 
 // retryableFailureCause reports whether a failed step's recorded cause says
 // nothing about the change: the agent call itself failed, the base fetch
-// failed, or the daemon stopped (host reset, OOM kill, crash) before the step
-// finished and startup recovery failed it.
+// failed, or the daemon stopped (a clean stop, or a host reset, OOM kill, or
+// crash that startup recovery found) before the step finished.
 func retryableFailureCause(cause *string) bool {
 	if cause == nil {
 		return false
