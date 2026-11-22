@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -115,50 +114,18 @@ func (g *guard) list(tool string, args []string) ([]byte, int) {
 	return out, code
 }
 
-// forkRetryBudget bounds how long a refused fork is retried. A fork fails with
-// EAGAIN when the cgroup's task limit or the user's process limit is hit, which
-// under load is momentary: other steps' processes exit within milliseconds.
-const forkRetryBudget = 3 * time.Second
-
 func runReal(path string, args []string, stderr io.Writer) ([]byte, int, error) {
-	out, code, err := retryFork(forkRetryBudget, time.Sleep, func() ([]byte, int, error) {
-		cmd := exec.Command(path, args...)
-		cmd.Stderr = stderr
-		out, err := cmd.Output()
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return out, exitErr.ExitCode(), nil
-		}
-		if err != nil {
-			return nil, 0, err
-		}
-		return out, 0, nil
-	})
-	if errors.Is(err, syscall.EAGAIN) {
-		err = fmt.Errorf("%w (the fork was refused for %s: this cgroup or user is at its process/task limit, so the real tool never ran)", err, forkRetryBudget)
+	cmd := exec.Command(path, args...)
+	cmd.Stderr = stderr
+	out, err := cmd.Output()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return out, exitErr.ExitCode(), nil
 	}
-	return out, code, err
-}
-
-// retryFork runs attempt until it stops failing with EAGAIN (a refused fork)
-// or budget has been slept away, backing off between tries. Any other result,
-// including a nonzero exit of the started tool, is returned as is.
-func retryFork(budget time.Duration, sleep func(time.Duration), attempt func() ([]byte, int, error)) ([]byte, int, error) {
-	delay := 10 * time.Millisecond
-	for {
-		out, code, err := attempt()
-		if err == nil || !errors.Is(err, syscall.EAGAIN) || budget <= 0 {
-			return out, code, err
-		}
-		if delay > budget {
-			delay = budget
-		}
-		sleep(delay)
-		budget -= delay
-		if delay < 250*time.Millisecond {
-			delay *= 2
-		}
+	if err != nil {
+		return nil, 0, err
 	}
+	return out, 0, nil
 }
 
 // pgrep prints the real pgrep's matches that belong to this run. Like pkill it
