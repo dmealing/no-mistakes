@@ -1353,14 +1353,17 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 	// Fail stale steps (running, awaiting_approval, fixing, fix_review) for
 	// pending/running runs, excluding preserved runs. The CI monitor runs
 	// recovered above are no longer pending/running, so they are left alone.
+	// The step never finished judging the change, so the failure records
+	// StepFailureCauseDaemonInterrupted and the run stays continuable with
+	// `axi retry` (or a plain `axi run`) instead of needing a full rerun.
 	stepArgs := []any{
-		types.StepStatusFailed, errMsg, ts,
+		types.StepStatusFailed, errMsg, StepFailureCauseDaemonInterrupted, ts,
 		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview,
 		types.RunPending, types.RunRunning,
 	}
 	stepArgs = append(stepArgs, args...)
 	_, err = tx.Exec(
-		`UPDATE step_results SET status = ?, error = ?, completed_at = ?
+		`UPDATE step_results SET status = ?, error = ?, failure_cause = ?, completed_at = ?
 		 WHERE status IN (?, ?, ?, ?) AND run_id IN (
 			SELECT id FROM runs WHERE status IN (?, ?)`+placeholders+`
 		 )`,

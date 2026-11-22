@@ -108,7 +108,8 @@ A process can still escape that tree by detaching itself into its own session, s
 That sweep is scoped by working directory: it never touches a worktree whose run is still active, and it can never reach a process working outside `~/.no-mistakes/worktrees/` or outside a run worktree a run record names in a configured worktree root.
 
 On Linux, a step that exhausts memory fails only its own run.
-Configured commands, agent subprocesses, and managed agent servers raise their `oom_score_adj` so the kernel OOM killer picks them before the daemon.
+Configured commands, agent subprocesses, and managed agent servers raise their `oom_score_adj` to 10 above the daemon's own, so the kernel OOM killer picks them before the daemon.
+The margin is deliberately small: the kernel counts it as 1% of memory, so a step process never outranks a much larger process that is not a step, and a memory-pressure killer such as earlyoom does not terminate the small agent and test processes of every other run first.
 The generated systemd unit sets `OOMPolicy=continue`, so one killed step no longer stops the whole service and fails every other in-flight run with "daemon shutting down".
 When a step process is killed and the daemon's cgroup records a new `oom_kill`, the step fails with "ran out of memory" appended to its original error text, and the step log keeps the command output printed before the kill.
 An existing unit picks up the policy when `no-mistakes daemon start`, `restart`, or `update` refreshes the service definition.
@@ -137,7 +138,7 @@ Before a new run, `axi run` also applies the [pre-run check](/no-mistakes/refere
 
 ## Crash recovery
 
-A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. A clean stop still fails a run that is in the middle of a step.
+A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. A clean stop still fails a run that is in the middle of a step, recording the daemon stop as the step's failure cause so [`axi retry`](/no-mistakes/reference/cli/#no-mistakes-axi-retry) can continue it.
 
 On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon stopped while they were active):
 
@@ -149,7 +150,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Finalizes a stale pending or running run as `checks_passed` when CI completion, readiness, and the durable release marker (set only under `ci.release_after_checks_pass`) were recorded while its PR state remained open. A default-mode run is not promoted. Recovery preserves the recorded CI duration and does not resume monitoring
 - Preserves a run that was actively monitoring CI for an already-created PR as `ci_monitor_interrupted` rather than failing it: the PR is still open, so a restart mid-monitor is not a pipeline failure. That run is terminal and never resumed
 - Before failing any other stale active run, verifies its managed worktree head and pins an unpublished descendant under the run-specific recovery ref so later rerun or guarded custody recovery does not fall back to a stale gate branch
-- Marks every other stale active run as `failed` with the message "daemon crashed during execution"
+- Marks every other stale active run as `failed` with the message "daemon crashed during execution", and records the daemon-interrupted failure cause on its in-flight step so [`axi retry`](/no-mistakes/reference/cli/#no-mistakes-axi-retry) can continue it
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
 - Terminates processes a crashed daemon left running in worktrees no run owns any more, using the same working-directory scoping as run cleanup plus a ten-minute age floor so a run starting concurrently with startup is never mistaken for a leak
 - Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`, or whose unresolved refusal requires [retention](#what-it-does); under `~/.no-mistakes/worktrees/` that means eligible leftovers from terminal runs plus directories with no matching run record, while in a [configured worktree root](/no-mistakes/reference/global-config/#worktree_roots) only the directories run records name are ever swept or removed. A `ci_monitor_interrupted` worktree is also kept when its checked-out commit differs from the run's last pushed commit, since it may still hold an unpushed CI auto-fix commit

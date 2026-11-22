@@ -345,7 +345,8 @@ selection behavior.
 
 When a ` + "`failed`" + ` outcome came from the agent invocation itself - a provider
 processing error, a usage or quota limit, a transport failure, or the agent
-process exiting - and the run never pushed a head other than its preserved
+process exiting - or from a base-branch fetch that failed after its retries,
+or from a daemon stop while a step ran, and the run never pushed a head other than its preserved
 head, ` + "`no-mistakes axi retry --run <id>`" + ` continues that run instead of repeating it:
 a new run starts at the preserved head, carries the steps before the failed
 one, and restarts the failed step from the beginning, so a failed Review

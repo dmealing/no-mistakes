@@ -141,6 +141,111 @@ func stepsNamed(names ...types.StepName) []Step {
 	return steps
 }
 
+// A run whose step was still in flight when the host reset under it (the
+// daemon came back with no record of the turn) used to fail with no recorded
+// cause, so `axi retry` refused it as possibly being about the change and the
+// whole pipeline had to run again. Startup recovery now records the daemon
+// stop as the cause, and the run continues from its durable checkpoint.
+func TestPlanRetryCheckpointContinuesARunTheDaemonStoppedMidStep(t *testing.T) {
+	core := []types.StepName{types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint}
+	for _, inFlight := range []types.StepStatus{types.StepStatusRunning, types.StepStatusFixing, types.StepStatusAwaitingApproval} {
+		t.Run(string(inFlight), func(t *testing.T) {
+			database, _, _, repo := setupTest(t)
+			run, err := database.InsertRun(repo.ID, "feature", "abc123", "def456")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range core {
+				sr, err := database.InsertStepResult(run.ID, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch {
+				case name.Order() < types.StepDocument.Order():
+					err = database.CompleteStepWithStatus(sr.ID, types.StepStatusCompleted, 0, 10, "")
+				case name == types.StepDocument:
+					err = database.UpdateStepStatus(sr.ID, inFlight)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := database.RecoverStaleRunsExcept("daemon crashed during execution", nil); err != nil {
+				t.Fatal(err)
+			}
+
+			rows, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			document := rows[3]
+			if document.Status != types.StepStatusFailed || document.FailureCause == nil || *document.FailureCause != db.StepFailureCauseDaemonInterrupted {
+				t.Fatalf("document step = %s cause %v, want failed with cause %q", document.Status, document.FailureCause, db.StepFailureCauseDaemonInterrupted)
+			}
+			checkpoint, err := PlanRetryCheckpoint(database, run, stepsNamed(core...))
+			if err != nil {
+				t.Fatalf("PlanRetryCheckpoint refused a daemon-interrupted run: %v", err)
+			}
+			// Document failed after Test, so the continuation restarts from Test.
+			if checkpoint.Failed().StepName != types.StepDocument || checkpoint.Index != 2 {
+				t.Fatalf("checkpoint = failed %s, restart index %d; want document failed, restart at Test (2)", checkpoint.Failed().StepName, checkpoint.Index)
+			}
+		})
+	}
+}
+
+func TestExecutor_CleanDaemonStopMidStepLeavesTheRunContinuable(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	started := make(chan struct{})
+	review := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		close(started)
+		<-sctx.Ctx.Done()
+		return nil, fmt.Errorf("review agent: %w", sctx.Ctx.Err())
+	}}
+	steps := []Step{newPassStep(types.StepRebase), review, newPassStep(types.StepTest)}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	done := make(chan error, 1)
+	go func() { done <- NewExecutor(database, p, nil, nil, steps, nil).Execute(ctx, run, repo, t.TempDir()) }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("review step did not start")
+	}
+	cancel(ErrDaemonShutdown)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("execute succeeded, want the interrupted step to fail the run")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("execute did not stop after the daemon shutdown")
+	}
+
+	rows, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows[1].Status != types.StepStatusFailed || rows[1].FailureCause == nil || *rows[1].FailureCause != db.StepFailureCauseDaemonInterrupted {
+		t.Fatalf("review step = %s cause %v, want failed with cause %q", rows[1].Status, rows[1].FailureCause, db.StepFailureCauseDaemonInterrupted)
+	}
+	failed, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := PlanRetryCheckpoint(database, failed, stepsNamed(types.StepRebase, types.StepReview, types.StepTest))
+	if err != nil {
+		t.Fatalf("PlanRetryCheckpoint refused a run a clean daemon stop interrupted: %v", err)
+	}
+	if checkpoint.Failed().StepName != types.StepReview || checkpoint.Index != 1 {
+		t.Fatalf("checkpoint = failed %s, restart index %d; want review failed, restart at Review (1)", checkpoint.Failed().StepName, checkpoint.Index)
+	}
+}
+
 func TestPlanRetryCheckpointRefusesAnUnprovenBoundary(t *testing.T) {
 	core := []types.StepName{types.StepRebase, types.StepReview, types.StepTest, types.StepDocument}
 	for _, tc := range []struct {

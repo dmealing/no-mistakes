@@ -695,7 +695,7 @@ That cancels the pipeline's in-flight work and forces a full re-validation; use 
 
 ## no-mistakes axi retry
 
-Continue a run that failed because an agent invocation itself failed, or because the fetch of its base branch failed, instead of starting the whole pipeline again.
+Continue a run that failed because an agent invocation itself failed, because the fetch of its base branch failed, or because the daemon stopped while a step was running, instead of starting the whole pipeline again.
 
 ```sh
 no-mistakes axi retry --run <id>
@@ -703,8 +703,9 @@ no-mistakes axi retry --run <id>
 
 An agent invocation failure is an error the agent call returned while its context was still live: a provider processing error, a usage or quota limit, a transport failure, or the agent process exiting.
 The executor records that cause on the failed step when the step fails with that error.
-A base-branch fetch failure is the other recorded cause: every step that scopes its work to the branch's changes fetches the base branch first, retries a failed fetch twice with a short backoff, and records the cause only when every attempt failed.
-A timeout, a cancellation, and every failure about the change itself - a review finding, a failing test or lint, a refused policy, a human decision at a gate - record no cause and are never retried; use [`no-mistakes rerun`](#no-mistakes-rerun) or address them first.
+A base-branch fetch failure is another recorded cause: every step that scopes its work to the branch's changes fetches the base branch first, retries a failed fetch twice with a short backoff, and records the cause only when every attempt failed.
+A daemon stop is the third, recorded on the interrupted step because that step never finished judging the change. A clean stop while a step is running - `daemon restart`, `update`, or a service manager stopping the daemon - fails the run with `daemon shutting down` and records the cause. After an unclean stop - the host reset, the daemon was OOM-killed or crashed - the next start finds the run whose step was still in flight, and when that run cannot be resumed, startup recovery fails it with `daemon crashed during execution` and records the cause.
+Any other timeout or cancellation, and every failure about the change itself - a review finding, a failing test or lint, a refused policy, a human decision at a gate - record no cause and are never retried; use [`no-mistakes rerun`](#no-mistakes-rerun) or address them first.
 
 The retry starts a new run at the failed run's preserved head, so every correction the pipeline already committed is kept:
 
@@ -728,7 +729,7 @@ The retry refuses, changing nothing, unless every proof holds:
 | `failed run` | the run's status is `failed`, not `cancelled` or `completed` |
 | `unpublished run` | the run never pushed, or every push it made published exactly its preserved head |
 | `durable checkpoint` | the run's record holds one row per step of its pinned pipeline: completed or skipped steps, exactly one failed step, then steps that never ran |
-| `eligible failure` | the failed step's recorded cause is an agent invocation failure or a base-branch fetch failure |
+| `eligible failure` | the failed step's recorded cause is an agent invocation failure, a base-branch fetch failure, or a daemon stop while the step ran |
 | `preserved head` | the run verified its final head when it failed, and the gate still keeps exactly that commit: its recovery ref when the pipeline moved the head, the submitted commit otherwise |
 | `clean branch` | the working tree has no uncommitted changes |
 | `matching head` | the local `HEAD` is exactly the preserved head; adopt it first with `no-mistakes axi sync --recover` |
@@ -821,7 +822,7 @@ default can only add omission, never remove it. If another run is active on that
 cancels it before starting over. Treat rerun as a between-runs action after a
 failed or cancelled outcome; use `axi run` for separate local fixes, and do not
 use rerun to bypass a gate. When the run failed only because an agent invocation
-or the base-branch fetch failed, [`no-mistakes axi retry`](#no-mistakes-axi-retry)
+or the base-branch fetch failed, or the daemon stopped mid-step, [`no-mistakes axi retry`](#no-mistakes-axi-retry)
 continues it instead of repeating every completed step.
 
 | Flag | Type | Default | Description |
