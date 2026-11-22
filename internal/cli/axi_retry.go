@@ -12,8 +12,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 )
 
-// newAxiRetryCmd continues a run that failed on an agent invocation error or a
-// base-branch fetch.
+// newAxiRetryCmd continues a run that failed on an agent invocation error, a
+// base-branch fetch, or a daemon stop while a step ran.
 //
 // --run does not select a run. The retried run is always the current branch's
 // latest run, as for every mutating axi command; --run is the operator's
@@ -24,14 +24,15 @@ func newAxiRetryCmd() *cobra.Command {
 	var wait time.Duration
 	cmd := &cobra.Command{
 		Use:   "retry",
-		Short: "Continue a run that failed on an agent invocation error or a base fetch",
+		Short: "Continue a run that failed on an agent invocation error, a base fetch, or a daemon stop",
 		Long: "Continues the current branch's latest run when it failed because an agent\n" +
 			"invocation itself failed - a provider error, a usage limit, a transport\n" +
 			"failure, or the agent process exiting - or because fetching the base\n" +
-			"branch still failed after its retries, instead of starting the whole\n" +
-			"pipeline again with `no-mistakes rerun`. `axi run` does the same on its\n" +
-			"own when the branch's latest run qualifies and nothing about the run\n" +
-			"request changed.\n\n" +
+			"branch still failed after its retries, or because the daemon stopped (a\n" +
+			"host reset, an OOM kill, a crash) while a step was running, instead of\n" +
+			"starting the whole pipeline again with `no-mistakes rerun`. `axi run`\n" +
+			"does the same on its own when the branch's latest run qualifies and\n" +
+			"nothing about the run request changed.\n\n" +
 			"A new run starts at the failed run's preserved head, so every correction\n" +
 			"the pipeline already committed is kept. The steps before the failed one\n" +
 			"are carried from the failed run. The failed step restarts from the\n" +
@@ -43,8 +44,8 @@ func newAxiRetryCmd() *cobra.Command {
 			"The retry refuses, and changes nothing, unless every proof holds: --run\n" +
 			"names the branch's latest run; that run failed, nothing is active on the\n" +
 			"branch, and it never pushed a head other than its preserved head; its\n" +
-			"record shows exactly one failed step, failed on an agent invocation error\n" +
-			"or a base-branch fetch; its preserved head\n" +
+			"record shows exactly one failed step, failed on an agent invocation error,\n" +
+			"a base-branch fetch, or a daemon stop; its preserved head\n" +
 			"is still anchored in the local gate; the working tree is clean at exactly\n" +
 			"that head (adopt it first with `no-mistakes axi sync --recover`); and the\n" +
 			"run's model profile and the repository's gates are unchanged, and a carried\n" +

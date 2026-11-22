@@ -29,8 +29,43 @@ func TestStartShellCommandRaisesChildOOMScore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(got)) != stepOOMScoreAdj {
-		t.Fatalf("oom_score_adj = %q, want %s", strings.TrimSpace(string(got)), stepOOMScoreAdj)
+	if strings.TrimSpace(string(got)) != stepOOMScoreAdj() {
+		t.Fatalf("oom_score_adj = %q, want %s", strings.TrimSpace(string(got)), stepOOMScoreAdj())
+	}
+}
+
+// A step process sits just above the daemon, never at the maximum: at 1000
+// every small step process (an agent CLI, git, a test worker) outranked every
+// larger process on the host for a memory-pressure killer, so one run's
+// pressure terminated other runs' agents and suites.
+func TestStepOOMScoreSitsJustAboveTheDaemon(t *testing.T) {
+	raw, err := os.ReadFile("/proc/self/oom_score_adj")
+	if err != nil {
+		t.Skipf("no /proc/self/oom_score_adj: %v", err)
+	}
+	own, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := strconv.Atoi(stepOOMScoreAdj())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got <= own && own < maxOOMScoreAdj {
+		t.Fatalf("step score %d is not above the daemon's %d", got, own)
+	}
+	if own < maxOOMScoreAdj-stepOOMScoreMargin && got != own+stepOOMScoreMargin {
+		t.Fatalf("step score %d, want the daemon's %d plus %d", got, own, stepOOMScoreMargin)
+	}
+	for _, tc := range []struct{ own, want int }{
+		{own: 0, want: 10},
+		{own: 200, want: 210},
+		{own: 995, want: 1000},
+		{own: 1000, want: 1000},
+	} {
+		if got := stepOOMScoreAbove(tc.own); got != tc.want {
+			t.Fatalf("stepOOMScoreAbove(%d) = %d, want %d", tc.own, got, tc.want)
+		}
 	}
 }
 
@@ -40,8 +75,8 @@ func TestOwnOOMScoreScriptRaisesBeforeThePayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(out)) != stepOOMScoreAdj {
-		t.Fatalf("score = %q, want %s", strings.TrimSpace(string(out)), stepOOMScoreAdj)
+	if strings.TrimSpace(string(out)) != stepOOMScoreAdj() {
+		t.Fatalf("score = %q, want %s", strings.TrimSpace(string(out)), stepOOMScoreAdj())
 	}
 }
 
