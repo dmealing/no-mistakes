@@ -85,6 +85,12 @@ func TestRenderSystemdUnitIncludesManagedPath(t *testing.T) {
 	if got := systemdSectionValue(unit, "Service", "OOMPolicy"); got != "continue" {
 		t.Fatalf("[Service] OOMPolicy = %q, want continue:\n%s", got, unit)
 	}
+	// An unset TasksMax inherits systemd's DefaultTasksMax (68133 on a large
+	// host), which a busy gate's cgroup exhausted: forks then fail with
+	// EAGAIN. The unit must name a bound itself, well above that default.
+	if got := systemdSectionValue(unit, "Service", "TasksMax"); got != "120000" {
+		t.Fatalf("[Service] TasksMax = %q, want 120000:\n%s", got, unit)
+	}
 	pathValue := extractSystemdEnvironmentValue(t, unit, "PATH")
 	for _, want := range []string{
 		"/opt/homebrew/bin",

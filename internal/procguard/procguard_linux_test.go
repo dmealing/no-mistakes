@@ -1,6 +1,8 @@
 package procguard
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,20 +13,118 @@ import (
 	"time"
 )
 
+// forkRefusedText is how a refused fork (EAGAIN) reads in a tool's output.
+const forkRefusedText = "resource temporarily unavailable"
+
+// refusedOutput reports whether a tool's output shows a refused fork: either
+// the failed fork/exec the wrapper prints, or the Go runtime's report that the
+// re-entered guard binary could not start an OS thread (errno=11, EAGAIN).
+func refusedOutput(out string) bool {
+	return strings.Contains(out, forkRefusedText) || strings.Contains(out, "failed to create new OS thread")
+}
+
+// forkRefusedFatal fails the test naming the real cause. A fork is refused
+// when the cgroup's pids.max (a service's TasksMax) or the user's process limit
+// is reached, which says nothing about the guard under test; report that with
+// the limit's numbers instead of a misleading assertion about pgrep or pkill.
+func forkRefusedFatal(t *testing.T, what string, detail any) {
+	t.Helper()
+	text := fmt.Sprint(detail)
+	if len(text) > 300 {
+		text = text[:300] + "..."
+	}
+	t.Fatalf("%s: the host refused a fork (EAGAIN, %q): the task/process limit was reached while these tests ran, so this is an environment limit, not a procguard failure. %s\ndetail: %s",
+		what, forkRefusedText, cgroupPidsSummary(), text)
+}
+
+// cgroupPidsSummary reads this process's cgroup task counters, best effort.
+func cgroupPidsSummary() string {
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return "cgroup task counters unavailable"
+	}
+	_, rel, ok := strings.Cut(strings.TrimSpace(string(data)), "::")
+	if !ok {
+		return "cgroup task counters unavailable"
+	}
+	dir := filepath.Join("/sys/fs/cgroup", strings.TrimSpace(rel))
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return "?"
+		}
+		return strings.TrimSpace(string(b))
+	}
+	return fmt.Sprintf("cgroup %s: pids.current=%s pids.max=%s", rel, read("pids.current"), read("pids.max"))
+}
+
+// retryRefusedFork runs op until its fork is no longer refused. A refused fork
+// is momentary under load (other processes exit), so retry for a few seconds;
+// when it persists, fail with the real cause. op reports refused=true when the
+// fork failed before the tool did anything, so retrying is safe.
+func retryRefusedFork(t *testing.T, what string, op func() (refused bool, detail any)) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	delay := 10 * time.Millisecond
+	for {
+		refused, detail := op()
+		if !refused {
+			return
+		}
+		if time.Now().After(deadline) {
+			forkRefusedFatal(t, what, detail)
+		}
+		time.Sleep(delay)
+		if delay < 250*time.Millisecond {
+			delay *= 2
+		}
+	}
+}
+
+// runAgentShell runs script in sh with env, returning stdout and the combined
+// output. A refused fork (the test's own, or the guard's real-tool fork whose
+// failure the wrapper prints) is retried rather than surfacing as a failed
+// assertion.
+func runAgentShell(t *testing.T, env []string, script string) (stdout, combined string, err error) {
+	t.Helper()
+	retryRefusedFork(t, "agent shell "+script, func() (bool, any) {
+		var so, se bytes.Buffer
+		cmd := exec.Command("sh", "-c", script)
+		cmd.Env = env
+		cmd.Stdout = &so
+		cmd.Stderr = &se
+		err = cmd.Run()
+		stdout, combined = so.String(), so.String()+se.String()
+		if errors.Is(err, syscall.EAGAIN) || refusedOutput(combined) {
+			return true, fmt.Sprintf("err=%v output=%q", err, combined)
+		}
+		return false, nil
+	})
+	return stdout, combined, err
+}
+
 // startTagged starts a long sleep whose command line carries tag, with the
 // run marker set to run (or no marker when run is empty), and reaps it when
 // the test ends.
 func startTagged(t *testing.T, tag, run string) *exec.Cmd {
 	t.Helper()
-	cmd := exec.Command("sleep", tag)
 	env := []string{"PATH=" + os.Getenv("PATH")}
 	if run != "" {
 		env = append(env, MarkerEnv+"="+run)
 	}
-	cmd.Env = env
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
+	var cmd *exec.Cmd
+	retryRefusedFork(t, "start sleep "+tag, func() (bool, any) {
+		cmd = exec.Command("sleep", tag)
+		cmd.Env = env
+		err := cmd.Start()
+		if errors.Is(err, syscall.EAGAIN) {
+			return true, err
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return false, nil
+	})
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
@@ -78,9 +178,7 @@ func TestGuardedPkillStopsThisRunsSuiteAndSparesASiblingRuns(t *testing.T) {
 	sibling := startTagged(t, tag, "run-sibling")
 	unmarked := startTagged(t, tag, "")
 
-	shell := exec.Command("sh", "-c", "pkill -f 'sleep "+tag+"'; echo pkill-exit=$?")
-	shell.Env = env
-	out, err := shell.CombinedOutput()
+	_, out, err := runAgentShell(t, env, "pkill -f 'sleep "+tag+"'; echo pkill-exit=$?")
 	if err != nil {
 		t.Fatalf("agent shell failed (a pattern kill must never reach its own shell): %v\n%s", err, out)
 	}
@@ -109,9 +207,7 @@ func TestGuardedPgrepFeedsKillOnlyThisRunsProcesses(t *testing.T) {
 	own := startTagged(t, tag, "run-own")
 	sibling := startTagged(t, tag, "run-sibling")
 
-	shell := exec.Command("sh", "-c", "for p in $(pgrep -f 'sleep "+tag+"'); do kill $p; done; echo done")
-	shell.Env = env
-	out, err := shell.CombinedOutput()
+	_, out, err := runAgentShell(t, env, "for p in $(pgrep -f 'sleep "+tag+"'); do kill $p; done; echo done")
 	if err != nil {
 		t.Fatalf("agent shell failed: %v\n%s", err, out)
 	}
@@ -133,13 +229,11 @@ func TestGuardedPgrepNewestIgnoresANewerSiblingRunProcess(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	_ = startTagged(t, tag, "run-sibling")
 
-	shell := exec.Command("sh", "-c", "pgrep -n -f 'sleep "+tag+"'")
-	shell.Env = env
-	out, err := shell.Output()
+	out, combined, err := runAgentShell(t, env, "pgrep -n -f 'sleep "+tag+"'")
 	if err != nil {
-		t.Fatalf("pgrep -n failed: %v\n%s", err, out)
+		t.Fatalf("pgrep -n failed: %v\n%s", err, combined)
 	}
-	if got := strings.TrimSpace(string(out)); got != fmt.Sprint(own.Process.Pid) {
+	if got := strings.TrimSpace(out); got != fmt.Sprint(own.Process.Pid) {
 		t.Fatalf("pgrep -n = %q, want this run's own process %d", got, own.Process.Pid)
 	}
 }
