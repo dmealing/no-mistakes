@@ -16,18 +16,18 @@ var surfacePatterns = []string{
 // documentation (IsDocs), no user-facing surface (surfacePatterns), and every
 // production file lives under an internal/ directory, which Go makes
 // unimportable from outside its module. Tests and fixtures never count
-// against it. It is deliberately one-sided: an empty change, a production
-// file outside internal/, or any doubtful path is not internal-only, so a
+// against it, but at least one production file must change. It is
+// deliberately one-sided: an empty or tests-only change, a production file
+// outside internal/, or any doubtful path is not internal-only, so a
 // caller that skips work on this signal keeps the work whenever the signal
 // is not clean.
 func InternalOnly(files []string) bool {
-	seen := false
+	production := false
 	for _, f := range files {
 		f = strings.TrimSpace(f)
 		if f == "" {
 			continue
 		}
-		seen = true
 		switch {
 		case IsDocs(f):
 			return false
@@ -36,8 +36,9 @@ func InternalOnly(files []string) bool {
 		case matchAny(surfacePatterns, f), !underInternalDir(f):
 			return false
 		}
+		production = true
 	}
-	return seen
+	return production
 }
 
 func underInternalDir(path string) bool {

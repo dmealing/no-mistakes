@@ -1843,7 +1843,7 @@ rounds:
 		// The cap binds only on a round it changes: one that would start
 		// another fix round or park on its remaining findings. A round that
 		// completes anyway keeps its ordinary completion and no notice.
-		reviewCapBinds := reviewCapReached && !wordingNotesOnly && (autoFixableFindingsJSON(effectiveFindings) != "" || !completesUncapped)
+		reviewCapBinds := reviewCapReached && !wordingNotesOnly && (autoFixableFindingsJSON(roundFindings) != "" || !completesUncapped)
 		reviewCapNotes := reviewCapBinds && reviewRoundCapNotesAllowed(effectiveFindings, outcome.ReviewCoverageComplete)
 		if reviewCapNotes {
 			var err error
@@ -1889,7 +1889,7 @@ rounds:
 			inserted, dbErr = e.db.InsertStepRoundWithRepair(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, outcome.RepairPublished, roundDuration)
 		}
 		if dbErr != nil {
-			if maxReviewFixRounds > 0 {
+			if maxReviewFixRounds > 0 || reviewRoundCap > 0 {
 				return false, "", fmt.Errorf("persist bounded Review round: %w", dbErr)
 			}
 			currentRoundID = roundInsertID(currentRoundID, inserted, dbErr)

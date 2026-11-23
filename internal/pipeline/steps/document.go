@@ -120,7 +120,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	// Skip entirely when nothing the agent would document has changed. No
 	// lint result is stashed, so the lint step falls back to its own pass -
 	// neither duty is ever silently skipped.
-	changedOutput, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-only", "-z", baseSHA+".."+sctx.Run.HeadSHA)
+	changedOutput, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-only", "--no-renames", "-z", baseSHA+".."+sctx.Run.HeadSHA)
 	if err != nil {
 		return nil, fmt.Errorf("get changed files: %w", err)
 	}

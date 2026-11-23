@@ -242,3 +242,53 @@ func TestExecutor_ReviewRoundCapNoticeOnlyWhenTheCapBinds(t *testing.T) {
 		})
 	}
 }
+
+// An unselected info finding carried from an earlier round would start no fix
+// round, so a capped re-check that reports nothing new completes as it would
+// without the cap: the carried note stays recorded and no cap notice appears.
+func TestExecutor_ReviewRoundCapIgnoresACarriedUnselectedFinding(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	cfg := &config.Config{Review: config.Review{RoundCap: 2}}
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		calls++
+		outcome := &StepOutcome{
+			AutoFixable:            true,
+			ReviewedPaths:          []string{"main.go", "other.go"},
+			ReviewablePaths:        []string{"main.go", "other.go"},
+			ReviewCoverageComplete: true,
+		}
+		if calls == 1 {
+			outcome.NeedsApproval = true
+			outcome.Findings = `{"findings":[` +
+				`{"id":"review-1","severity":"warning","file":"main.go","description":"could be tighter","action":"auto-fix"},` +
+				`{"id":"review-2","severity":"info","file":"other.go","description":"rename for clarity","action":"auto-fix","info_kind":"other"}]}`
+		}
+		return outcome, nil
+	}}
+	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, []string{"review-2"}, nil, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+
+	if calls != 2 {
+		t.Fatalf("review rounds = %d, want 2", calls)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[0].Status != types.StepStatusCompleted || steps[0].FindingsJSON == nil {
+		t.Fatalf("review should complete with the carried note recorded: %+v", steps[0])
+	}
+	if strings.Contains(*steps[0].FindingsJSON, types.FindingIDReviewRoundCapNotes) {
+		t.Fatalf("a round the cap does not change must carry no cap notice: %s", *steps[0].FindingsJSON)
+	}
+	if !strings.Contains(*steps[0].FindingsJSON, `"review-2"`) {
+		t.Fatalf("the carried note should stay recorded: %s", *steps[0].FindingsJSON)
+	}
+}

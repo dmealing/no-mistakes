@@ -98,3 +98,43 @@ func TestDocumentStep_KeepsTheStepWithoutACleanInternalOnlySignal(t *testing.T) 
 		})
 	}
 }
+
+// A rename lists only its destination unless renames are split, so moving a
+// command entrypoint into internal/ would otherwise read as internal-only.
+func TestDocumentStep_KeepsTheStepWhenACommandMovesIntoInternal(t *testing.T) {
+	t.Parallel()
+	dir, _, _ := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "main")
+	if err := os.MkdirAll(filepath.Join(dir, "cmd", "tool"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cmd", "tool", "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "add command")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "-b", "move-command")
+	if err := os.MkdirAll(filepath.Join(dir, "internal", "tool"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "mv", "cmd/tool/main.go", "internal/tool/main.go")
+	gitCmd(t, dir, "commit", "-m", "move command into internal")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	calls := 0
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		calls++
+		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"noop"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Document.SkipInternal = true
+
+	outcome, err := (&DocumentStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || outcome.Skipped {
+		t.Fatalf("a command moved into internal/ must keep the document step, calls=%d outcome=%+v", calls, outcome)
+	}
+}

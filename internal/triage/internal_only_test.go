@@ -10,7 +10,8 @@ func TestInternalOnly(t *testing.T) {
 	}{
 		"internal production and tests":    {files: []string{"internal/pipeline/executor.go", "internal/pipeline/executor_test.go"}, want: true},
 		"nested internal package":          {files: []string{"svc/internal/store/db.go"}, want: true},
-		"tests only":                       {files: []string{"internal/x/x_test.go", "internal/x/testdata/in.txt"}, want: true},
+		"tests only has no signal":         {files: []string{"internal/x/x_test.go", "internal/x/testdata/in.txt"}, want: false},
+		"non-Go tests only has no signal":  {files: []string{"src/app.test.ts"}, want: false},
 		"empty change has no signal":       {files: nil, want: false},
 		"blank lines only":                 {files: []string{"", "  "}, want: false},
 		"docs touched":                     {files: []string{"internal/a/a.go", "docs/reference/x.md"}, want: false},

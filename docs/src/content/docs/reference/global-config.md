@@ -1317,7 +1317,7 @@ document:
   skip_internal: false
 ```
 
-A change is internal-only when every changed production file sits under an `internal/` directory and no changed path is documentation, a command or CLI surface (`cmd/`, `cli/`), configuration or schema, help or usage text, or a public API definition (`api/`, `.proto`, `.graphql`, OpenAPI or Swagger). Test files do not count either way.
+A change is internal-only when every changed production file sits under an `internal/` directory and no changed path is documentation, a command or CLI surface (`cmd/`, `cli/`), configuration or schema, help or usage text, or a public API definition (`api/`, `.proto`, `.graphql`, OpenAPI or Swagger). At least one production file must change: test files do not count either way, so a tests-only change runs the step. A renamed file counts at both its old and new path.
 The check is built on the same path classification `no-mistakes axi triage` uses. Without a clean internal-only signal (for example, a repository with no `internal/` layout) the step runs. A skipped Document step leaves Lint to run its own pass.
 Set `false` to always run the step. It is global-only.
 
