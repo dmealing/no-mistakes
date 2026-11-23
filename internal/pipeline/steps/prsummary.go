@@ -1509,7 +1509,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 		}
 		// A completed Review that reached review.round_cap recorded its
 		// remaining findings as notes (the executor's reviewCapNotes).
-		if notes, capped := reviewRoundCapNotes(&findings); capped && sr.StepName == types.StepReview && i == len(rounds)-1 && sr.Status == types.StepStatusCompleted {
+		if notes, capped := reviewRoundCapNotes(&findings); capped && sr.StepName == types.StepReview {
 			inner.WriteString(fmt.Sprintf("📌 Review round cap reached: %s left unresolved as notes (no further fix round):\n\n", countFindingsBySeverity(&notes)))
 			writeFindingItems(&inner, sr, &notes, flavor)
 			inner.WriteString("\n")
