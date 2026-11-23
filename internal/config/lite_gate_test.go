@@ -71,3 +71,32 @@ func TestMerge_RepoConfigCannotSetLiteGateSwitches(t *testing.T) {
 		t.Fatalf("a repository config changed an operator lite-gate switch: %+v %+v", cfg.Review, cfg.Document)
 	}
 }
+
+// review.incremental is on when absent, off when set false, and global-only.
+func TestMerge_ReviewIncrementalSwitch(t *testing.T) {
+	t.Parallel()
+	for source, want := range map[string]bool{
+		"log_level: info\n":               true,
+		"review:\n  incremental: true\n":  true,
+		"review:\n  incremental: false\n": false,
+	} {
+		global, err := LoadGlobalFromBytes([]byte(source))
+		if err != nil {
+			t.Fatalf("LoadGlobalFromBytes(%q) = %v", source, err)
+		}
+		if got := MergeForRemote(global, &RepoConfig{}, "https://github.com/acme/widget.git").Review.Incremental; got != want {
+			t.Fatalf("%q: review.incremental = %v, want %v", source, got, want)
+		}
+	}
+	override := "repository_overrides:\n  https://github.com/acme/widget.git:\n    review:\n      incremental: false\n"
+	if _, err := LoadGlobalFromBytes([]byte(override)); err == nil {
+		t.Fatalf("a repository_overrides entry set the global-only review.incremental")
+	}
+	repo, err := LoadRepoFromBytes([]byte("review:\n  incremental: false\n"))
+	if err == nil {
+		global, _ := LoadGlobalFromBytes([]byte("log_level: info\n"))
+		if !MergeForRemote(global, repo, "https://github.com/acme/widget.git").Review.Incremental {
+			t.Fatalf("a repository config turned off the operator's review.incremental")
+		}
+	}
+}

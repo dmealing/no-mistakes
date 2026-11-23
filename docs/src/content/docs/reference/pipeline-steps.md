@@ -101,7 +101,7 @@ AI code review of your diff. This is probabilistic evidence, not a security or c
 
 **Behavior:**
 
-- Diffs the base commit against head
+- Diffs the base commit against head; with [`review.incremental`](/no-mistakes/reference/global-config/#reviewincremental) on (the default) and an earlier approved Review of the branch whose head is an ancestor, diffs only the branch's changes since that approval and carries the approval, or completes with a `review carried from run <id> at <sha>` notice when nothing reviewable changed; anything it cannot prove falls back to a full Review
 - Computes review scope using [`ignore_patterns` and instruction-covered paths](/no-mistakes/reference/repo-config/#matching)
 - Sends the filtered diff to the agent with structured review instructions and a structured output schema
 - Requires the `reviewed_paths` coverage record before a clean review can certify the head: the exact changed files the reviewer actually read and judged. On a clean review it must exactly cover the trusted reviewable set computed from the current diff, including restored instruction-covered paths; omitted, empty, partial, fabricated, out-of-scope, or mixed coverage parks the round for approval instead of certifying the whole head, and the step log names the files left unverified. The field is optional in the output schema only so an older payload still parses; an absent record is treated as no coverage, never as a pass. During carry-forward verification, omitted or invalid coverage likewise cannot clear an outstanding selected finding.

@@ -105,6 +105,7 @@ review:
   inline_fixes: true
   round_cap: 2
   coverage_first_round_only: true
+  incremental: true
 
 document:
   skip_internal: true
@@ -1303,6 +1304,34 @@ review:
 
 When a review turn's `reviewed_paths` omits reviewable files, the Review step normally runs a bounded focused pass over just those files. With this on, only the step's first review round runs it: a post-fix re-review, an answer round, and an intent-correction re-run skip that pass. A later round whose coverage record is incomplete then parks on the named files, because certification still requires full coverage. An operator-requested coverage continuation is unaffected.
 Set `false` to run the focused pass on every round. It is global-only.
+
+### review.incremental
+
+Reviews only what changed since the branch's latest approved Review, and carries that approval when nothing reviewable changed.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+
+```yaml
+review:
+  incremental: false # always run a full Review
+```
+
+The Review step looks up the latest Review of the same branch in the same repository that completed with an approval, in an earlier run or in this one. When that approved head is still an ancestor of the new head, it merges the approved head with the current base (`git merge-tree`) and reviews only the diff from that merge to the new head: the branch's commits since the approval, including any edit made inside a merge commit. Commits that only bring in the base branch add nothing to that diff.
+The reviewer is told which run approved which head and gets that review's findings as already-decided context; earlier decisions on the branch carry as they always do. Fix, answer, coverage, and intent rounds of an incremental Review keep the same base commit and scope.
+When the new head adds no reviewable work (only a clean base merge, or the same head again), the step completes without an agent turn, approving the new head, with an `info` notice `review-carried` that reads `review carried from run <id> at <sha>` on the step result and on the Review line of the PR body.
+A full Review runs instead, and the step log says why, when any of these holds:
+
+- the base changes since the approved head touch a file the approved review changed within 3 lines of a reviewed hunk, or touch such a file without line hunks (binary, mode, or type change)
+- the approved head is not an ancestor of the new head (a rebase, force-push, or rewrite), or does not merge cleanly with the base
+- the branch has no Review that completed with an approval (a revalidation revokes a run's approval, so it is not carried)
+- the explicit `--intent` differs from the approved run's, or the PR base branch differs
+- the repository configuration, or the global `agent`, `agent_config`, `review_agents`, `review` (other than this key), or `repository_overrides` settings, differ from what the approved review's rounds recorded; rounds record them while [`eval.capture_provenance`](#eval) is on (the default), and with no record nothing can be compared
+- any git or database read fails
+
+Two inferred intents never block a carry, since an inferred intent is not an acceptance contract. The Test step and everything after it still run on every head. Set `false` to review every run in full. It is global-only.
 
 ### document.skip_internal
 

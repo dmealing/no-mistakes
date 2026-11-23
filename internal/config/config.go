@@ -454,6 +454,12 @@ type GlobalReviewRaw struct {
 	// pass to a Review step's first round. Nil means the default (on).
 	// Global-only, like InlineFixes.
 	CoverageFirstRoundOnly *bool `yaml:"coverage_first_round_only"`
+	// Incremental lets a Review re-review only the commits added since the
+	// branch's latest approved Review and carry that approval forward when
+	// the approved head is an ancestor and nothing in between can be proven
+	// to need a full review (pipeline/steps/review_incremental.go). Nil means
+	// the default (on). Global-only, like InlineFixes.
+	Incremental *bool `yaml:"incremental"`
 }
 
 // DefaultReviewRoundCap is review.round_cap when the key is absent: review,
@@ -1242,6 +1248,10 @@ type Review struct {
 	// review.coverage_first_round_only (default on): later rounds skip the
 	// automatic focused coverage-completion pass.
 	CoverageFirstRoundOnly bool
+	// Incremental is machine-local review.incremental (default on): a Review
+	// whose branch has an earlier approved Review re-reviews only the new
+	// commits, or carries the approval when there are none.
+	Incremental bool
 	// GlobalPathInstructions come from the global config's review block.
 	GlobalPathInstructions []PathInstruction
 	// RepositoryPathInstructions come from the repository_overrides entry
@@ -1837,7 +1847,7 @@ session_reuse: true
 # review:
 #   inline_fixes: true
 
-# Lite-gate cost switches (this fork build, global only). All three are on when
+# Lite-gate cost switches (this fork build, global only). All four are on when
 # absent; left commented so this file stays readable by upstream builds, which
 # reject unknown keys.
 # review.round_cap: the most review rounds one Review step runs on its own
@@ -1849,9 +1859,15 @@ session_reuse: true
 # a Review step's first round only. false runs it on every round.
 # document.skip_internal: skip the Document step for an internal-only change
 # (no docs, CLI, config, schema, or public API path touched). false always runs it.
+# review.incremental: when the branch's latest approved Review is an ancestor of
+# the new head, review only the commits added since it (a merge of the base that
+# touches none of the reviewed hunks needs no review) and carry its approval.
+# Anything that cannot be proven falls back to a full Review. false always runs
+# a full Review.
 # review:
 #   round_cap: 2
 #   coverage_first_round_only: true
+#   incremental: true
 # document:
 #   skip_internal: true
 
@@ -4507,6 +4523,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 			InlineFixes:            global.Review.InlineFixes == nil || *global.Review.InlineFixes,
 			RoundCap:               reviewRoundCap(global.Review.RoundCap),
 			CoverageFirstRoundOnly: global.Review.CoverageFirstRoundOnly == nil || *global.Review.CoverageFirstRoundOnly,
+			Incremental:            global.Review.Incremental == nil || *global.Review.Incremental,
 		},
 		PR:              pr,
 		ForgeProfiles:   global.ForgeProfiles,

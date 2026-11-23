@@ -1261,6 +1261,14 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 		return buildDetail(fmt.Sprintf("⚠️ **%s** - findings unavailable", name))
 	}
 
+	// A Review that carried an earlier approval instead of reviewing says
+	// where the approval came from (review.incremental).
+	if sr.StepName == types.StepReview {
+		if notice, carried := reviewCarriedNotice(finalFindings); carried {
+			return buildDetail(fmt.Sprintf("♻️ **%s** - %s", name, notice))
+		}
+	}
+
 	if sr.StepName == types.StepReview && (riskLevel == "medium" || riskLevel == "high") && !hadAnyFindings {
 		return buildDetail(fmt.Sprintf("%s **%s** - %s risk", riskEmoji(riskLevel), name, riskLevel))
 	}
@@ -1505,6 +1513,10 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 			inner.WriteString(fmt.Sprintf("📝 %d wording or comment-placement %s left for the author (no fix round spent):\n\n", len(findings.Items), pluralWordPR(len(findings.Items), "note", "notes")))
 			writeFindingItems(&inner, sr, &findings, flavor)
 			inner.WriteString("\n")
+			continue
+		}
+		if notice, carried := reviewCarriedNotice(&findings); carried && sr.StepName == types.StepReview {
+			inner.WriteString(fmt.Sprintf("♻️ %s\n\n", notice))
 			continue
 		}
 		// A completed Review that reached review.round_cap recorded its
@@ -1844,4 +1856,18 @@ func reviewRoundCapNotes(findings *types.Findings) (types.Findings, bool) {
 		notes.Items = append(notes.Items, item)
 	}
 	return notes, capped
+}
+
+// reviewCarriedNotice returns the carried-approval notice's description and
+// whether findings hold one (types.FindingIDReviewCarried).
+func reviewCarriedNotice(findings *types.Findings) (string, bool) {
+	if findings == nil {
+		return "", false
+	}
+	for _, item := range findings.Items {
+		if item.ID == types.FindingIDReviewCarried {
+			return sanitizePromptText(item.Description), true
+		}
+	}
+	return "", false
 }

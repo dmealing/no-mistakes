@@ -147,6 +147,13 @@ const FindingIDReviewFixRoundsExhausted = "review-fix-rounds-exhausted"
 // only on a completed step; an error or ask-user finding never gets it.
 const FindingIDReviewRoundCapNotes = "review-round-cap-notes"
 
+// FindingIDReviewCarried is the info notice a Review step completes on when it
+// carried the branch's earlier approval instead of reviewing: the new head
+// adds no reviewable branch work to the approved head, apart from base
+// movement that touches none of the reviewed hunks (review.incremental). Its
+// description names the source run and approved head.
+const FindingIDReviewCarried = "review-carried"
+
 // FindingCategoryIntentConformance marks a review finding that the change
 // contradicts the run's authoritative intent (see the review prompt's intent
 // conformance clause). The PR step refuses to open or update a pull request
