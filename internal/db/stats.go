@@ -195,9 +195,9 @@ func (d *DB) StepFindingStats(step *StepResult) (StepStats, error) {
 	return stepFindingStats(step, rounds), nil
 }
 
-// findingItems returns the findings that count as mistakes. A Test budget cut
-// or an exhausted Review fix-round budget is an operator decision about a
-// budget, not a code mistake, so it is neither reported nor, when a later round
+// findingItems returns the findings that count as mistakes. A Test budget cut,
+// an exhausted Review fix-round budget, or the Review round-cap notice is a
+// decision about a budget, not a code mistake, so it is neither reported nor, when a later round
 // no longer carries it, fixed.
 func findingItems(raw *string) []types.Finding {
 	if raw == nil || *raw == "" {
@@ -209,7 +209,7 @@ func findingItems(raw *string) []types.Finding {
 	}
 	return slices.DeleteFunc(findings.Items, func(item types.Finding) bool {
 		return item.ID == types.FindingIDTestAgentTimeout || item.ID == types.FindingIDTestAgentUnvalidatedWork ||
-			item.ID == types.FindingIDReviewFixRoundsExhausted
+			item.ID == types.FindingIDReviewFixRoundsExhausted || item.ID == types.FindingIDReviewRoundCapNotes
 	})
 }
 

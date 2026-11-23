@@ -1287,6 +1287,14 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 		currentFindings = finalFindings
 	}
 
+	// A Review completed at review.round_cap left its remaining findings as
+	// notes instead of looping: say so, rather than "approved as-is".
+	if sr.StepName == types.StepReview {
+		if notes, capped := reviewRoundCapNotes(currentFindings); capped {
+			return buildDetail(fmt.Sprintf("📌 **%s** - %s left as notes at the round cap", name, countFindingsBySeverity(&notes)))
+		}
+	}
+
 	// Had findings and the final state still contains them - approved as-is.
 	count := countFindingsBySeverity(currentFindings)
 	line := fmt.Sprintf("⚠️ **%s** - %s", name, count)
@@ -1496,6 +1504,14 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 		if sr.StepName == types.StepReview && i == len(rounds)-1 && r.Round > 1 && sr.Status == types.StepStatusCompleted && types.OnlyWordingNotes(findings.Items) {
 			inner.WriteString(fmt.Sprintf("📝 %d wording or comment-placement %s left for the author (no fix round spent):\n\n", len(findings.Items), pluralWordPR(len(findings.Items), "note", "notes")))
 			writeFindingItems(&inner, sr, &findings, flavor)
+			inner.WriteString("\n")
+			continue
+		}
+		// A completed Review that reached review.round_cap recorded its
+		// remaining findings as notes (the executor's reviewCapNotes).
+		if notes, capped := reviewRoundCapNotes(&findings); capped && sr.StepName == types.StepReview {
+			inner.WriteString(fmt.Sprintf("📌 Review round cap reached: %s left unresolved as notes (no further fix round):\n\n", countFindingsBySeverity(&notes)))
+			writeFindingItems(&inner, sr, &notes, flavor)
 			inner.WriteString("\n")
 			continue
 		}
@@ -1809,4 +1825,23 @@ func pluralWordPR(n int, one, many string) string {
 		return one
 	}
 	return many
+}
+
+// reviewRoundCapNotes returns findings without the review round cap notice and
+// whether the notice was present (types.FindingIDReviewRoundCapNotes).
+func reviewRoundCapNotes(findings *types.Findings) (types.Findings, bool) {
+	if findings == nil {
+		return types.Findings{}, false
+	}
+	notes := *findings
+	notes.Items = nil
+	capped := false
+	for _, item := range findings.Items {
+		if item.ID == types.FindingIDReviewRoundCapNotes {
+			capped = true
+			continue
+		}
+		notes.Items = append(notes.Items, item)
+	}
+	return notes, capped
 }

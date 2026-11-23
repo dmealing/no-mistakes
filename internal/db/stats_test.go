@@ -258,3 +258,29 @@ func TestGetStatsDoesNotCountReviewFixRoundBudgetAsMistake(t *testing.T) {
 		t.Fatalf("review step = reported %d fixed %d, want 1/1 (only R1)", stats.ReportedFindings, stats.FixedFindings)
 	}
 }
+
+// A Review that completes at review.round_cap records a notice beside the
+// warning it left as a note. The notice is the pipeline's budget, not a
+// defect: the step reports only the warning, which no round fixed.
+func TestGetStatsDoesNotCountReviewRoundCapNoticeAsMistake(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/repo/cap", "git@example.com:cap.git", "main")
+	run, _ := d.InsertRun(repo.ID, "cap", "head", "base")
+	review, _ := d.InsertStepResult(run.ID, types.StepReview)
+	initial := `{"findings":[{"id":"R1","severity":"warning","file":"main.go","description":"could be tighter","action":"auto-fix"}]}`
+	capped := `{"findings":[{"id":"R1","severity":"warning","file":"main.go","description":"could be tighter","action":"auto-fix"},{"id":"review-round-cap-notes","severity":"info","description":"review round cap reached","action":"no-op"}]}`
+	if _, err := d.InsertStepRound(review.ID, 1, "initial", &initial, nil, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertStepRound(review.ID, 2, "auto_fix", &capped, nil, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := d.StepFindingStats(review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ReportedFindings != 1 || stats.FixedFindings != 0 {
+		t.Fatalf("review step = reported %d fixed %d, want 1/0 (only R1)", stats.ReportedFindings, stats.FixedFindings)
+	}
+}

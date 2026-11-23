@@ -1501,7 +1501,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var pendingVerificationIDs []string
 	selectedOutstandingIDs := state.selectedOutstandingIDs
 	if carryFindings {
-		outstandingFindings = excludeFindingsJSON(state.outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted})
+		outstandingFindings = excludeFindingsJSON(state.outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted, types.FindingIDReviewRoundCapNotes})
 		pendingVerificationIDs = append([]string(nil), state.selectedOutstandingIDs...)
 		// An answer round is a round type the append-only set was not written
 		// for, and it does NOT earn pending-verification entries. A fix round
@@ -1695,6 +1695,7 @@ rounds:
 		}
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
+		sctx.PriorRounds = roundNum
 		outcome, waited, err := e.executeWithTestSlot(step, sctx, func() (*StepOutcome, error) {
 			return e.executeWithCrashRetry(step, sctx, &crashRetriesRemaining)
 		})
@@ -1781,7 +1782,7 @@ rounds:
 			outstandingFindings = dropReviewQuestionFindingsJSON(outstandingFindings)
 			// The budget notice is re-derived, never a code finding whose
 			// absent file anchor can prevent positive verification.
-			outstandingFindings = excludeFindingsJSON(outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted})
+			outstandingFindings = excludeFindingsJSON(outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted, types.FindingIDReviewRoundCapNotes})
 			// An answer round retracts by naming ids, never by silence - and
 			// ONLY an answer round. A fix round is held to the coverage rule,
 			// so a retraction it claimed would clear a selected finding no
@@ -1822,6 +1823,39 @@ rounds:
 			writeLog(reviewFixRoundLimitMessage(reviewFixRounds, maxReviewFixRounds))
 		}
 
+		// The global review round cap (review.round_cap) ends the automatic
+		// loop: at the cap no further fix round starts. Remaining findings are
+		// recorded as notes on the step and in the PR when none is an error or
+		// ask-user finding and the round's coverage is complete; otherwise the
+		// round parks at the existing gate for a decision, exactly as before.
+		reviewRoundCap := 0
+		if stepName == types.StepReview && e.config != nil {
+			reviewRoundCap = e.config.Review.RoundCap
+		}
+		// After its first round, a Review whose only remaining findings are
+		// info-severity wording or comment-placement notes completes without
+		// another fix round: the notes stay on the round and the PR body lists
+		// them as left for the author. Round 1's notes are still fixed, and a
+		// weak test, a stale record or anything else is never such a note.
+		wordingNotesOnly := stepName == types.StepReview && roundNum > 1 && onlyWordingNotesJSON(effectiveFindings)
+		completesUncapped := !outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && !hasBlockingFindingsJSON(effectiveFindings) && (!carryFindings || wordingNotesOnly || !hasSelectedFindingsJSON(effectiveFindings, selectedOutstandingIDs))
+		reviewCapReached := reviewRoundCapReached(reviewRoundCap, reviewFixRounds)
+		// The cap binds only on a round it changes: one that would start
+		// another fix round or park on its remaining findings. A round that
+		// completes anyway keeps its ordinary completion and no notice.
+		reviewCapBinds := reviewCapReached && !wordingNotesOnly && (autoFixableFindingsJSON(roundFindings) != "" || !completesUncapped)
+		reviewCapNotes := reviewCapBinds && reviewRoundCapNotesAllowed(effectiveFindings, outcome.ReviewCoverageComplete)
+		if reviewCapNotes {
+			var err error
+			effectiveFindings, err = appendReviewRoundCapNotes(effectiveFindings, reviewRoundCap)
+			if err != nil {
+				return false, "", fmt.Errorf("record Review round cap notes: %w", err)
+			}
+			writeLog(reviewRoundCapNotesMessage(reviewRoundCap, findingsCount(effectiveFindings)-1))
+		} else if reviewCapBinds {
+			writeLog(fmt.Sprintf("review round cap reached (%d, review.round_cap): no further fix round; the remaining findings park for a decision", reviewRoundCap))
+		}
+
 		if effectiveFindings != "" {
 			if dbErr := e.db.SetStepFindings(sr.ID, effectiveFindings); dbErr != nil {
 				slog.Warn("failed to set step findings in db", "step", stepName, "error", dbErr)
@@ -1855,7 +1889,7 @@ rounds:
 			inserted, dbErr = e.db.InsertStepRoundWithRepair(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, outcome.RepairPublished, roundDuration)
 		}
 		if dbErr != nil {
-			if maxReviewFixRounds > 0 {
+			if maxReviewFixRounds > 0 || reviewRoundCap > 0 {
 				return false, "", fmt.Errorf("persist bounded Review round: %w", dbErr)
 			}
 			currentRoundID = roundInsertID(currentRoundID, inserted, dbErr)
@@ -1878,18 +1912,12 @@ rounds:
 		if stepName.IsCustomGate() {
 			autoFixable = gateAutoFixEligible(roundFindings, sctx.PreviousFindings, sctx.DeferredFindings, sctx.Fixing)
 		}
-		// After its first round, a Review whose only remaining findings are
-		// info-severity wording or comment-placement notes completes without
-		// another fix round: the notes stay on the round and the PR body lists
-		// them as left for the author. Round 1's notes are still fixed, and a
-		// weak test, a stale record or anything else is never such a note.
-		wordingNotesOnly := stepName == types.StepReview && roundNum > 1 && onlyWordingNotesJSON(effectiveFindings)
 		if wordingNotesOnly && autoFixable {
 			n := findingsCount(effectiveFindings)
 			writeLog(fmt.Sprintf("round %d left only %d wording or comment-placement %s; no fix round spent, listed in the PR instead", roundNum, n, pluralize(n, "note", "notes")))
 			autoFixable = false
 		}
-		if autoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit && !reviewBudgetExhausted {
+		if autoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit && !reviewBudgetExhausted && !reviewCapReached {
 			fixableFindings := autoFixableFindingsJSON(roundFindings)
 			if carryFindings {
 				fixableFindings = remapFindingIDsJSON(effectiveFindings, fixableFindings)
@@ -1928,7 +1956,7 @@ rounds:
 			}
 		}
 
-		if !outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && !hasBlockingFindingsJSON(effectiveFindings) && (!carryFindings || wordingNotesOnly || !hasSelectedFindingsJSON(effectiveFindings, selectedOutstandingIDs)) {
+		if reviewCapNotes || completesUncapped {
 			// Step completed without needing approval.
 			// Any remaining info-only or non-blocking findings
 			// are acceptable and don't block the pipeline.

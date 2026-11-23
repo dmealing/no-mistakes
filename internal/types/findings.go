@@ -141,6 +141,12 @@ const FindingIDTestAgentUnvalidatedWork = "test-agent-unvalidated-work"
 // records an operator's budget, not a code mistake.
 const FindingIDReviewFixRoundsExhausted = "review-fix-rounds-exhausted"
 
+// FindingIDReviewRoundCapNotes is the info notice a Review step completed at
+// the global review.round_cap carries: the findings beside it were left
+// unresolved as notes instead of another fix round or a park. It is present
+// only on a completed step; an error or ask-user finding never gets it.
+const FindingIDReviewRoundCapNotes = "review-round-cap-notes"
+
 // FindingCategoryIntentConformance marks a review finding that the change
 // contradicts the run's authoritative intent (see the review prompt's intent
 // conformance clause). The PR step refuses to open or update a pull request

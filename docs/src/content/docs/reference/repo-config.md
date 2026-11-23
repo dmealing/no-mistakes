@@ -426,7 +426,7 @@ Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /
 
 When set, the lint step runs this exact command and checks the exit code.
 When empty, the agent-driven lint duty is folded into the document step's combined housekeeping pass: one agent invocation covers both documentation and lint, and the lint step consumes that result, reporting lint-category findings with the same gate semantics (blocking findings park for a decision).
-Neither responsibility is skipped: when the document step has nothing to run against (or its structured output cannot be trusted), the lint step runs its own agent pass as before.
+Neither responsibility is skipped: when the document step is skipped (no changed files, or an internal-only change under [`document.skip_internal`](/no-mistakes/reference/global-config/#documentskip_internal)) or its structured output cannot be trusted, the lint step runs its own agent pass as before.
 
 ### commands.format
 
@@ -494,7 +494,7 @@ review:
   max_fix_rounds: 2
 ```
 
-`auto_fix.review` still limits automatic fixes independently. For example, `auto_fix.review: 1` and `review.max_fix_rounds: 2` allow one automatic fix and one further explicitly requested fix. With `auto_fix.review: 0`, both allowed fixes must be requested explicitly.
+`auto_fix.review` still limits automatic fixes independently, and the machine-local [`review.round_cap`](/no-mistakes/reference/global-config/#reviewround_cap) (default 2 review rounds) bounds automatic fixes whether or not this key is set. For example, `auto_fix.review: 1` and `review.max_fix_rounds: 2` allow one automatic fix and one further explicitly requested fix. With `auto_fix.review: 0`, both allowed fixes must be requested explicitly.
 
 When the final allowed rereview leaves findings, Review **parks** with every remaining finding and a `review-fix-rounds-exhausted` notice showing the used/maximum fix rounds. Further fix requests return `fix_rounds_exhausted` without releasing the gate or recording a selection. `axi --yes` and TUI yolo leave this gate for an explicit decision. Inspect the findings, then explicitly approve, skip, or abort; when the same gate also holds a [protected-path refusal](#protected_paths), approve is rejected too, so only skip or abort remain. The limit never approves, lowers severity, drops findings, or starts another fix by itself. A clean, fully covered final rereview still passes normally, and a clean one that parks only for missing coverage carries no notice, so `complete-coverage` can still continue it.
 
