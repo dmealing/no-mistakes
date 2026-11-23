@@ -66,7 +66,12 @@ type StepContext struct {
 	// is what keeps the fixer from re-running over already-fixed code, and
 	// review.go's `FinalizingAnswers && !Fixing` exists because the
 	// combination is reachable - not to forbid it.
-	FinalizingAnswers     bool
+	FinalizingAnswers bool
+	// PriorRounds is how many rounds this step result recorded before the
+	// current execution: 0 only on the step's first round, whatever the round
+	// type. Answer, intent, and coverage rounds all count, so it is the
+	// first-round signal Fixing cannot give.
+	PriorRounds           int
 	ReviewStartingHeadSHA string
 	// CoverageContinuation names the exact stored round accepted at the gate.
 	// The real review consumer re-reads and validates its scope before reuse.

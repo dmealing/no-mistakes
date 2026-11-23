@@ -4,11 +4,11 @@ import "strings"
 
 // surfacePatterns are production paths that carry a user-facing surface even
 // inside an internal/ package: CLI commands and help text, configuration and
-// schema, and public API or wire definitions. A change touching one is never
+// schema (including SQL and migrations), and public API or wire definitions. A change touching one is never
 // internal-only.
 var surfacePatterns = []string{
 	"cmd/*", "*/cmd/*", "cli/*", "*/cli/*",
-	"*[Cc]onfig*", "*[Ss]chema*", "*[Hh]elp*", "*[Uu]sage*",
+	"*[Cc]onfig*", "*[Ss]chema*", "*.sql", "*migration/*", "*migrations/*", "*[Hh]elp*", "*[Uu]sage*",
 	"api/*", "*/api/*", "*.proto", "*.graphql", "*[Oo]pen[Aa][Pp][Ii]*", "*[Ss]wagger*",
 }
 

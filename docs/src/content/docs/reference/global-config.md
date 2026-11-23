@@ -1279,10 +1279,10 @@ review:
   round_cap: 0 # turn the cap off
 ```
 
-A cap of `N` lets the automatic loop spend at most `N-1` fix rounds; answer, coverage, and intent rounds do not count.
-When the last allowed round still reports findings, no further fix round starts.
-Findings that would not have started a fix round anyway (only `no-op` findings, or only wording notes after the first round) complete exactly as they do without the cap.
-The step completes with those findings recorded as unresolved notes, on the step result and in the PR body's Review section, only when every one of them is a `warning` or `info` that needs no decision and the round's coverage record covers every reviewable file.
+A cap of `N` allows at most `N-1` fix rounds before the final review round. Fix rounds the operator requests at the gate count toward the cap, so it applies with `auto_fix.review: 0` too; answer, coverage, and intent rounds do not count.
+When the last allowed round still reports findings that would start another fix round or park at the gate, no further fix round starts.
+The step completes with those findings recorded as unresolved notes, on the step result and in the PR body's Review section, only when every one of them is a `warning` or `info` that needs no decision (including a `no-op` warning) and the round's coverage record covers every reviewable file. The rereview after the last allowed fix round completes this way rather than parking at `fix_review`.
+A round that completes without the cap anyway (only `info` findings that start no fix round, or only wording notes after the first round) completes exactly as it does without the cap, with no notes notice.
 An `error` finding, an `ask-user` finding, or an incomplete coverage record parks at the usual approval gate instead, so the cap never passes an error silently. An explicit fix from the operator after that park still runs.
 `0` turns the cap off, leaving the loop bounded by `auto_fix.review` and the repository's `review.max_fix_rounds` as before. A negative value is rejected. It is global-only, like [`review.inline_fixes`](#reviewinline_fixes).
 
@@ -1300,7 +1300,7 @@ review:
   coverage_first_round_only: false
 ```
 
-When a review turn's `reviewed_paths` omits reviewable files, the Review step normally runs a bounded focused pass over just those files. With this on, a post-fix re-review skips that pass. A re-review whose coverage record is incomplete then parks on the named files, because certification still requires full coverage. An operator-requested coverage continuation is unaffected.
+When a review turn's `reviewed_paths` omits reviewable files, the Review step normally runs a bounded focused pass over just those files. With this on, only the step's first review round runs it: a post-fix re-review, an answer round, and an intent-correction re-run skip that pass. A later round whose coverage record is incomplete then parks on the named files, because certification still requires full coverage. An operator-requested coverage continuation is unaffected.
 Set `false` to run the focused pass on every round. It is global-only.
 
 ### document.skip_internal

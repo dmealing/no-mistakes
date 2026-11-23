@@ -90,7 +90,7 @@ func reviewRoundCapNotesAllowed(findingsJSON string, coverageComplete bool) bool
 }
 
 func reviewRoundCapNotesMessage(roundCap, remaining int) string {
-	return fmt.Sprintf("review round cap reached (%d %s, review.round_cap): %d remaining %s left unresolved as %s instead of another fix round",
+	return fmt.Sprintf("review round cap reached (%d %s, review.round_cap): %d remaining %s left unresolved as %s (no further fix round)",
 		roundCap, pluralize(roundCap, "round", "rounds"), remaining, pluralize(remaining, "finding", "findings"), pluralize(remaining, "note", "notes"))
 }
 

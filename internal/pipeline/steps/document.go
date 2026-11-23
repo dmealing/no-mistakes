@@ -120,10 +120,11 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	// Skip entirely when nothing the agent would document has changed. No
 	// lint result is stashed, so the lint step falls back to its own pass -
 	// neither duty is ever silently skipped.
-	changedFiles, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-only", baseSHA+".."+sctx.Run.HeadSHA)
+	changedOutput, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-only", "-z", baseSHA+".."+sctx.Run.HeadSHA)
 	if err != nil {
 		return nil, fmt.Errorf("get changed files: %w", err)
 	}
+	changedFiles := changedPathList(changedOutput)
 	if !hasNonIgnoredDocumentChanges(changedFiles, sctx.Config.IgnorePatterns) {
 		sctx.Log("no changes to document")
 		return &pipeline.StepOutcome{}, nil
@@ -134,7 +135,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	// so the step is skipped on document.skip_internal. Only a clean signal
 	// skips: InternalOnly is false whenever any path is doubtful. As above, no
 	// lint result is stashed, so the lint step still runs its own pass.
-	if sctx.Config.Document.SkipInternal && triage.InternalOnly(strings.Split(changedFiles, "\n")) {
+	if sctx.Config.Document.SkipInternal && triage.InternalOnly(changedFiles) {
 		sctx.Log("internal-only change (no docs, CLI, config, schema, or public API path touched); skipping documentation (document.skip_internal)")
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: documentInternalOnlySkipReason}, nil
 	}
@@ -371,9 +372,8 @@ func splitHousekeepingFindings(findings Findings) (doc Findings, lint Findings) 
 	return doc, lint
 }
 
-func hasNonIgnoredDocumentChanges(changedFiles string, ignorePatterns []string) bool {
-	for _, path := range strings.Split(changedFiles, "\n") {
-		path = strings.TrimSpace(path)
+func hasNonIgnoredDocumentChanges(changedFiles []string, ignorePatterns []string) bool {
+	for _, path := range changedFiles {
 		if path == "" {
 			continue
 		}

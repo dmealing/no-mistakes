@@ -19,6 +19,9 @@ func internalOnlyRepo(t *testing.T, extra ...string) (string, string, string) {
 	dir, baseSHA, _ := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", baseSHA)
 	for _, name := range extra {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("user-facing\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -66,18 +69,17 @@ func TestDocumentStep_KeepsTheStepWithoutACleanInternalOnlySignal(t *testing.T) 
 	t.Parallel()
 	for name, tc := range map[string]struct {
 		skipInternal bool
-		userFacing   bool
+		extra        []string
 	}{
 		"switch off":         {skipInternal: false},
-		"user-facing change": {skipInternal: true, userFacing: true},
+		"user-facing change": {skipInternal: true, extra: []string{"README.md"}},
+		// git C-quotes a non-ASCII name unless the list is NUL-separated, and
+		// the quoted form hides the .md suffix from the docs classifier.
+		"non-ASCII doc name": {skipInternal: true, extra: []string{"svc/internal/guide_\u00fc.md"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			var extra []string
-			if tc.userFacing {
-				extra = []string{"README.md"}
-			}
-			dir, baseSHA, headSHA := internalOnlyRepo(t, extra...)
+			dir, baseSHA, headSHA := internalOnlyRepo(t, tc.extra...)
 			calls := 0
 			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 				calls++

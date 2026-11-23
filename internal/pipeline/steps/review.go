@@ -694,12 +694,13 @@ func reviewCoverageCompletionSection(missing []string) string {
 
 // automaticCoverageCompletionAllowed reports whether this round may run the
 // automatic focused coverage pass. Under review.coverage_first_round_only it
-// runs only on a Review step's first round: a re-review after a fix round
-// (Fixing) skips it, so an incomplete coverage record there parks named, as
-// it always did after the pass. An explicit coverage continuation the
-// operator requested at the gate is not automatic and still runs.
+// runs only on a Review step's first round (no earlier round in this step):
+// a post-fix re-review, an answer round, and an intent-correction re-run all
+// skip it, so an incomplete coverage record there parks named, as it always
+// did after the pass. An explicit coverage continuation the operator
+// requested at the gate is not automatic and still runs.
 func automaticCoverageCompletionAllowed(sctx *pipeline.StepContext) bool {
-	return !sctx.Fixing || sctx.Config == nil || !sctx.Config.Review.CoverageFirstRoundOnly
+	return sctx.PriorRounds == 0 || sctx.Config == nil || !sctx.Config.Review.CoverageFirstRoundOnly
 }
 
 // maxCoverageCompletionTurns caps the focused coverage-completion turns one

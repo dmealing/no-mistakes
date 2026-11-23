@@ -143,7 +143,7 @@ const FindingIDReviewFixRoundsExhausted = "review-fix-rounds-exhausted"
 
 // FindingIDReviewRoundCapNotes is the info notice a Review step completed at
 // the global review.round_cap carries: the findings beside it were left
-// unresolved as notes instead of spending another fix round. It is present
+// unresolved as notes instead of another fix round or a park. It is present
 // only on a completed step; an error or ask-user finding never gets it.
 const FindingIDReviewRoundCapNotes = "review-round-cap-notes"
 

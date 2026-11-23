@@ -180,12 +180,13 @@ func TestExecutor_ReviewRoundCapOff(t *testing.T) {
 	waitExecutorDone(t, done)
 }
 
-// The cap notice claims a fix round was stopped, so a capped round whose
-// remaining findings would never have started one completes exactly as it did
-// without the cap: an info no-op finding, or wording notes after round 1,
-// leave no notice. An info finding the reviewer marked auto-fix was stopped
-// by the cap and carries it.
-func TestExecutor_ReviewRoundCapNoticeOnlyWhenAFixRoundWasStopped(t *testing.T) {
+// The cap notice records findings the cap left unresolved, so a capped round
+// that would complete without the cap anyway keeps its ordinary completion:
+// an info no-op finding, or wording notes after round 1, leave no notice. An
+// info finding the reviewer marked auto-fix would have started a fix round,
+// and a no-op warning would have parked at the gate, so both are noted and
+// carry it.
+func TestExecutor_ReviewRoundCapNoticeOnlyWhenTheCapBinds(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		final      string
@@ -194,6 +195,7 @@ func TestExecutor_ReviewRoundCapNoticeOnlyWhenAFixRoundWasStopped(t *testing.T) 
 		{"info no-op", `{"findings":[{"id":"R2","severity":"info","file":"other.go","description":"fine as is","action":"no-op","info_kind":"other"}]}`, false},
 		{"wording notes only", `{"findings":[{"id":"R2","severity":"info","file":"other.go","description":"typo in comment","action":"auto-fix","info_kind":"wording"}]}`, false},
 		{"info auto-fix", `{"findings":[{"id":"R2","severity":"info","file":"other.go","description":"rename for clarity","action":"auto-fix","info_kind":"other"}]}`, true},
+		{"no-op warning", `{"findings":[{"id":"R2","severity":"warning","file":"other.go","description":"worth a follow-up","action":"no-op"}]}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			database, p, run, repo := setupTest(t)

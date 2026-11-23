@@ -1695,6 +1695,7 @@ rounds:
 		}
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
+		sctx.PriorRounds = roundNum
 		outcome, waited, err := e.executeWithTestSlot(step, sctx, func() (*StepOutcome, error) {
 			return e.executeWithCrashRetry(step, sctx, &crashRetriesRemaining)
 		})
@@ -1837,9 +1838,13 @@ rounds:
 		// them as left for the author. Round 1's notes are still fixed, and a
 		// weak test, a stale record or anything else is never such a note.
 		wordingNotesOnly := stepName == types.StepReview && roundNum > 1 && onlyWordingNotesJSON(effectiveFindings)
+		completesUncapped := !outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && !hasBlockingFindingsJSON(effectiveFindings) && (!carryFindings || wordingNotesOnly || !hasSelectedFindingsJSON(effectiveFindings, selectedOutstandingIDs))
 		reviewCapReached := reviewRoundCapReached(reviewRoundCap, reviewFixRounds)
-		reviewCapStopsFix := reviewCapReached && !wordingNotesOnly && autoFixableFindingsJSON(effectiveFindings) != ""
-		reviewCapNotes := reviewCapStopsFix && reviewRoundCapNotesAllowed(effectiveFindings, outcome.ReviewCoverageComplete)
+		// The cap binds only on a round it changes: one that would start
+		// another fix round or park on its remaining findings. A round that
+		// completes anyway keeps its ordinary completion and no notice.
+		reviewCapBinds := reviewCapReached && !wordingNotesOnly && (autoFixableFindingsJSON(effectiveFindings) != "" || !completesUncapped)
+		reviewCapNotes := reviewCapBinds && reviewRoundCapNotesAllowed(effectiveFindings, outcome.ReviewCoverageComplete)
 		if reviewCapNotes {
 			var err error
 			effectiveFindings, err = appendReviewRoundCapNotes(effectiveFindings, reviewRoundCap)
@@ -1847,7 +1852,7 @@ rounds:
 				return false, "", fmt.Errorf("record Review round cap notes: %w", err)
 			}
 			writeLog(reviewRoundCapNotesMessage(reviewRoundCap, findingsCount(effectiveFindings)-1))
-		} else if reviewCapStopsFix {
+		} else if reviewCapBinds {
 			writeLog(fmt.Sprintf("review round cap reached (%d, review.round_cap): no further fix round; the remaining findings park for a decision", reviewRoundCap))
 		}
 
@@ -1951,7 +1956,7 @@ rounds:
 			}
 		}
 
-		if reviewCapNotes || (!outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && !hasBlockingFindingsJSON(effectiveFindings) && (!carryFindings || wordingNotesOnly || !hasSelectedFindingsJSON(effectiveFindings, selectedOutstandingIDs))) {
+		if reviewCapNotes || completesUncapped {
 			// Step completed without needing approval.
 			// Any remaining info-only or non-blocking findings
 			// are acceptable and don't block the pipeline.
