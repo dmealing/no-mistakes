@@ -3,19 +3,21 @@ package triage
 import "strings"
 
 // surfacePatterns are production paths that carry a user-facing surface even
-// inside an internal/ package: CLI commands and help text, configuration and
-// schema (including SQL and migrations), and public API or wire definitions. A change touching one is never
-// internal-only.
+// inside an internal/ package: CLI commands and help text, the terminal UI,
+// generated skill sources, configuration and schema (including SQL and
+// migrations), and public API or wire definitions. A change touching one is
+// never internal-only.
 var surfacePatterns = []string{
 	"cmd/*", "*/cmd/*", "cli/*", "*/cli/*",
 	"*[Cc]onfig*", "*[Ss]chema*", "*.sql", "*migration/*", "*migrations/*", "*[Hh]elp*", "*[Uu]sage*",
+	"internal/tui/*", "*/internal/tui/*", "internal/skill/*", "*/internal/skill/*",
 	"api/*", "*/api/*", "*.proto", "*.graphql", "*[Oo]pen[Aa][Pp][Ii]*", "*[Ss]wagger*",
 }
 
 // InternalOnly reports whether a change is internal-only: it touches no
 // documentation (IsDocs), no user-facing surface (surfacePatterns), and every
 // production file lives under an internal/ directory, which Go makes
-// unimportable from outside its module. Tests and fixtures never count
+// importable only from the tree rooted at that directory's parent. Tests and fixtures never count
 // against it, but at least one production file must change. It is
 // deliberately one-sided: an empty or tests-only change, a production file
 // outside internal/, or any doubtful path is not internal-only, so a

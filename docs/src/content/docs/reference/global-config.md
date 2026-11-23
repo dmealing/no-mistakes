@@ -1284,6 +1284,7 @@ When the last allowed round still reports findings that would start another fix 
 The step completes with those findings recorded as unresolved notes, on the step result and in the PR body's Review section, only when every one of them is a `warning` or `info` that needs no decision (including a `no-op` warning) and the round's coverage record covers every reviewable file. The rereview after the last allowed fix round completes this way rather than parking at `fix_review`.
 A round that completes without the cap anyway (only `info` findings that start no fix round, or only wording notes after the first round) completes exactly as it does without the cap, with no notes notice.
 An `error` finding, an `ask-user` finding, or an incomplete coverage record parks at the usual approval gate instead, so the cap never passes an error silently. An explicit fix from the operator after that park still runs.
+The round count, like the `auto_fix.review` budget, is cumulative across a validation restart at Review within the same run, so a revalidated Review gets neither a fresh cap nor a fresh first-round coverage pass.
 `0` turns the cap off, leaving the loop bounded by `auto_fix.review` and the repository's `review.max_fix_rounds` as before. A negative value is rejected. It is global-only, like [`review.inline_fixes`](#reviewinline_fixes).
 
 ### review.coverage_first_round_only
@@ -1317,7 +1318,7 @@ document:
   skip_internal: false
 ```
 
-A change is internal-only when every changed production file sits under an `internal/` directory and no changed path is documentation, a command or CLI surface (`cmd/`, `cli/`), configuration or schema, help or usage text, or a public API definition (`api/`, `.proto`, `.graphql`, OpenAPI or Swagger). At least one production file must change: test files do not count either way, so a tests-only change runs the step. A renamed file counts at both its old and new path.
+A change is internal-only when every changed production file sits under an `internal/` directory and no changed path is documentation, a command or CLI surface (`cmd/`, `cli/`), the terminal UI (`internal/tui/`), a generated skill source (`internal/skill/`), configuration or schema, help or usage text, or a public API definition (`api/`, `.proto`, `.graphql`, OpenAPI or Swagger). At least one production file must change: test files do not count either way, so a tests-only change runs the step. A renamed file counts at both its old and new path.
 The check is built on the same path classification `no-mistakes axi triage` uses. Without a clean internal-only signal (for example, a repository with no `internal/` layout) the step runs. A skipped Document step leaves Lint to run its own pass.
 Set `false` to always run the step. It is global-only.
 
