@@ -179,3 +179,64 @@ func TestExecutor_ReviewRoundCapOff(t *testing.T) {
 	}
 	waitExecutorDone(t, done)
 }
+
+// The cap notice claims a fix round was stopped, so a capped round whose
+// remaining findings would never have started one completes exactly as it did
+// without the cap: an info no-op finding, or wording notes after round 1,
+// leave no notice. An info finding the reviewer marked auto-fix was stopped
+// by the cap and carries it.
+func TestExecutor_ReviewRoundCapNoticeOnlyWhenAFixRoundWasStopped(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		final      string
+		wantNotice bool
+	}{
+		{"info no-op", `{"findings":[{"id":"R2","severity":"info","file":"other.go","description":"fine as is","action":"no-op","info_kind":"other"}]}`, false},
+		{"wording notes only", `{"findings":[{"id":"R2","severity":"info","file":"other.go","description":"typo in comment","action":"auto-fix","info_kind":"wording"}]}`, false},
+		{"info auto-fix", `{"findings":[{"id":"R2","severity":"info","file":"other.go","description":"rename for clarity","action":"auto-fix","info_kind":"other"}]}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			cfg := &config.Config{Review: config.Review{RoundCap: 2}, AutoFix: config.AutoFix{Review: 5}}
+			calls := 0
+			step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+				calls++
+				outcome := &StepOutcome{
+					AutoFixable:            true,
+					ReviewedPaths:          []string{"main.go", "other.go"},
+					ReviewablePaths:        []string{"main.go", "other.go"},
+					ReviewCoverageComplete: true,
+				}
+				if calls == 1 {
+					outcome.NeedsApproval = true
+					outcome.Findings = roundCapWarning
+				} else {
+					outcome.Findings = tc.final
+				}
+				return outcome, nil
+			}}
+			exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := exec.Execute(ctx, run, repo, t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 2 {
+				t.Fatalf("review rounds = %d, want 2", calls)
+			}
+			steps, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if steps[0].Status != types.StepStatusCompleted || steps[0].FindingsJSON == nil {
+				t.Fatalf("review should complete with its remaining finding recorded: %+v", steps[0])
+			}
+			if got := strings.Contains(*steps[0].FindingsJSON, types.FindingIDReviewRoundCapNotes); got != tc.wantNotice {
+				t.Fatalf("cap notice present = %v, want %v: %s", got, tc.wantNotice, *steps[0].FindingsJSON)
+			}
+			if !strings.Contains(*steps[0].FindingsJSON, `"R2"`) || strings.Contains(*steps[0].FindingsJSON, `"R1"`) {
+				t.Fatalf("only the round-2 finding should remain recorded: %s", *steps[0].FindingsJSON)
+			}
+		})
+	}
+}

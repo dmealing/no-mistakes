@@ -1831,8 +1831,15 @@ rounds:
 		if stepName == types.StepReview && e.config != nil {
 			reviewRoundCap = e.config.Review.RoundCap
 		}
+		// After its first round, a Review whose only remaining findings are
+		// info-severity wording or comment-placement notes completes without
+		// another fix round: the notes stay on the round and the PR body lists
+		// them as left for the author. Round 1's notes are still fixed, and a
+		// weak test, a stale record or anything else is never such a note.
+		wordingNotesOnly := stepName == types.StepReview && roundNum > 1 && onlyWordingNotesJSON(effectiveFindings)
 		reviewCapReached := reviewRoundCapReached(reviewRoundCap, reviewFixRounds)
-		reviewCapNotes := reviewCapReached && reviewRoundCapNotesAllowed(effectiveFindings, outcome.ReviewCoverageComplete)
+		reviewCapStopsFix := reviewCapReached && !wordingNotesOnly && autoFixableFindingsJSON(effectiveFindings) != ""
+		reviewCapNotes := reviewCapStopsFix && reviewRoundCapNotesAllowed(effectiveFindings, outcome.ReviewCoverageComplete)
 		if reviewCapNotes {
 			var err error
 			effectiveFindings, err = appendReviewRoundCapNotes(effectiveFindings, reviewRoundCap)
@@ -1840,7 +1847,7 @@ rounds:
 				return false, "", fmt.Errorf("record Review round cap notes: %w", err)
 			}
 			writeLog(reviewRoundCapNotesMessage(reviewRoundCap, findingsCount(effectiveFindings)-1))
-		} else if reviewCapReached && findingsCount(effectiveFindings) > 0 {
+		} else if reviewCapStopsFix {
 			writeLog(fmt.Sprintf("review round cap reached (%d, review.round_cap): no further fix round; the remaining findings park for a decision", reviewRoundCap))
 		}
 
@@ -1900,12 +1907,6 @@ rounds:
 		if stepName.IsCustomGate() {
 			autoFixable = gateAutoFixEligible(roundFindings, sctx.PreviousFindings, sctx.DeferredFindings, sctx.Fixing)
 		}
-		// After its first round, a Review whose only remaining findings are
-		// info-severity wording or comment-placement notes completes without
-		// another fix round: the notes stay on the round and the PR body lists
-		// them as left for the author. Round 1's notes are still fixed, and a
-		// weak test, a stale record or anything else is never such a note.
-		wordingNotesOnly := stepName == types.StepReview && roundNum > 1 && onlyWordingNotesJSON(effectiveFindings)
 		if wordingNotesOnly && autoFixable {
 			n := findingsCount(effectiveFindings)
 			writeLog(fmt.Sprintf("round %d left only %d wording or comment-placement %s; no fix round spent, listed in the PR instead", roundNum, n, pluralize(n, "note", "notes")))

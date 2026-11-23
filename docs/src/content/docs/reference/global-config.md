@@ -1281,6 +1281,7 @@ review:
 
 A cap of `N` lets the automatic loop spend at most `N-1` fix rounds; answer, coverage, and intent rounds do not count.
 When the last allowed round still reports findings, no further fix round starts.
+Findings that would not have started a fix round anyway (only `no-op` findings, or only wording notes after the first round) complete exactly as they do without the cap.
 The step completes with those findings recorded as unresolved notes, on the step result and in the PR body's Review section, only when every one of them is a `warning` or `info` that needs no decision and the round's coverage record covers every reviewable file.
 An `error` finding, an `ask-user` finding, or an incomplete coverage record parks at the usual approval gate instead, so the cap never passes an error silently. An explicit fix from the operator after that park still runs.
 `0` turns the cap off, leaving the loop bounded by `auto_fix.review` and the repository's `review.max_fix_rounds` as before. A negative value is rejected. It is global-only, like [`review.inline_fixes`](#reviewinline_fixes).
