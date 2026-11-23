@@ -16,11 +16,16 @@ import (
 // forkRefusedText is how a refused fork (EAGAIN) reads in a tool's output.
 const forkRefusedText = "resource temporarily unavailable"
 
-// refusedOutput reports whether a tool's output shows a refused fork: either
-// the failed fork/exec the wrapper prints, or the Go runtime's report that the
-// re-entered guard binary could not start an OS thread (errno=11, EAGAIN).
+// refusedOutput reports whether a tool's output shows a refused fork: the
+// failed fork/exec the wrapper prints, the Go runtime's report that the
+// re-entered guard binary could not start an OS thread (errno=11, EAGAIN), or
+// the agent shell's own refusal (dash: "Cannot fork"; bash: "fork: Resource
+// temporarily unavailable"). The match is case-insensitive.
 func refusedOutput(out string) bool {
-	return strings.Contains(out, forkRefusedText) || strings.Contains(out, "failed to create new OS thread")
+	out = strings.ToLower(out)
+	return strings.Contains(out, forkRefusedText) ||
+		strings.Contains(out, "failed to create new os thread") ||
+		strings.Contains(out, "cannot fork")
 }
 
 // forkRefusedFatal fails the test naming the real cause. A fork is refused
