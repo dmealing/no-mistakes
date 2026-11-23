@@ -8,8 +8,13 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/triage"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+// documentInternalOnlySkipReason is recorded on a Document step skipped for
+// an internal-only change.
+const documentInternalOnlySkipReason = "internal-only change: no docs, CLI, config, schema, or public API path touched (document.skip_internal)"
 
 // DocumentStep keeps documentation accurate for the change under its
 // placement policy, and - when no deterministic lint command is configured -
@@ -122,6 +127,16 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if !hasNonIgnoredDocumentChanges(changedFiles, sctx.Config.IgnorePatterns) {
 		sctx.Log("no changes to document")
 		return &pipeline.StepOutcome{}, nil
+	}
+	// An internal-only change (triage's path classification: no docs, CLI,
+	// config, schema, or public API path, every production file under an
+	// internal/ directory) has no user-facing documentation to keep accurate,
+	// so the step is skipped on document.skip_internal. Only a clean signal
+	// skips: InternalOnly is false whenever any path is doubtful. As above, no
+	// lint result is stashed, so the lint step still runs its own pass.
+	if sctx.Config.Document.SkipInternal && triage.InternalOnly(strings.Split(changedFiles, "\n")) {
+		sctx.Log("internal-only change (no docs, CLI, config, schema, or public API path touched); skipping documentation (document.skip_internal)")
+		return &pipeline.StepOutcome{Skipped: true, SkipReason: documentInternalOnlySkipReason}, nil
 	}
 
 	if combinedLint {

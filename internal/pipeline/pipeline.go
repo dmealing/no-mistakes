@@ -205,6 +205,11 @@ type StepOutcome struct {
 	// ReviewablePaths is the trusted changed-file set this review round can
 	// certify. It is computed from the diff, not supplied by the agent.
 	ReviewablePaths []string
+	// ReviewCoverageComplete is the review step's own verdict that
+	// ReviewedPaths covers every path in ReviewablePaths. The executor's
+	// review round cap completes a round with remaining notes only on it, so a
+	// capped round never ships an unverified file. False fails closed.
+	ReviewCoverageComplete bool
 	// WithdrawnFindings is an answer round's explicit retraction list: the
 	// carried findings the turn says no longer hold, each with the reason it
 	// gave. It is the ONLY way a carried finding leaves the outstanding set on

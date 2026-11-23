@@ -237,9 +237,10 @@ Previous review findings to address:
 		noChangeFindings.ReviewedPaths = nil
 		findingsJSON, _ := json.Marshal(noChangeFindings)
 		return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
-			Findings:        string(findingsJSON),
-			ReviewablePaths: reviewable,
-			FixSummary:      fixSummary,
+			Findings:               string(findingsJSON),
+			ReviewablePaths:        reviewable,
+			ReviewCoverageComplete: true,
+			FixSummary:             fixSummary,
 		})
 	}
 
@@ -578,7 +579,9 @@ Risk assessment (after listing all findings):
 		// loop; whatever is still uncovered after them parks with the explicit
 		// remainder named, so a partial or fabricated record never approves.
 		completed := findings
-		if retained == nil {
+		if retained == nil && !automaticCoverageCompletionAllowed(sctx) {
+			sctx.Log("skipping the focused coverage pass: it runs on the first review round only (review.coverage_first_round_only)")
+		} else if retained == nil {
 			completionPrompt := turnPrompt
 			if inlineAllowed {
 				// Same prompt minus the inline-fix permission: only the main turn
@@ -608,13 +611,14 @@ Risk assessment (after listing all findings):
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
-		NeedsApproval:     needsApproval,
-		AutoFixable:       len(findings.Items) > 0,
-		Findings:          string(findingsJSON),
-		ReviewedPaths:     findings.ReviewedPaths,
-		WithdrawnFindings: withdrawnFindings(findings),
-		ReviewablePaths:   reviewable,
-		FixSummary:        fixSummary,
+		NeedsApproval:          needsApproval,
+		AutoFixable:            len(findings.Items) > 0,
+		Findings:               string(findingsJSON),
+		ReviewedPaths:          findings.ReviewedPaths,
+		WithdrawnFindings:      withdrawnFindings(findings),
+		ReviewablePaths:        reviewable,
+		ReviewCoverageComplete: reviewedPathsCoverReviewable(findings.ReviewedPaths, reviewable),
+		FixSummary:             fixSummary,
 	})
 }
 
@@ -686,6 +690,16 @@ func reviewCoverageCompletionSection(missing []string) string {
 	b.WriteString("- Return the complete review JSON again. List in reviewed_paths exactly the files you examined in THIS turn; the pipeline merges your record with the earlier pass. Never list a file you did not examine.\n")
 	b.WriteString("- Report any defect you find in those files as a finding in the same JSON. If they are clean, return an empty findings array.\n")
 	return b.String()
+}
+
+// automaticCoverageCompletionAllowed reports whether this round may run the
+// automatic focused coverage pass. Under review.coverage_first_round_only it
+// runs only on a Review step's first round: a re-review after a fix round
+// (Fixing) skips it, so an incomplete coverage record there parks named, as
+// it always did after the pass. An explicit coverage continuation the
+// operator requested at the gate is not automatic and still runs.
+func automaticCoverageCompletionAllowed(sctx *pipeline.StepContext) bool {
+	return !sctx.Fixing || sctx.Config == nil || !sctx.Config.Review.CoverageFirstRoundOnly
 }
 
 // maxCoverageCompletionTurns caps the focused coverage-completion turns one

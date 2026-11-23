@@ -1501,7 +1501,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var pendingVerificationIDs []string
 	selectedOutstandingIDs := state.selectedOutstandingIDs
 	if carryFindings {
-		outstandingFindings = excludeFindingsJSON(state.outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted})
+		outstandingFindings = excludeFindingsJSON(state.outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted, types.FindingIDReviewRoundCapNotes})
 		pendingVerificationIDs = append([]string(nil), state.selectedOutstandingIDs...)
 		// An answer round is a round type the append-only set was not written
 		// for, and it does NOT earn pending-verification entries. A fix round
@@ -1781,7 +1781,7 @@ rounds:
 			outstandingFindings = dropReviewQuestionFindingsJSON(outstandingFindings)
 			// The budget notice is re-derived, never a code finding whose
 			// absent file anchor can prevent positive verification.
-			outstandingFindings = excludeFindingsJSON(outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted})
+			outstandingFindings = excludeFindingsJSON(outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted, types.FindingIDReviewRoundCapNotes})
 			// An answer round retracts by naming ids, never by silence - and
 			// ONLY an answer round. A fix round is held to the coverage rule,
 			// so a retraction it claimed would clear a selected finding no
@@ -1820,6 +1820,28 @@ rounds:
 			}
 			outcome.NeedsApproval = true
 			writeLog(reviewFixRoundLimitMessage(reviewFixRounds, maxReviewFixRounds))
+		}
+
+		// The global review round cap (review.round_cap) ends the automatic
+		// loop: at the cap no further fix round starts. Remaining findings are
+		// recorded as notes on the step and in the PR when none is an error or
+		// ask-user finding and the round's coverage is complete; otherwise the
+		// round parks at the existing gate for a decision, exactly as before.
+		reviewRoundCap := 0
+		if stepName == types.StepReview && e.config != nil {
+			reviewRoundCap = e.config.Review.RoundCap
+		}
+		reviewCapReached := reviewRoundCapReached(reviewRoundCap, reviewFixRounds)
+		reviewCapNotes := reviewCapReached && reviewRoundCapNotesAllowed(effectiveFindings, outcome.ReviewCoverageComplete)
+		if reviewCapNotes {
+			var err error
+			effectiveFindings, err = appendReviewRoundCapNotes(effectiveFindings, reviewRoundCap)
+			if err != nil {
+				return false, "", fmt.Errorf("record Review round cap notes: %w", err)
+			}
+			writeLog(reviewRoundCapNotesMessage(reviewRoundCap, findingsCount(effectiveFindings)-1))
+		} else if reviewCapReached && findingsCount(effectiveFindings) > 0 {
+			writeLog(fmt.Sprintf("review round cap reached (%d, review.round_cap): no further fix round; the remaining findings park for a decision", reviewRoundCap))
 		}
 
 		if effectiveFindings != "" {
@@ -1889,7 +1911,7 @@ rounds:
 			writeLog(fmt.Sprintf("round %d left only %d wording or comment-placement %s; no fix round spent, listed in the PR instead", roundNum, n, pluralize(n, "note", "notes")))
 			autoFixable = false
 		}
-		if autoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit && !reviewBudgetExhausted {
+		if autoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit && !reviewBudgetExhausted && !reviewCapReached {
 			fixableFindings := autoFixableFindingsJSON(roundFindings)
 			if carryFindings {
 				fixableFindings = remapFindingIDsJSON(effectiveFindings, fixableFindings)
@@ -1928,7 +1950,7 @@ rounds:
 			}
 		}
 
-		if !outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && !hasBlockingFindingsJSON(effectiveFindings) && (!carryFindings || wordingNotesOnly || !hasSelectedFindingsJSON(effectiveFindings, selectedOutstandingIDs)) {
+		if reviewCapNotes || (!outcome.NeedsApproval && !hasAskUserFindingsJSON(effectiveFindings) && !hasBlockingFindingsJSON(effectiveFindings) && (!carryFindings || wordingNotesOnly || !hasSelectedFindingsJSON(effectiveFindings, selectedOutstandingIDs))) {
 			// Step completed without needing approval.
 			// Any remaining info-only or non-blocking findings
 			// are acceptable and don't block the pipeline.

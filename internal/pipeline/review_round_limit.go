@@ -67,3 +67,44 @@ func appendReviewFixRoundLimit(raw string, used, limit int) (string, error) {
 	})
 	return types.MarshalFindingsJSON(findings)
 }
+
+// reviewRoundCapReached reports whether a Review step has spent the global
+// review.round_cap (0 = off): cap review rounds means at most cap-1 fix
+// rounds, so the round after the last allowed fix is the final one. Answer,
+// coverage-continuation, and intent rounds are not fix rounds and never
+// count.
+func reviewRoundCapReached(roundCap, fixRounds int) bool {
+	return roundCap > 0 && fixRounds >= roundCap-1
+}
+
+// reviewRoundCapNotesAllowed reports whether a capped Review round may
+// complete with its remaining findings recorded as notes. It never may while
+// any remaining finding is an error or needs a person (ask-user, including an
+// open question, an intent-conformance finding, a protected-path refusal, and
+// the review.max_fix_rounds notice), or while the round's coverage record is
+// incomplete: those keep parking at the existing gate, so the cap never
+// silently passes an error or an unverified file.
+func reviewRoundCapNotesAllowed(findingsJSON string, coverageComplete bool) bool {
+	return coverageComplete && findingsCount(findingsJSON) > 0 &&
+		!hasErrorFindingsJSON(findingsJSON) && !hasAskUserFindingsJSON(findingsJSON)
+}
+
+func reviewRoundCapNotesMessage(roundCap, remaining int) string {
+	return fmt.Sprintf("review round cap reached (%d %s, review.round_cap): %d remaining %s left unresolved as %s instead of another fix round",
+		roundCap, pluralize(roundCap, "round", "rounds"), remaining, pluralize(remaining, "finding", "findings"), pluralize(remaining, "note", "notes"))
+}
+
+// appendReviewRoundCapNotes marks the findings a capped Review completes on.
+func appendReviewRoundCapNotes(raw string, roundCap int) (string, error) {
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return "", err
+	}
+	findings.Items = append(findings.Items, types.Finding{
+		ID:          types.FindingIDReviewRoundCapNotes,
+		Severity:    types.FindingSeverityInfo,
+		Action:      types.ActionNoOp,
+		Description: reviewRoundCapNotesMessage(roundCap, len(findings.Items)),
+	})
+	return types.MarshalFindingsJSON(findings)
+}

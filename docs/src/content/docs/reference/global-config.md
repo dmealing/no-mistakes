@@ -103,6 +103,11 @@ rebase:
 review:
   path_instructions: []
   inline_fixes: true
+  round_cap: 2
+  coverage_first_round_only: true
+
+document:
+  skip_internal: true
 
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
@@ -1259,6 +1264,61 @@ review:
 
 When on, each full review pass may fix typos, wording, comment or documentation text, formatting, and obviously dead code in the files the change touches, and records each one as an `info` finding marked `applied_inline`. Anything that changes behaviour, logic, tests, or data stays an ordinary finding. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns how inline edits are committed and verified.
 Set `false` to keep every review pass read-only, as before this setting existed. It is global-only: neither a [`repository_overrides`](#repository_overrides) entry nor a repository's own `.no-mistakes.yaml` can set it.
+
+### review.round_cap
+
+Caps how many review rounds one Review step runs before it stops asking for fix rounds.
+
+| | |
+|---|---|
+| Type | `int` |
+| Default | `2` |
+
+```yaml
+review:
+  round_cap: 0 # turn the cap off
+```
+
+A cap of `N` lets the automatic loop spend at most `N-1` fix rounds; answer, coverage, and intent rounds do not count.
+When the last allowed round still reports findings, no further fix round starts.
+The step completes with those findings recorded as unresolved notes, on the step result and in the PR body's Review section, only when every one of them is a `warning` or `info` that needs no decision and the round's coverage record covers every reviewable file.
+An `error` finding, an `ask-user` finding, or an incomplete coverage record parks at the usual approval gate instead, so the cap never passes an error silently. An explicit fix from the operator after that park still runs.
+`0` turns the cap off, leaving the loop bounded by `auto_fix.review` and the repository's `review.max_fix_rounds` as before. A negative value is rejected. It is global-only, like [`review.inline_fixes`](#reviewinline_fixes).
+
+### review.coverage_first_round_only
+
+Runs the automatic focused coverage pass on the first review round only.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+
+```yaml
+review:
+  coverage_first_round_only: false
+```
+
+When a review turn's `reviewed_paths` omits reviewable files, the Review step normally runs a bounded focused pass over just those files. With this on, a post-fix re-review skips that pass. A re-review whose coverage record is incomplete then parks on the named files, because certification still requires full coverage. An operator-requested coverage continuation is unaffected.
+Set `false` to run the focused pass on every round. It is global-only.
+
+### document.skip_internal
+
+Skips the Document step when the change is internal-only.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+
+```yaml
+document:
+  skip_internal: false
+```
+
+A change is internal-only when every changed production file sits under an `internal/` directory and no changed path is documentation, a command or CLI surface (`cmd/`, `cli/`), configuration or schema, help or usage text, or a public API definition (`api/`, `.proto`, `.graphql`, OpenAPI or Swagger). Test files do not count either way.
+The check is built on the same path classification `no-mistakes axi triage` uses. Without a clean internal-only signal (for example, a repository with no `internal/` layout) the step runs. A skipped Document step leaves Lint to run its own pass.
+Set `false` to always run the step. It is global-only.
 
 ### commit.fix_message
 
