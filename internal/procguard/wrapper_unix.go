@@ -81,7 +81,12 @@ func (g *guard) mine(pid int) bool {
 	return g.owned(pid, MarkerEnv+"="+g.token)
 }
 
-// realTool finds the real command on PATH, skipping the guard directory.
+// realTool finds the real command on PATH, skipping the guard directory and
+// any other guard's wrapper. Two guards can share one PATH: a gate run's Test
+// agent runs this package's own tests, which install a second guard in front
+// of the gate's. Skipping only its own directory made each guard resolve the
+// real tool to the other's wrapper, and the two re-entered each other without
+// end until the host ran out of memory.
 func (g *guard) realTool(tool string) (string, error) {
 	guardDir := filepath.Clean(g.dir)
 	for _, entry := range filepath.SplitList(os.Getenv("PATH")) {
@@ -91,6 +96,9 @@ func (g *guard) realTool(tool string) (string, error) {
 		candidate := filepath.Join(entry, tool)
 		info, err := os.Stat(candidate)
 		if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		if isGuardWrapper(candidate) {
 			continue
 		}
 		return candidate, nil
@@ -535,4 +543,17 @@ func parseSignal(s string) (syscall.Signal, error) {
 		return n, nil
 	}
 	return 0, fmt.Errorf("invalid signal %q", s)
+}
+
+// isGuardWrapper reports whether path is a wrapper script some guard
+// installed, recognised by the header Install writes.
+func isGuardWrapper(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	head := make([]byte, len(scriptHeader))
+	n, _ := io.ReadFull(f, head)
+	return string(head[:n]) == scriptHeader
 }

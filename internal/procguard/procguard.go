@@ -97,9 +97,12 @@ func Install(dir, exe string) error {
 	return nil
 }
 
+// scriptHeader opens every wrapper script. realTool recognises a wrapper by
+// it, so a wrapper never resolves the "real" tool to another guard's wrapper.
+const scriptHeader = "#!/bin/sh\n# no-mistakes process guard: "
+
 func script(exe, dir, tool string) string {
-	return "#!/bin/sh\n" +
-		"# no-mistakes process guard: " + tool + " reaches only this run's processes.\n" +
+	return scriptHeader + tool + " reaches only this run's processes.\n" +
 		"exec " + shellQuote(exe) + " " + Command + " " + shellQuote(dir) + " " + tool + " \"$@\"\n"
 }
 
