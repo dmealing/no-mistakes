@@ -411,6 +411,17 @@ type ReviewCoverageScope struct {
 	Incremental bool `json:"incremental,omitempty"`
 }
 
+// CarriedReview is an incremental Review's record of the approval it builds on
+// (review.incremental): the run whose Review approved the earlier work, and the
+// findings already decided for the branch - that review's own and the ones it
+// had carried. They are context for the reviewer and the PR body, never work
+// for the round that carries them: a carried finding never joins Items, because
+// a carried warning would start a fix round.
+type CarriedReview struct {
+	SourceRunID string    `json:"source_run_id"`
+	Findings    []Finding `json:"findings,omitempty"`
+}
+
 // Findings is the structured findings payload exchanged across pipeline, IPC, and TUI.
 //
 // Scenarios and Verdict are the test step's live-validation contract. Both are
@@ -434,12 +445,16 @@ type Findings struct {
 	// ONLY by appearing here. Silence keeps it, so covering a file can no
 	// longer clear an unrelated finding in it. Empty on every other payload.
 	WithdrawnFindings []WithdrawnFinding `json:"withdrawn_findings,omitempty"`
-	Tested            []string           `json:"tested,omitempty"`
-	TestingSummary    string             `json:"testing_summary,omitempty"`
-	Artifacts         []TestArtifact     `json:"artifacts,omitempty"`
-	Scenarios         []TestScenario     `json:"scenarios,omitempty"`
-	Verdict           string             `json:"verdict,omitempty"`
-	TestedHeadSHA     string             `json:"tested_head_sha,omitempty"`
+	// CarriedReview is pipeline-written like ReviewCoverageScope: an incremental
+	// Review's record of the earlier approval it builds on (CarriedReview).
+	// Agent output never supplies it. Nil on every other payload.
+	CarriedReview  *CarriedReview `json:"carried_review,omitempty"`
+	Tested         []string       `json:"tested,omitempty"`
+	TestingSummary string         `json:"testing_summary,omitempty"`
+	Artifacts      []TestArtifact `json:"artifacts,omitempty"`
+	Scenarios      []TestScenario `json:"scenarios,omitempty"`
+	Verdict        string         `json:"verdict,omitempty"`
+	TestedHeadSHA  string         `json:"tested_head_sha,omitempty"`
 	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
 	// unvalidated-work check measured from, carried so a repeated cut before any
 	// evidence turn completes re-measures from that same head.
@@ -456,6 +471,7 @@ type findingsWire struct {
 	ReviewedPaths       []string             `json:"reviewed_paths"`
 	ReviewCoverageScope *ReviewCoverageScope `json:"review_coverage_scope"`
 	WithdrawnFindings   []WithdrawnFinding   `json:"withdrawn_findings"`
+	CarriedReview       *CarriedReview       `json:"carried_review"`
 	Tested              []string             `json:"tested"`
 	TestingSummary      string               `json:"testing_summary"`
 	Artifacts           []TestArtifact       `json:"artifacts"`
@@ -485,6 +501,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		ReviewedPaths:       wire.ReviewedPaths,
 		ReviewCoverageScope: wire.ReviewCoverageScope,
 		WithdrawnFindings:   wire.WithdrawnFindings,
+		CarriedReview:       wire.CarriedReview,
 		Tested:              wire.Tested,
 		TestingSummary:      wire.TestingSummary,
 		Artifacts:           wire.Artifacts,

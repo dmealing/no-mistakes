@@ -2,6 +2,7 @@ package steps
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -12,6 +13,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -31,9 +34,9 @@ type reviewCarry struct {
 	SourceRunID  string
 	ApprovedHead string
 	BaseSHA      string
-	// PriorFindings is the approved Review's final findings payload, carried
-	// into the prompt as already-decided context. Empty when it recorded none.
-	PriorFindings string
+	// Carried is the record this Review leaves of the approval it builds on:
+	// the source run and every finding already decided for the branch.
+	Carried types.CarriedReview
 }
 
 // reviewCarryHunkMargin is the number of lines around a reviewed hunk that
@@ -46,7 +49,7 @@ const reviewCarryHunkMargin = 3
 // judges or who judges it. A change to any of them since the approved Review
 // ran means the approval cannot carry. review.incremental itself is excluded
 // from the comparison: turning the feature on does not change the review.
-var reviewCarryGlobalKeys = []string{"agent", "agent_config", "review_agents", "review", "repository_overrides", "agent_args_override", "agent_path_override", "acpx_path", "acp_registry_overrides", "quota_routing"}
+var reviewCarryGlobalKeys = []string{"agent", "agent_config", "review_agents", "review", "repository_overrides", "agent_args_override", "agent_path_override", "acpx_path", "acp_registry_overrides"}
 
 // planIncrementalReview decides whether this Review may be incremental
 // (review.incremental). It returns the proven plan, or nil and the reason a
@@ -68,25 +71,203 @@ func planIncrementalReview(sctx *pipeline.StepContext, baseSHA string) (*reviewC
 	if reason := reviewCarryRunMismatch(prior, sctx.Run); reason != "" {
 		return nil, reason
 	}
-	source := step
-	if step.RoundsStepID() != step.ID {
-		source, err = sctx.DB.GetStepResult(step.RoundsStepID())
-		if err != nil || source == nil {
-			return nil, fmt.Sprintf("the approved review's record in run %s could not be read", prior.ID)
+	source, err := reviewStepOrigin(sctx, step)
+	if err != nil {
+		return nil, fmt.Sprintf("the approved review's record in run %s could not be read", prior.ID)
+	}
+	if source != step {
+		origin, err := sctx.DB.GetRun(source.RunID)
+		if err != nil || origin == nil {
+			return nil, fmt.Sprintf("the run that reviewed for run %s could not be read", prior.ID)
+		}
+		if reason := reviewCarryBuildMismatch(origin, sctx.Run); reason != "" {
+			return nil, reason
 		}
 	}
 	if reason := reviewCarryConfigMismatch(sctx, source.ID); reason != "" {
 		return nil, reason
 	}
-	if source.FindingsJSON != nil {
-		carry.PriorFindings = *source.FindingsJSON
+	if reason := reviewCarryReviewerMismatch(sctx, source); reason != "" {
+		return nil, reason
 	}
+	approved, err := reviewStepFindings(source)
+	if err != nil {
+		return nil, fmt.Sprintf("the approved review's findings in run %s could not be read", source.RunID)
+	}
+	carry.Carried = types.CarriedReview{SourceRunID: prior.ID, Findings: carriedReviewFindings(approved)}
 	merged, reason := reviewCarryMergeBase(sctx, carry.ApprovedHead, baseSHA)
 	if reason != "" {
 		return nil, reason
 	}
 	carry.BaseSHA = merged
 	return carry, ""
+}
+
+// reviewStepOrigin returns the step row whose run executed a Review: step
+// itself, or the row axi retry carried it from. That run's build,
+// configuration, invocations, and findings are the ones behind an approval
+// the carried row reports.
+func reviewStepOrigin(sctx *pipeline.StepContext, step *db.StepResult) (*db.StepResult, error) {
+	if step.RoundsStepID() == step.ID {
+		return step, nil
+	}
+	source, err := sctx.DB.GetStepResult(step.RoundsStepID())
+	if err != nil {
+		return nil, err
+	}
+	if source == nil {
+		return nil, fmt.Errorf("the Review of run %s was carried from a step that no longer exists", step.RunID)
+	}
+	return source, nil
+}
+
+// reviewStepOfRun returns the step row whose run executed runID's Review, or
+// nil when the run has none.
+func reviewStepOfRun(sctx *pipeline.StepContext, runID string) (*db.StepResult, error) {
+	steps, err := sctx.DB.GetStepsByRun(runID)
+	if err != nil {
+		return nil, err
+	}
+	for _, step := range steps {
+		if step.StepName == types.StepReview {
+			return reviewStepOrigin(sctx, step)
+		}
+	}
+	return nil, nil
+}
+
+// reviewStepFindings parses a Review step's final findings payload. A step
+// that recorded none has none.
+func reviewStepFindings(step *db.StepResult) (*types.Findings, error) {
+	findings := &types.Findings{}
+	if step.FindingsJSON != nil && strings.TrimSpace(*step.FindingsJSON) != "" {
+		parsed, err := types.ParseFindingsJSON(*step.FindingsJSON)
+		if err != nil {
+			return nil, err
+		}
+		findings = &parsed
+	}
+	return findings, nil
+}
+
+// reviewCarryReviewerMismatch requires the reviewer that approved the head to
+// be the one this Review selects now: every review turn recorded for the
+// approved Review ran on the agent and model this run's agent is on (quota
+// routing and a mid-run switch included, since the live agent is what
+// selects). The turns live in the run that executed the Review. A Review that
+// ran no turn of its own carried an approval too, so it is followed to the
+// Review that did, and a chain that records none cannot carry. A run pinned
+// to a model profile is proven by the profile instead (reviewCarryRunMismatch).
+func reviewCarryReviewerMismatch(sctx *pipeline.StepContext, source *db.StepResult) string {
+	if sctx.Run.PiProfile != nil {
+		return ""
+	}
+	if sctx.Agent == nil {
+		return "this run has no review agent to compare the approved review's reviewer with"
+	}
+	selected := *sctx.Config
+	selected.Agent = types.AgentName(sctx.Agent.Name())
+	selected.Agents = []types.AgentName{selected.Agent}
+	seen := map[string]bool{source.ID: true}
+	for {
+		invocations, err := sctx.DB.GetAgentInvocationsByRun(source.RunID)
+		if err != nil {
+			return fmt.Sprintf("the approved review's invocations in run %s could not be read: %v", source.RunID, err)
+		}
+		turns := 0
+		for _, inv := range invocations {
+			if !reviewTurn(inv) {
+				continue
+			}
+			turns++
+			if err := ReviewInvocationMismatch(&selected, inv); err != nil {
+				return fmt.Sprintf("run %s was reviewed by another reviewer: %v", source.RunID, err)
+			}
+		}
+		if turns > 0 {
+			return ""
+		}
+		findings, err := reviewStepFindings(source)
+		if err != nil || findings.CarriedReview == nil || findings.CarriedReview.SourceRunID == "" {
+			return fmt.Sprintf("run %s recorded no review invocation, so its reviewer cannot be proven to be this run's", source.RunID)
+		}
+		from := findings.CarriedReview.SourceRunID
+		source, err = reviewStepOfRun(sctx, from)
+		if err != nil || source == nil || seen[source.ID] {
+			return fmt.Sprintf("the Review that run %s carried its approval from could not be read", from)
+		}
+		seen[source.ID] = true
+	}
+}
+
+// reviewTurn reports whether an invocation is a reviewer turn of a Review
+// step: one that completed and judged the change. The fixer's turns change
+// the code and never give the approval.
+func reviewTurn(inv db.AgentInvocation) bool {
+	return inv.StepName == string(types.StepReview) && inv.ExitStatus == "ok" && (inv.Purpose == "review" || inv.Purpose == "review-coverage")
+}
+
+// ReviewInvocationMismatch reports whether inv, an invocation that served a
+// Review, would not be served by the same agent and model now: its agent must
+// still be selected for the invocation's purpose and round (a review_agents
+// role included), with the configured model it had and the one that agent
+// serves. It is nil when they match. axi retry's carried-step proof and the
+// incremental Review share it.
+func ReviewInvocationMismatch(cfg *config.Config, inv db.AgentInvocation) error {
+	var mismatch error
+	for _, expected := range reviewInvocationConfigs(cfg, inv) {
+		name := types.AgentName(inv.Agent)
+		if name != expected.Agent && !slices.Contains(expected.Agents, name) {
+			if mismatch == nil {
+				mismatch = fmt.Errorf("carried step %s ran on agent %s, which is no longer selected (agent is now %s); rerun the pipeline instead", inv.StepName, inv.Agent, expected.Agent)
+			}
+			continue
+		}
+		model := expected.AgentProfileFor(name).Model
+		if inv.ConfiguredModel != nil && *inv.ConfiguredModel != model {
+			mismatch = fmt.Errorf("carried step %s used configured model %s, which is no longer selected for %s; rerun the pipeline instead", inv.StepName, *inv.ConfiguredModel, inv.Agent)
+			continue
+		}
+		model = agentcfg.EffectiveModel(name, expected.AgentProfileFor(name), expected.AgentArgsFor(name))
+		if model != "" && inv.Model != "" && !strings.Contains(inv.Model, model) && !agentcfg.ServedMatchesRequested(model, inv.Model, "") {
+			mismatch = fmt.Errorf("carried step %s ran %s on model %s, but the effective model for %s is now %s; rerun the pipeline instead", inv.StepName, inv.Agent, inv.Model, inv.Agent, model)
+			continue
+		}
+		return nil
+	}
+	return mismatch
+}
+
+// reviewInvocationConfigs returns the configurations eligible to serve inv in a new run,
+// selecting a review_agents role from the call's Purpose and Round the way
+// newPipelineAgent routes it.
+func reviewInvocationConfigs(cfg *config.Config, inv db.AgentInvocation) []*config.Config {
+	var role, lateRole string
+	switch inv.Purpose {
+	case "review", "review-coverage":
+		role, lateRole = config.RoleReviewer, config.RoleReviewerAfterRound
+	case "review-fix":
+		role, lateRole = config.RoleFixer, config.RoleFixerAfterRound
+	default:
+		return []*config.Config{cfg}
+	}
+	if late, ok := cfg.ReviewAgents[lateRole]; ok {
+		if from := cfg.ReviewAgentTakeoverRound(lateRole); from > 0 && inv.Round >= from {
+			return reviewCandidateConfigs(cfg, late)
+		}
+	}
+	if entry, ok := cfg.ReviewAgents[role]; ok {
+		return reviewCandidateConfigs(cfg, entry)
+	}
+	return []*config.Config{cfg}
+}
+
+func reviewCandidateConfigs(cfg *config.Config, entry config.ReviewAgent) []*config.Config {
+	configs := []*config.Config{cfg.ForReviewAgent(entry)}
+	for _, candidate := range entry.Fallback {
+		configs = append(configs, cfg.ForReviewAgent(candidate))
+	}
+	return configs
 }
 
 // reviewCarryRunMismatch compares the run-level inputs of a Review: the ones
@@ -99,8 +280,8 @@ func reviewCarryRunMismatch(prior, current *db.Run) string {
 	if (prior.PiProfile == nil) != (current.PiProfile == nil) || (prior.PiProfile != nil && *prior.PiProfile != *current.PiProfile) {
 		return fmt.Sprintf("run %s reviewed under a different model profile than this run", prior.ID)
 	}
-	if build, priorBuild := runBuild(current), runBuild(prior); build == "" || build != priorBuild {
-		return fmt.Sprintf("the no-mistakes build that reviewed run %s (%q) is not this run's (%q)", prior.ID, priorBuild, build)
+	if reason := reviewCarryBuildMismatch(prior, current); reason != "" {
+		return reason
 	}
 	if (prior.VerificationPlan == nil) != (current.VerificationPlan == nil) || (prior.VerificationPlan != nil && prior.VerificationPlan.SHA256 != current.VerificationPlan.SHA256) {
 		return fmt.Sprintf("run %s and this run were given different verification plans", prior.ID)
@@ -118,13 +299,34 @@ func reviewCarryRunMismatch(prior, current *db.Run) string {
 	return ""
 }
 
+// reviewCarryBuildMismatch requires both runs to record the same no-mistakes
+// build, so each branch gets one full Review after an upgrade.
+func reviewCarryBuildMismatch(prior, current *db.Run) string {
+	build, priorBuild := runBuild(current), runBuild(prior)
+	switch {
+	case build == "":
+		return "this run recorded no no-mistakes build identity, so the build that would carry the approval cannot be compared"
+	case priorBuild == "":
+		return fmt.Sprintf("run %s recorded no no-mistakes build identity, so the build that reviewed it cannot be compared", prior.ID)
+	case build != priorBuild:
+		return fmt.Sprintf("the no-mistakes build that reviewed run %s (%q) is not this run's (%q)", prior.ID, priorBuild, build)
+	}
+	return ""
+}
+
 // runBuild names the no-mistakes build that created a run: its build SHA, or
-// its version when no SHA was recorded, or "" when neither was.
+// its version when the SHA is the unstamped placeholder. An unstamped binary
+// (a plain go build) records the placeholder SHA "unknown" and the version
+// "dev"; two different builds then record the same values, so neither names
+// a build.
 func runBuild(run *db.Run) string {
-	if sha := strings.TrimSpace(deref(run.NoMistakesBuildSHA)); sha != "" {
+	if sha := strings.TrimSpace(deref(run.NoMistakesBuildSHA)); sha != "" && sha != "unknown" {
 		return sha
 	}
-	return strings.TrimSpace(deref(run.NoMistakesVersion))
+	if version := strings.TrimSpace(deref(run.NoMistakesVersion)); version != "" && version != "dev" {
+		return version
+	}
+	return ""
 }
 
 // reviewCarryConfigMismatch requires the repository configuration and the
@@ -243,6 +445,9 @@ func reviewCarryMergeBase(sctx *pipeline.StepContext, approved, baseSHA string) 
 	}
 	out, err := stepGitRun(sctx, "merge-tree", "--write-tree", "--no-messages", approved, baseSHA)
 	if err != nil {
+		if !mergeTreeWritesTrees(sctx) {
+			return "", "git is too old for merge-tree --write-tree (needs 2.38 or newer)"
+		}
 		return "", fmt.Sprintf("the approved head %s does not merge cleanly with the base %s", shortObjectID(approved), shortObjectID(baseSHA))
 	}
 	tree := strings.TrimSpace(strings.SplitN(out, "\n", 2)[0])
@@ -265,6 +470,14 @@ func reviewCarryMergeBase(sctx *pipeline.StepContext, approved, baseSHA string) 
 		return "", "the merge of the approved head with the base could not be recorded"
 	}
 	return merged, ""
+}
+
+// mergeTreeWritesTrees reports whether this machine's git has merge-tree
+// --write-tree (2.38 or newer). `git merge-tree -h` exits 129 and prints its
+// usage on every version, so the usage is what tells them apart.
+func mergeTreeWritesTrees(sctx *pipeline.StepContext) bool {
+	usage, _ := stepCmd(sctx, "git", "merge-tree", "-h").Output()
+	return strings.Contains(string(usage), "--write-tree")
 }
 
 // gitIsAncestor runs merge-base --is-ancestor: exit 1 is a clean "no", any
@@ -393,10 +606,10 @@ func incrementalReviewPromptSection(carry *reviewCarry) string {
 		b.WriteString(" The base commit above is that approved head merged with the current base branch; the base changes it brings in touch none of the reviewed code.\n")
 	}
 	b.WriteString("- Review only the changes between the base commit and the target commit: the branch's work since that approval. Read other code only as context for them; it was already reviewed and approved.\n")
-	prior := sanitizedPreviousFindingsForPrompt(carry.PriorFindings)
-	if findings, err := types.ParseFindingsJSON(carry.PriorFindings); err == nil && len(findings.Items) > 0 && prior != "" {
+	if len(carry.Carried.Findings) > 0 {
+		prior, _ := json.Marshal(types.Findings{Items: carry.Carried.Findings})
 		b.WriteString("- The approved review recorded these findings, already decided there. Do not report one again unless the new changes alter the code it describes:\n")
-		b.WriteString(prior)
+		b.WriteString(sanitizedPreviousFindingsForPrompt(string(prior)))
 		b.WriteString("\n")
 	}
 	return b.String()
@@ -419,10 +632,8 @@ func reviewCarriedFinding(carry *reviewCarry, head string, changedNothing bool) 
 		what += "; the base changes merged since touch no reviewed code"
 	}
 	description := fmt.Sprintf("review carried from run %s at %s (%s)", carry.SourceRunID, shortObjectID(carry.ApprovedHead), what)
-	if findings, err := types.ParseFindingsJSON(carry.PriorFindings); err == nil {
-		if n := len(reviewCarriedPriorItems(findings)); n > 0 {
-			description += fmt.Sprintf("; its %d recorded %s carried as decided", n, pluralWordPR(n, "finding", "findings"))
-		}
+	if n := len(carry.Carried.Findings); n > 0 {
+		description += fmt.Sprintf("; its %d recorded %s carried as decided", n, pluralWordPR(n, "finding", "findings"))
 	}
 	return Finding{
 		ID:          types.FindingIDReviewCarried,
@@ -432,11 +643,43 @@ func reviewCarriedFinding(carry *reviewCarry, head string, changedNothing bool) 
 	}
 }
 
-// reviewCarriedPriorItems drops the earlier review's own pipeline notices.
+// maxCarriedReviewFindings bounds the findings one Review carries: the payload
+// rides the IPC event stream, and a chain of incremental Reviews would grow
+// it without bound.
+const maxCarriedReviewFindings = 50
+
+// carriedReviewFindings lists the findings an approved Review leaves decided
+// for the branch: its own without the pipeline's notices, then the ones it had
+// carried and did not report again.
+func carriedReviewFindings(approved *types.Findings) []types.Finding {
+	items := reviewCarriedPriorItems(*approved)
+	seen := map[string]bool{}
+	for _, item := range items {
+		seen[item.ID] = true
+	}
+	if approved.CarriedReview != nil {
+		for _, item := range approved.CarriedReview.Findings {
+			if item.ID == "" || !seen[item.ID] {
+				items = append(items, item)
+			}
+		}
+	}
+	if len(items) > maxCarriedReviewFindings {
+		items = items[:maxCarriedReviewFindings]
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return items
+}
+
+// reviewCarriedPriorItems drops the earlier review's own pipeline notices:
+// decisions about a budget or a carry, not findings about the code.
 func reviewCarriedPriorItems(findings types.Findings) []types.Finding {
 	var items []types.Finding
 	for _, item := range findings.Items {
-		if item.ID == types.FindingIDReviewCarried || item.ID == types.FindingIDReviewRoundCapNotes {
+		switch item.ID {
+		case types.FindingIDReviewCarried, types.FindingIDReviewRoundCapNotes, types.FindingIDReviewFixRoundsExhausted:
 			continue
 		}
 		items = append(items, item)

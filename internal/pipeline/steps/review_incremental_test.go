@@ -8,15 +8,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 )
@@ -25,6 +28,9 @@ const (
 	carryRepoYAML   = "commands:\n  test: make test\n"
 	carryGlobalYAML = "log_level: info\nreview:\n  round_cap: 2\n"
 )
+
+// carryBuild is the no-mistakes build that created both runs of a carry.
+const carryBuild = "9f2c4e1"
 
 // carryRepo is a branch whose head was approved by an earlier run's Review:
 // main holds shared.txt (40 lines) and other.txt; the feature branch changed
@@ -127,7 +133,9 @@ type carryHarness struct {
 func newCarryHarness(t *testing.T, r *carryRepo, reviewed []string) *carryHarness {
 	t.Helper()
 	h := &carryHarness{}
-	h.ag = &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	// The run's agent is what its Review selects, so it is the agent the
+	// approved review's turn is recorded on.
+	h.ag = &mockAgent{name: "claude", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		return &agent.Result{Output: json.RawMessage(coverageFindingJSON(reviewed))}, nil
 	}}
 	h.sctx = newTestContextWithDBRecords(t, h.ag, r.dir, r.base, r.head(), config.Commands{})
@@ -135,6 +143,8 @@ func newCarryHarness(t *testing.T, r *carryRepo, reviewed []string) *carryHarnes
 	h.sctx.Config.ReplayRepoYAML = []byte(carryRepoYAML)
 	h.sctx.Config.ReplayGlobalYAML = []byte(carryGlobalYAML)
 	h.sctx.Log = func(msg string) { h.logs = append(h.logs, msg) }
+	build := carryBuild
+	h.sctx.Run.NoMistakesBuildSHA = &build
 	h.plan = newCarryPlan(t)
 	return h
 }
@@ -163,6 +173,18 @@ type approvedReview struct {
 	noApproval bool
 	profile    *agentcfg.PiProfile
 	plan       *verificationplan.Snapshot
+	// reviewer is the agent the approved review's turn is recorded on: ""
+	// is the agent this run selects, "none" records no turn.
+	reviewer        string
+	configuredModel string
+	// build and version are the stamps of the no-mistakes build that created
+	// the run; unstamped leaves what InsertRun recorded for this test binary.
+	build     string
+	version   string
+	unstamped bool
+	// carriedFrom makes the approved review one that carried that run's
+	// approval instead of reviewing, so it ran no turn of its own.
+	carriedFrom string
 }
 
 func (h *carryHarness) recordPrior(t *testing.T, p approvedReview) *db.Run {
@@ -176,16 +198,48 @@ func (h *carryHarness) recordPrior(t *testing.T, p approvedReview) *db.Run {
 	if p.findings == "" {
 		p.findings = `{"findings":[],"risk_level":"low","risk_rationale":"clean"}`
 	}
+	if p.build == "" {
+		p.build = carryBuild
+	}
+	if p.version == "" {
+		p.version = "v1.109.0-local.1"
+	}
 	d := h.sctx.DB
 	prior, err := d.InsertRunWithIntentAndLaunchNonce(h.sctx.Repo.ID, h.sctx.Run.Branch, p.head, h.sctx.Run.BaseSHA, p.intent, "", "", "", p.prBase, false, p.plan, p.profile)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !p.unstamped {
+		if err := d.SetRunBuildForTest(prior.ID, p.version, p.build); err != nil {
+			t.Fatal(err)
+		}
 	}
 	step, err := d.InsertStepResult(prior.ID, types.StepReview)
 	if err != nil {
 		t.Fatal(err)
 	}
 	findings := p.findings
+	if p.carriedFrom != "" {
+		decided := types.Findings{}
+		if err := json.Unmarshal([]byte(p.findings), &decided); err != nil {
+			t.Fatal(err)
+		}
+		findings = carriedPayload(p.carriedFrom, p.head, reviewCarriedPriorItems(decided))
+	}
+	if p.reviewer != "none" {
+		reviewer := p.reviewer
+		if reviewer == "" {
+			reviewer = "claude"
+		}
+		turn := db.AgentInvocation{RunID: prior.ID, StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: reviewer, ExitStatus: "ok"}
+		if p.configuredModel != "" {
+			model := p.configuredModel
+			turn.ConfiguredModel = &model
+		}
+		if _, err := d.InsertAgentInvocation(turn); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := d.InsertReviewStepRoundWithProvenance(step.ID, 1, "initial", &findings, nil, p.head, p.head, "trusted-sha", []byte(p.globalYAML), []byte(p.repoYAML), 0); err != nil {
 		t.Fatal(err)
 	}
@@ -241,6 +295,12 @@ func parsedFindings(t *testing.T, outcome *pipeline.StepOutcome) types.Findings 
 // recorded where the approval came from.
 func assertCarried(t *testing.T, h *carryHarness, prior *db.Run) types.Finding {
 	t.Helper()
+	marker, _ := carriedMarker(t, assertCarriedOutcome(t, h, prior))
+	return marker
+}
+
+func assertCarriedOutcome(t *testing.T, h *carryHarness, prior *db.Run) *pipeline.StepOutcome {
+	t.Helper()
 	outcome := h.execute(t)
 	if len(h.ag.calls) != 0 {
 		t.Fatalf("a carried review ran %d agent turns, want 0; logs: %v", len(h.ag.calls), h.logs)
@@ -255,7 +315,7 @@ func assertCarried(t *testing.T, h *carryHarness, prior *db.Run) types.Finding {
 	if !strings.Contains(marker.Description, "carried from run "+prior.ID+" at ") || marker.Action != types.ActionNoOp || marker.Severity != types.FindingSeverityInfo {
 		t.Fatalf("marker = %+v, want an info no-op naming run %s", marker, prior.ID)
 	}
-	return marker
+	return outcome
 }
 
 // assertFull: the Review ran a full review of the whole branch, and said why.
@@ -268,10 +328,14 @@ func assertFull(t *testing.T, h *carryHarness, reason string) {
 	if strings.Contains(h.ag.calls[0].Prompt, "Incremental review") {
 		t.Fatalf("a full review must not carry the incremental section")
 	}
+	findings := parsedFindings(t, outcome)
 	if _, ok := carriedMarker(t, outcome); ok {
 		t.Fatalf("a full review must not record a carried approval: %s", outcome.Findings)
 	}
-	if scope := parsedFindings(t, outcome).ReviewCoverageScope; scope != nil && scope.Incremental {
+	if findings.CarriedReview != nil {
+		t.Fatalf("a full review must not record a carried review: %s", outcome.Findings)
+	}
+	if scope := findings.ReviewCoverageScope; scope != nil && scope.Incremental {
 		t.Fatalf("a full review must not record an incremental scope: %+v", scope)
 	}
 	if !slices.Contains(outcome.ReviewablePaths, "feature.txt") {
@@ -360,8 +424,15 @@ func TestIncrementalReview_NewCommitsAreReviewedAlone(t *testing.T) {
 	if _, ok := carriedMarker(t, outcome); ok {
 		t.Fatalf("an incremental review that reviewed new work records no carried marker")
 	}
-	if scope := parsedFindings(t, outcome).ReviewCoverageScope; scope == nil || !scope.Incremental || scope.BaseSHA == r.base {
+	findings := parsedFindings(t, outcome)
+	if scope := findings.ReviewCoverageScope; scope == nil || !scope.Incremental || scope.BaseSHA == r.base {
 		t.Fatalf("an incremental review must record the base it judged from as incremental: %+v", scope)
+	}
+	if carried := findings.CarriedReview; carried == nil || carried.SourceRunID != prior.ID || len(carried.Findings) != 1 || carried.Findings[0].Description != "earlier decided note" {
+		t.Fatalf("an incremental review must record the approval it builds on and that review's findings: %+v", carried)
+	}
+	if len(findings.Items) != 0 {
+		t.Fatalf("a carried finding must never join the round's own findings: %s", outcome.Findings)
 	}
 	if !h.logged("incremental review: run " + prior.ID) {
 		t.Fatalf("logs %v should announce the incremental review", h.logs)
@@ -514,14 +585,28 @@ func TestIncrementalReview_FallsBackToAFullReview(t *testing.T) {
 			},
 			reason: "(acp_registry_overrides)",
 		},
-		"changed quota routing": {
-			prior: func(r *carryRepo) approvedReview {
-				return approvedReview{head: r.approved, globalYAML: carryGlobalYAML + "quota_routing:\n  enabled: true\n"}
-			},
-			reason: "(quota_routing)",
+		"approved review recorded no review turn": {
+			prior:  func(r *carryRepo) approvedReview { return approvedReview{head: r.approved, reviewer: "none"} },
+			reason: "recorded no review invocation",
+		},
+		"approved review ran on another agent": {
+			prior:  func(r *carryRepo) approvedReview { return approvedReview{head: r.approved, reviewer: "codex"} },
+			reason: "was reviewed by another reviewer",
+		},
+		"this run selects another agent": {
+			tweak:  func(h *carryHarness) { h.ag.name = "codex" },
+			reason: "was reviewed by another reviewer",
+		},
+		"approved review ran on another configured model": {
+			prior:  func(r *carryRepo) approvedReview { return approvedReview{head: r.approved, configuredModel: "opus"} },
+			reason: "used configured model",
 		},
 		"another no-mistakes build": {
 			tweak:  func(h *carryHarness) { build := "build-2"; h.sctx.Run.NoMistakesBuildSHA = &build },
+			reason: "is not this run's",
+		},
+		"approved run on another build": {
+			prior:  func(r *carryRepo) approvedReview { return approvedReview{head: r.approved, build: "build-2"} },
 			reason: "is not this run's",
 		},
 		"another version, no build SHA recorded": {
@@ -532,8 +617,18 @@ func TestIncrementalReview_FallsBackToAFullReview(t *testing.T) {
 			},
 			reason: "is not this run's",
 		},
-		"no recorded build": {
-			tweak:  func(h *carryHarness) { h.sctx.Run.NoMistakesBuildSHA = nil; h.sctx.Run.NoMistakesVersion = nil },
+		"approved run on another version, SHA unstamped": {
+			prior: func(r *carryRepo) approvedReview {
+				return approvedReview{head: r.approved, build: "unknown", version: "v2.0.0"}
+			},
+			reason: "is not this run's",
+		},
+		"this run on another version, SHA unstamped": {
+			tweak: func(h *carryHarness) {
+				sha, version := "unknown", "v2.0.0"
+				h.sctx.Run.NoMistakesBuildSHA = &sha
+				h.sctx.Run.NoMistakesVersion = &version
+			},
 			reason: "is not this run's",
 		},
 		"verification plan on the approved run only": {
@@ -684,6 +779,245 @@ func TestIncrementalReview_UsesTheLatestApprovedReview(t *testing.T) {
 	gitCmd(t, r.dir, "update-ref", "refs/keep/rewritten", rewritten)
 	h.recordPrior(t, approvedReview{head: rewritten})
 	assertFull(t, h, "is not an ancestor")
+}
+
+// carriedPayload is the record a Review leaves when it carries sourceRun's
+// approval of approvedHead: the notice, and what that review had decided.
+func carriedPayload(sourceRunID, approvedHead string, decided []types.Finding) string {
+	payload, _ := json.Marshal(types.Findings{
+		Items: []types.Finding{{ID: types.FindingIDReviewCarried, Severity: types.FindingSeverityInfo, Action: types.ActionNoOp,
+			Description: fmt.Sprintf("review carried from run %s at %s (the same head was already approved)", sourceRunID, shortObjectID(approvedHead))}},
+		RiskLevel: "low", RiskRationale: "approval carried from an earlier review",
+		CarriedReview: &types.CarriedReview{SourceRunID: sourceRunID, Findings: decided},
+	})
+	return string(payload)
+}
+
+// The placeholders an unstamped binary records are buildinfo's own defaults,
+// and they name no build: two different unstamped builds record the same ones.
+func TestRunBuildNamesARecordedBuildOnly(t *testing.T) {
+	t.Parallel()
+	if buildinfo.Commit != "unknown" || buildinfo.CurrentVersion() != "dev" {
+		t.Skip("this test binary records a real build")
+	}
+	text := func(s string) *string { return &s }
+	cases := map[string]struct {
+		sha, version *string
+		want         string
+	}{
+		"a build SHA": {text("abc1234"), text("v1.0.0"), "abc1234"},
+		"an unstamped SHA falls back to the version": {text(buildinfo.Commit), text("v1.2.3"), "v1.2.3"},
+		"an unstamped binary":                        {text(buildinfo.Commit), text(buildinfo.CurrentVersion()), ""},
+		"empty stamps":                               {text(""), text(""), ""},
+		"blank stamps":                               {text("  "), text(" \n"), ""},
+		"no stamps recorded":                         {nil, nil, ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := runBuild(&db.Run{NoMistakesVersion: tc.version, NoMistakesBuildSHA: tc.sha}); got != tc.want {
+				t.Fatalf("runBuild() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A binary made by a plain go build stamps no build identity: InsertRun
+// records the placeholders above. No run created by one can carry an
+// approval, whichever side of the carry it created.
+func TestIncrementalReview_AnUnstampedBuildCannotCarry(t *testing.T) {
+	t.Parallel()
+	if buildinfo.Commit != "unknown" || buildinfo.CurrentVersion() != "dev" {
+		t.Skip("this test binary records a real build")
+	}
+	for name, thisRunStamped := range map[string]bool{"neither run stamped": false, "only this run stamped": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := newCarryRepo(t)
+			h := newCarryHarness(t, r, []string{"feature.txt", "shared.txt"})
+			if !thisRunStamped {
+				recorded, err := h.sctx.DB.GetRun(h.sctx.Run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				h.sctx.Run.NoMistakesVersion, h.sctx.Run.NoMistakesBuildSHA = recorded.NoMistakesVersion, recorded.NoMistakesBuildSHA
+			}
+			prior := h.recordPrior(t, approvedReview{head: r.approved, unstamped: true})
+			reason := "this run recorded no no-mistakes build identity"
+			if thisRunStamped {
+				reason = fmt.Sprintf("run %s recorded no no-mistakes build identity", prior.ID)
+			}
+			assertFull(t, h, reason)
+		})
+	}
+}
+
+// A Review that carried an approval ran no turn of its own. The next Review
+// is proven against the turn that did run, and carries what that review
+// decided, so a branch keeps its approval across more than one carry.
+func TestIncrementalReview_ACarriedApprovalIsFollowedToTheReviewThatRan(t *testing.T) {
+	t.Parallel()
+	r := newCarryRepo(t)
+	h := newCarryHarness(t, r, nil)
+	note := types.Finding{ID: "review-1", Severity: types.FindingSeverityWarning, File: "feature.txt", Line: 1, Description: "left as a note", Action: types.ActionAutoFix}
+	decided := findingsJSON(t, types.Findings{Items: []types.Finding{note}, RiskLevel: "low", RiskRationale: "ok"})
+	first := h.recordPrior(t, approvedReview{head: r.approved, findings: decided})
+	second := h.recordPrior(t, approvedReview{head: r.approved, reviewer: "none", carriedFrom: first.ID, findings: decided})
+
+	outcome := assertCarriedOutcome(t, h, second)
+	marker, _ := carriedMarker(t, outcome)
+	carried := parsedFindings(t, outcome).CarriedReview
+	if carried == nil || carried.SourceRunID != second.ID || !slices.Equal(carried.Findings, []types.Finding{note}) {
+		t.Fatalf("a carried review must record the run and findings it carries: %+v", carried)
+	}
+	if !strings.Contains(marker.Description, "its 1 recorded finding carried as decided") {
+		t.Fatalf("marker %q should count the finding carried through run %s", marker.Description, second.ID)
+	}
+}
+
+// The review a carried approval is followed to must have run on this run's
+// reviewer; an approval carried on behalf of another agent does not carry on.
+func TestIncrementalReview_ACarriedApprovalIsProvenAgainstTheReviewThatRan(t *testing.T) {
+	t.Parallel()
+	r := newCarryRepo(t)
+	h := newCarryHarness(t, r, []string{"feature.txt", "shared.txt"})
+	first := h.recordPrior(t, approvedReview{head: r.approved, reviewer: "codex"})
+	h.recordPrior(t, approvedReview{head: r.approved, reviewer: "none", carriedFrom: first.ID})
+	assertFull(t, h, "run "+first.ID+" was reviewed by another reviewer")
+}
+
+// What an approved Review leaves decided is its own findings without the
+// pipeline's notices, then the ones it had carried and did not report again.
+func TestCarriedReviewFindingsAccumulateWithoutNoticesOrRepeats(t *testing.T) {
+	t.Parallel()
+	first := types.Finding{ID: "review-1", Description: "first note"}
+	again := types.Finding{ID: "review-1", Description: "reported again by the later review"}
+	second := types.Finding{ID: "review-2", Description: "second note"}
+	notices := []types.Finding{{ID: types.FindingIDReviewRoundCapNotes}, {ID: types.FindingIDReviewCarried}}
+	cases := map[string]struct {
+		approved types.Findings
+		want     []types.Finding
+	}{
+		"nothing recorded":         {types.Findings{}, nil},
+		"only pipeline notices":    {types.Findings{Items: notices}, nil},
+		"its own findings":         {types.Findings{Items: []types.Finding{first, notices[0]}}, []types.Finding{first}},
+		"only what it carried":     {types.Findings{Items: notices, CarriedReview: &types.CarriedReview{Findings: []types.Finding{first}}}, []types.Finding{first}},
+		"its own, then carried":    {types.Findings{Items: []types.Finding{again}, CarriedReview: &types.CarriedReview{Findings: []types.Finding{first, second}}}, []types.Finding{again, second}},
+		"an unrecorded id repeats": {types.Findings{Items: []types.Finding{{Description: "no id"}}, CarriedReview: &types.CarriedReview{Findings: []types.Finding{{Description: "no id"}}}}, []types.Finding{{Description: "no id"}, {Description: "no id"}}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			approved := tc.approved
+			if got := carriedReviewFindings(&approved); !slices.Equal(got, tc.want) {
+				t.Fatalf("carriedReviewFindings() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+	var many []types.Finding
+	for i := range maxCarriedReviewFindings + 10 {
+		many = append(many, types.Finding{ID: fmt.Sprintf("review-%d", i)})
+	}
+	if got := carriedReviewFindings(&types.Findings{Items: many}); len(got) != maxCarriedReviewFindings {
+		t.Fatalf("a carried record holds %d findings, want it bounded at %d", len(got), maxCarriedReviewFindings)
+	}
+}
+
+// axi retry records a carried Review on the continuation run under the
+// daemon's own build stamp. The run that ran the Review gave the approval, so
+// its build is the one compared.
+func TestIncrementalReview_ARetryCarriedApprovalComparesTheOriginRunsBuild(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		origin, retry, current string
+		carried                bool
+	}{
+		"one build throughout":                         {carryBuild, carryBuild, carryBuild, true},
+		"upgraded before the retry":                    {carryBuild, "build-2", "build-2", false},
+		"upgraded after the approval, then downgraded": {"build-2", carryBuild, carryBuild, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := newCarryRepo(t)
+			h := newCarryHarness(t, r, []string{"feature.txt", "shared.txt"})
+			d := h.sctx.DB
+			origin := h.recordPrior(t, approvedReview{head: r.approved, build: tc.origin})
+			steps, err := d.GetStepsByRun(origin.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retry, err := d.InsertRunWithIntentAndLaunchNonce(h.sctx.Repo.ID, h.sctx.Run.Branch, r.approved, h.sctx.Run.BaseSHA, nil, "", "", "", "", false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, step := range steps {
+				if step.StepName != types.StepReview {
+					continue
+				}
+				if _, err := d.InsertCarriedStepResult(retry.ID, step); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := d.UpdateRunReviewApprovedHeadSHA(retry.ID, r.approved); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.SetRunBuildForTest(retry.ID, "v1.109.0-local.1", tc.retry); err != nil {
+				t.Fatal(err)
+			}
+			h.sctx.Run.NoMistakesBuildSHA = &tc.current
+			if tc.carried {
+				assertCarried(t, h, retry)
+				return
+			}
+			assertFull(t, h, fmt.Sprintf("run %s (%q) is not this run's", origin.ID, tc.origin))
+		})
+	}
+}
+
+// With quota routing on, each run's agent order is chosen per run. The
+// configuration does not change, so only the recorded review turn can tell
+// that this run starts on an agent which never reviewed the earlier work.
+func TestIncrementalReview_AnotherSelectedReviewerGetsAFullReviewWhateverTheConfiguration(t *testing.T) {
+	t.Parallel()
+	r := newCarryRepo(t)
+	h := newCarryHarness(t, r, []string{"feature.txt", "shared.txt"})
+	h.ag.name = "codex"
+	prior := h.recordPrior(t, approvedReview{head: r.approved, globalYAML: carryGlobalYAML + "quota_routing:\n  enabled: true\n"})
+	assertFull(t, h, "run "+prior.ID+" was reviewed by another reviewer")
+}
+
+// A quota routing change alone does not block a carry: the recorded review
+// turn still names this run's reviewer.
+func TestIncrementalReview_AQuotaRoutingChangeAloneDoesNotBlockTheCarry(t *testing.T) {
+	t.Parallel()
+	r := newCarryRepo(t)
+	h := newCarryHarness(t, r, nil)
+	prior := h.recordPrior(t, approvedReview{head: r.approved, globalYAML: carryGlobalYAML + "quota_routing:\n  enabled: true\n"})
+	assertCarried(t, h, prior)
+}
+
+// On a git older than 2.38, merge-tree has no --write-tree. The fallback must
+// name the git, not blame a conflict on a base that merges cleanly.
+func TestIncrementalReview_OldGitFallsBackToAFullReviewNamingGit(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in git is a shell script")
+	}
+	realGit, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("git not available")
+	}
+	r := newCarryRepo(t)
+	h := newCarryHarness(t, r, []string{"feature.txt", "shared.txt"})
+	h.recordPrior(t, approvedReview{head: r.approved})
+	bin := t.TempDir()
+	script := "#!/bin/sh\ncase \" $* \" in\n\t*' --write-tree '*|*' merge-tree -h '*) echo 'usage: git merge-tree <base-tree> <branch1> <branch2>'; exit 129;;\nesac\nexec \"$CARRY_REAL_GIT\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.sctx.Env = []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "CARRY_REAL_GIT=" + realGit}
+
+	assertFull(t, h, "git is too old for merge-tree --write-tree (needs 2.38 or newer)")
 }
 
 func TestHunksOverlap(t *testing.T) {

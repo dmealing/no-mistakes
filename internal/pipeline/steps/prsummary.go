@@ -1469,6 +1469,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 	// True only when the step recorded final findings but no round captured
 	// them - a data gap we must not paper over as "no issues found".
 	missingRoundFindingsData := sr.FindingsJSON != nil && !roundsHaveFindings(rounds) && !roundsHaveParseFailure(rounds)
+	wroteCarried := false
 
 	for i, r := range rounds {
 		isFixRound := r.IsFixRound()
@@ -1495,6 +1496,15 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 			continue
 		}
 
+		// An incremental Review judged only the changes since an earlier
+		// approval, and the findings decided there are not its own: say both.
+		_, isCarriedNotice := reviewCarriedNotice(&findings)
+		if sr.StepName == types.StepReview && !wroteCarried && !isCarriedNotice && findings.CarriedReview != nil {
+			wroteCarried = true
+			inner.WriteString(fmt.Sprintf("♻️ Reviewed only the branch's changes since run %s approved; the rest of the branch carries that approval.\n\n", findings.CarriedReview.SourceRunID))
+			writeCarriedReview(&inner, sr, findings.CarriedReview, flavor)
+		}
+
 		if len(findings.Items) == 0 {
 			if isFixRound {
 				inner.WriteString("✅ Re-checked - no issues remain.\n")
@@ -1517,6 +1527,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 		}
 		if notice, carried := reviewCarriedNotice(&findings); carried && sr.StepName == types.StepReview {
 			inner.WriteString(fmt.Sprintf("♻️ %s\n\n", notice))
+			writeCarriedReview(&inner, sr, findings.CarriedReview, flavor)
 			continue
 		}
 		// A completed Review that reached review.round_cap recorded its
@@ -1870,4 +1881,17 @@ func reviewCarriedNotice(findings *types.Findings) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// writeCarriedReview lists the findings an incremental Review carried from an
+// earlier approved one. They were decided there, so they stand beside a
+// round's own findings and are never counted among them.
+func writeCarriedReview(b *strings.Builder, sr *db.StepResult, carried *types.CarriedReview, flavor prBodyFlavor) {
+	if carried == nil || len(carried.Findings) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "Findings carried from run %s, already decided there:\n\n", escapePRText(carried.SourceRunID, flavor))
+	decided := types.Findings{Items: carried.Findings}
+	writeFindingItems(b, sr, &decided, flavor)
+	b.WriteString("\n")
 }

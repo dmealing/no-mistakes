@@ -43,8 +43,10 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// review.incremental: when the branch's latest approved Review still holds
 	// for everything but the commits added since, this Review covers only
 	// those commits. The plan is re-derived on every round from the same
-	// durable inputs, so a fix round, answer round, or coverage continuation of
-	// an incremental Review keeps the same base commit and scope.
+	// inputs, among them the agent the run is on, so a fix round, answer
+	// round, or coverage continuation of an incremental Review keeps the same
+	// base commit and scope unless the run switched to another agent, which
+	// has not reviewed the earlier work and reviews in full.
 	carry, fullReason := planIncrementalReview(sctx, baseSHA)
 	reviewScope := fmt.Sprintf("branch changes between %s and %s", baseSHA, sctx.Run.HeadSHA)
 	if carry != nil {
@@ -251,6 +253,7 @@ Previous review findings to address:
 			sctx.Log(marker.Description)
 			noChangeFindings.Items = []Finding{marker}
 			noChangeFindings.RiskRationale = "approval carried from an earlier review"
+			noChangeFindings.CarriedReview = &carry.Carried
 		} else {
 			sctx.Log("no changes to review")
 		}
@@ -631,6 +634,10 @@ Risk assessment (after listing all findings):
 	}
 	findings.ReviewCoverageScope = currentReviewCoverageScope(sctx, baseSHA, reviewTargetSHA, reviewable)
 	findings.ReviewCoverageScope.Incremental = carry != nil
+	findings.CarriedReview = nil
+	if carry != nil {
+		findings.CarriedReview = &carry.Carried
+	}
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
