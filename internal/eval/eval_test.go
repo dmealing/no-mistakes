@@ -945,6 +945,14 @@ func setupCapturedRunWithHistory(t *testing.T, ctx context.Context, padCommits i
 
 func setupCapturedRunWithHistoryAndFindings(t *testing.T, ctx context.Context, padCommits int, findings string) (*paths.Paths, *db.DB, *db.Run, *db.Repo, *db.StepRound) {
 	t.Helper()
+	return setupCapturedRunWithRound(t, ctx, padCommits, func(*db.Run, string) string { return findings })
+}
+
+// setupCapturedRunWithRound builds the same fixture with a first round whose
+// findings are built from the inserted run and review step, for payloads that
+// name them.
+func setupCapturedRunWithRound(t *testing.T, ctx context.Context, padCommits int, roundFindings func(run *db.Run, stepID string) string) (*paths.Paths, *db.DB, *db.Run, *db.Repo, *db.StepRound) {
+	t.Helper()
 	root := t.TempDir()
 	p := paths.WithRoot(root)
 	if err := p.EnsureDirs(); err != nil {
@@ -1000,6 +1008,7 @@ func setupCapturedRunWithHistoryAndFindings(t *testing.T, ctx context.Context, p
 	if err != nil {
 		t.Fatal(err)
 	}
+	findings := roundFindings(run, step.ID)
 	reviewRound, err := database.InsertReviewStepRoundWithProvenance(step.ID, 1, "initial", &findings, nil, headSHA, headSHA, baseSHA, []byte("{}\n"), repoConfigYAML, 50)
 	if err != nil {
 		t.Fatal(err)

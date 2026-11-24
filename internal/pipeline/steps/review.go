@@ -40,7 +40,22 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		ignorePatterns = strings.Join(sctx.Config.IgnorePatterns, ", ")
 	}
 
+	// review.incremental: when the branch's latest approved Review still holds
+	// for everything but the commits added since, this Review covers only
+	// those commits. The plan is re-derived on every round from the same
+	// inputs, among them the agent the run is on, so a fix round, answer
+	// round, or coverage continuation of an incremental Review keeps the same
+	// base commit and scope unless the run switched to another agent, which
+	// has not reviewed the earlier work and reviews in full.
+	carry, fullReason := planIncrementalReview(sctx, baseSHA)
 	reviewScope := fmt.Sprintf("branch changes between %s and %s", baseSHA, sctx.Run.HeadSHA)
+	if carry != nil {
+		sctx.Log(fmt.Sprintf("incremental review: run %s approved head %s; reviewing only the branch's changes since it (from %s)", carry.SourceRunID, shortObjectID(carry.ApprovedHead), shortObjectID(carry.BaseSHA)))
+		baseSHA = carry.BaseSHA
+		reviewScope = incrementalReviewScope(carry, sctx.Run.HeadSHA)
+	} else if fullReason != "" {
+		sctx.Log("full review: " + fullReason)
+	}
 	if sctx.Fixing {
 		startingHeadSHA := sctx.ReviewStartingHeadSHA
 		if startingHeadSHA == "" {
@@ -227,10 +242,20 @@ Previous review findings to address:
 		retained = &prior
 	}
 	if len(reviewable) == 0 {
-		sctx.Log("no changes to review")
 		noChangeFindings := Findings{
 			RiskLevel:     "low",
 			RiskRationale: "no reviewable changes",
+		}
+		if carry != nil && !sctx.Fixing {
+			// The approval this Review carries is the marker the step result
+			// and the PR body show (types.FindingIDReviewCarried).
+			marker := reviewCarriedFinding(carry, sctx.Run.HeadSHA, len(changed) == 0)
+			sctx.Log(marker.Description)
+			noChangeFindings.Items = []Finding{marker}
+			noChangeFindings.RiskRationale = "approval carried from an earlier review"
+			noChangeFindings.CarriedReview = &carry.Carried
+		} else {
+			sctx.Log("no changes to review")
 		}
 		// Nothing changed, so nothing needed covering; an empty coverage record
 		// is honest here and cannot clear any outstanding finding.
@@ -270,7 +295,7 @@ Previous review findings to address:
 	if err != nil {
 		return nil, err
 	}
-	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + planSection + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + incrementalReviewPromptSection(carry) + userIntentPromptSection(sctx) + planSection + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
 
 	// The authorization/privacy obligation below specializes the existing
 	// concrete-state trace only when changed behavior crosses a potentially
@@ -608,6 +633,11 @@ Risk assessment (after listing all findings):
 		needsApproval = true
 	}
 	findings.ReviewCoverageScope = currentReviewCoverageScope(sctx, baseSHA, reviewTargetSHA, reviewable)
+	findings.ReviewCoverageScope.Incremental = carry != nil
+	findings.CarriedReview = nil
+	if carry != nil {
+		findings.CarriedReview = &carry.Carried
+	}
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
@@ -1047,8 +1077,9 @@ Fix-round provenance:
 `, fromSHA, toSHA)
 }
 
-// approvedReviewOutcome captures the immutable commit examined by this full
-// review round. The executor persists it only if this outcome ultimately
+// approvedReviewOutcome captures the immutable commit examined by this review
+// round (a full Review, or an incremental one that carries an earlier
+// approval for the rest of the branch). The executor persists it only if this outcome ultimately
 // completes the review step, so parked, failed, skipped, and superseded rounds
 // cannot gain or advance approval authority.
 func approvedReviewOutcome(reviewTargetSHA string, outcome *pipeline.StepOutcome) (*pipeline.StepOutcome, error) {

@@ -198,7 +198,8 @@ func (d *DB) StepFindingStats(step *StepResult) (StepStats, error) {
 // findingItems returns the findings that count as mistakes. A Test budget cut,
 // an exhausted Review fix-round budget, or the Review round-cap notice is a
 // decision about a budget, not a code mistake, so it is neither reported nor, when a later round
-// no longer carries it, fixed.
+// no longer carries it, fixed. The carried-Review notice records where an
+// approval came from, not a mistake, and is excluded the same way.
 func findingItems(raw *string) []types.Finding {
 	if raw == nil || *raw == "" {
 		return nil
@@ -209,7 +210,8 @@ func findingItems(raw *string) []types.Finding {
 	}
 	return slices.DeleteFunc(findings.Items, func(item types.Finding) bool {
 		return item.ID == types.FindingIDTestAgentTimeout || item.ID == types.FindingIDTestAgentUnvalidatedWork ||
-			item.ID == types.FindingIDReviewFixRoundsExhausted || item.ID == types.FindingIDReviewRoundCapNotes
+			item.ID == types.FindingIDReviewFixRoundsExhausted || item.ID == types.FindingIDReviewRoundCapNotes ||
+			item.ID == types.FindingIDReviewCarried
 	})
 }
 

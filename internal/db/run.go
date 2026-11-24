@@ -227,6 +227,16 @@ func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA 
 	return r, nil
 }
 
+// SetRunBuildForTest records on a run row the build that created it, so tests
+// in other packages can give a run a real build stamp. Production writes both
+// columns once, at insert, from the running binary's own stamps.
+func (d *DB) SetRunBuildForTest(id, version, buildSHA string) error {
+	if _, err := d.sql.Exec(`UPDATE runs SET no_mistakes_version = ?, no_mistakes_build_sha = ? WHERE id = ?`, version, buildSHA, id); err != nil {
+		return fmt.Errorf("set run build: %w", err)
+	}
+	return nil
+}
+
 // RunWorktree is one run's recorded worktree placement, identified by the run
 // and repository that own it.
 type RunWorktree struct {

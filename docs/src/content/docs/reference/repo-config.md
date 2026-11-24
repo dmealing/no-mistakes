@@ -916,7 +916,7 @@ The tradeoff `true` buys is cost against an unreviewed repair:
 
 | | `false` (default) | `true` |
 |---|---|---|
-| Ordinary repair that builds on the reviewed head | published immediately, one agent round | revalidated: one agent round plus a full Review, Test, Document, Lint, Push, PR pass |
+| Ordinary repair that builds on the reviewed head | published immediately, one agent round | revalidated: one agent round plus a Review, Test, Document, Lint, Push, PR pass |
 | Merge-conflict repair | revalidated | revalidated |
 | Ordinary repair is reviewed before it reaches the PR | no | yes |
 | Steps that re-run when a repair revalidates | Review onward; Intent and Rebase do not | same |

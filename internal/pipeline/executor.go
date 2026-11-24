@@ -1501,7 +1501,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var pendingVerificationIDs []string
 	selectedOutstandingIDs := state.selectedOutstandingIDs
 	if carryFindings {
-		outstandingFindings = excludeFindingsJSON(state.outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted, types.FindingIDReviewRoundCapNotes})
+		outstandingFindings = excludeFindingsJSON(state.outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted, types.FindingIDReviewRoundCapNotes, types.FindingIDReviewCarried})
 		pendingVerificationIDs = append([]string(nil), state.selectedOutstandingIDs...)
 		// An answer round is a round type the append-only set was not written
 		// for, and it does NOT earn pending-verification entries. A fix round
@@ -1782,7 +1782,7 @@ rounds:
 			outstandingFindings = dropReviewQuestionFindingsJSON(outstandingFindings)
 			// The budget notice is re-derived, never a code finding whose
 			// absent file anchor can prevent positive verification.
-			outstandingFindings = excludeFindingsJSON(outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted, types.FindingIDReviewRoundCapNotes})
+			outstandingFindings = excludeFindingsJSON(outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted, types.FindingIDReviewRoundCapNotes, types.FindingIDReviewCarried})
 			// An answer round retracts by naming ids, never by silence - and
 			// ONLY an answer round. A fix round is held to the coverage rule,
 			// so a retraction it claimed would clear a selected finding no
