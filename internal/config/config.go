@@ -297,11 +297,12 @@ type GlobalConfig struct {
 	Intent GlobalIntentRaw
 	Test   TestRaw
 	// Review carries the operator's own review guidance for every gated
-	// repository: path_instructions, plus the inline_fixes, round_cap, and
-	// coverage_first_round_only cost switches. Like review_agents it comes
-	// from this machine, never from a pushed branch, so it sits outside the
-	// trusted-default-branch boundary. Merge renders the path instructions
-	// alongside, never instead of, the repository's trusted rules.
+	// repository: path_instructions, plus the inline_fixes, round_cap,
+	// coverage_first_round_only, and incremental cost switches. Like
+	// review_agents it comes from this machine, never from a pushed branch, so
+	// it sits outside the trusted-default-branch boundary. Merge renders the
+	// path instructions alongside, never instead of, the repository's trusted
+	// rules.
 	Review GlobalReviewRaw
 	// Document carries the operator's machine-wide document-step cost switch
 	// (skip_internal). Global-only for the same reason as Review's switches.

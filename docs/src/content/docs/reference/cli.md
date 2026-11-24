@@ -710,7 +710,7 @@ Any other timeout or cancellation, and every failure about the change itself - a
 The retry starts a new run at the failed run's preserved head, so every correction the pipeline already committed is kept:
 
 - The steps before the failed step are carried from the failed run, with their outcome and, for a carried Review, the head that Review approved. Their findings and fixes appear in the new run's output and PR body as recorded in the failed run.
-- The failed step restarts from the beginning, with round trigger `retry`. A failed agent turn is never replayed, so a Review that failed during a fix round reviews the resulting head again in full before Test runs. Fixer commits the failed run never re-reviewed are flagged to that review together with the failed run's rounds, exactly as for a rerun.
+- The failed step restarts from the beginning, with round trigger `retry`. A failed agent turn is never replayed, so a Review that failed during a fix round reviews the resulting head again before Test runs, and carries an earlier approval only where [`review.incremental`](/no-mistakes/reference/global-config/#reviewincremental) can prove it. Fixer commits the failed run never re-reviewed are flagged to that review together with the failed run's rounds, exactly as for a rerun.
 - Every later step runs normally. Per-run skips of the steps the new run runs again are kept.
 
 Test's evidence and every later step's work are not kept after a run ends, so nothing from Test on is carried.
