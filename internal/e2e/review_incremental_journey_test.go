@@ -233,7 +233,6 @@ func waitForNewRun(t *testing.T, h *Harness, known map[string]bool, branch strin
 	return nil
 }
 
-
 func countReviewTurns(invs []Invocation) int {
 	n := 0
 	for _, inv := range invs {
