@@ -46,7 +46,7 @@ const reviewCarryHunkMargin = 3
 // judges or who judges it. A change to any of them since the approved Review
 // ran means the approval cannot carry. review.incremental itself is excluded
 // from the comparison: turning the feature on does not change the review.
-var reviewCarryGlobalKeys = []string{"agent", "agent_config", "review_agents", "review", "repository_overrides"}
+var reviewCarryGlobalKeys = []string{"agent", "agent_config", "review_agents", "review", "repository_overrides", "agent_args_override", "agent_path_override", "acpx_path", "acp_registry_overrides", "quota_routing"}
 
 // planIncrementalReview decides whether this Review may be incremental
 // (review.incremental). It returns the proven plan, or nil and the reason a
@@ -89,12 +89,22 @@ func planIncrementalReview(sctx *pipeline.StepContext, baseSHA string) (*reviewC
 	return carry, ""
 }
 
-// reviewCarryRunMismatch compares the run-level inputs a Review judged
-// against: the PR base branch and an explicit intent. An inferred intent is
-// not an acceptance contract and is re-derived per run, so two inferred
-// intents never block a carry; an explicit one on either side must match
-// exactly (whitespace-trimmed), on both sides.
+// reviewCarryRunMismatch compares the run-level inputs of a Review: the ones
+// it judged against (the PR base branch, an explicit intent, and the
+// verification plan) and the ones that select who judges it (the per-run Pi
+// profile and the no-mistakes build). An inferred intent is not an acceptance contract and is re-derived
+// per run, so two inferred intents never block a carry; an explicit one on
+// either side must match exactly (whitespace-trimmed), on both sides.
 func reviewCarryRunMismatch(prior, current *db.Run) string {
+	if (prior.PiProfile == nil) != (current.PiProfile == nil) || (prior.PiProfile != nil && *prior.PiProfile != *current.PiProfile) {
+		return fmt.Sprintf("run %s reviewed under a different model profile than this run", prior.ID)
+	}
+	if build, priorBuild := runBuild(current), runBuild(prior); build == "" || build != priorBuild {
+		return fmt.Sprintf("the no-mistakes build that reviewed run %s (%q) is not this run's (%q)", prior.ID, priorBuild, build)
+	}
+	if (prior.VerificationPlan == nil) != (current.VerificationPlan == nil) || (prior.VerificationPlan != nil && prior.VerificationPlan.SHA256 != current.VerificationPlan.SHA256) {
+		return fmt.Sprintf("run %s and this run were given different verification plans", prior.ID)
+	}
 	if deref(prior.PRBaseBranch) != deref(current.PRBaseBranch) {
 		return fmt.Sprintf("run %s targeted base branch %q, this run targets %q", prior.ID, deref(prior.PRBaseBranch), deref(current.PRBaseBranch))
 	}
@@ -106,6 +116,15 @@ func reviewCarryRunMismatch(prior, current *db.Run) string {
 		}
 	}
 	return ""
+}
+
+// runBuild names the no-mistakes build that created a run: its build SHA, or
+// its version when no SHA was recorded, or "" when neither was.
+func runBuild(run *db.Run) string {
+	if sha := strings.TrimSpace(deref(run.NoMistakesBuildSHA)); sha != "" {
+		return sha
+	}
+	return strings.TrimSpace(deref(run.NoMistakesVersion))
 }
 
 // reviewCarryConfigMismatch requires the repository configuration and the

@@ -405,6 +405,10 @@ type ReviewCoverageScope struct {
 	TrustedConfigSHA string   `json:"trusted_config_sha"`
 	Paths            []string `json:"paths"`
 	SourceRoundID    string   `json:"source_round_id,omitempty"`
+	// Incremental is set when the Review judged only the branch's work since
+	// an earlier approved Review (review.incremental): BaseSHA is that
+	// approval's head merged with the base, not the branch's merge base.
+	Incremental bool `json:"incremental,omitempty"`
 }
 
 // Findings is the structured findings payload exchanged across pipeline, IPC, and TUI.

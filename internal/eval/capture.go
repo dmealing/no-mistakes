@@ -160,6 +160,9 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 	if len(reviewRounds) == 0 {
 		return nil, fmt.Errorf("%w: run %q recorded no review passes", ErrNoCapturableReview, run.ID)
 	}
+	if reviewNotReplayable(reviewRounds) {
+		return nil, fmt.Errorf("%w: run %q carried an earlier approval or reviewed only part of the branch (review.incremental), which a replay cannot reproduce", ErrNoCapturableReview, run.ID)
+	}
 
 	gateDir := p.RepoDir(repo.ID)
 	if err := git.ValidateBareRepository(ctx, gateDir); err != nil {
@@ -302,6 +305,34 @@ func effectiveReplayBase(ctx context.Context, gateDir, recordedBase, head, trust
 		}
 	}
 	return "", fmt.Errorf("derive replay base: reviewed head and trusted default branch have no readable merge base")
+}
+
+// reviewNotReplayable reports whether a run's Review step judged something
+// other than the diff a replay rebuilds: a round that carried an earlier
+// approval ran no review turn, and an incremental Review
+// (review.incremental) judged only the branch's work since its own base,
+// which a replay has no earlier approval to rebuild. The whole step is then
+// refused: its rounds share that base, and a later round that reviewed
+// nothing records no scope to tell by.
+func reviewNotReplayable(rounds []*db.StepRound) bool {
+	for _, round := range rounds {
+		if round.FindingsJSON == nil || strings.TrimSpace(*round.FindingsJSON) == "" {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
+		if err != nil {
+			continue
+		}
+		if findings.ReviewCoverageScope != nil && findings.ReviewCoverageScope.Incremental {
+			return true
+		}
+		for _, item := range findings.Items {
+			if item.ID == types.FindingIDReviewCarried {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func repoConfigAt(ctx context.Context, gateDir, sha string) (*config.RepoConfig, error) {

@@ -1327,8 +1327,9 @@ A full Review runs instead, and the step log says why, when any of these holds:
 - the base changes since the approved head touch a file the approved review changed within 3 lines of a reviewed hunk, or touch such a file without line hunks (binary, mode, or type change)
 - the approved head is not an ancestor of the new head (a rebase, force-push, or rewrite), or does not merge cleanly with the base
 - the branch has no Review that completed with an approval (a revalidation revokes a run's approval, so it is not carried)
-- the explicit `--intent` differs from the approved run's, or the PR base branch differs
-- the repository configuration, or the global `agent`, `agent_config`, `review_agents`, `review` (other than this key), or `repository_overrides` settings, differ from what the approved review's rounds recorded; rounds record them while [`eval.capture_provenance`](#eval) is on (the default), and with no record nothing can be compared
+- the explicit `--intent` differs from the approved run's, the PR base branch differs, or the run's [per-run Pi profile](#per-run-pi-profiles) (`--model`/`--effort`) or `--verification-plan` content is not the approved run's
+- the repository configuration, or the global `agent`, `agent_config`, `review_agents`, `review` (other than this key), `repository_overrides`, `agent_args_override`, `agent_path_override`, `acpx_path`, `acp_registry_overrides`, or `quota_routing` settings, differ from what the approved review's rounds recorded; rounds record them while [`eval.capture_provenance`](#eval) is on (the default), and with no record nothing can be compared
+- the run was started by a different `no-mistakes` build than the approved run's, compared by build SHA or by version when a run recorded no SHA, so each branch gets one full Review after an upgrade; a run that recorded neither cannot carry
 - any git or database read fails
 
 Two inferred intents never block a carry, since an inferred intent is not an acceptance contract. The Test step and everything after it still run on every head. Set `false` to review every run in full. It is global-only.

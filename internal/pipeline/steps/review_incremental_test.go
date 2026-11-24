@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,10 +13,12 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 )
 
 const (
@@ -118,6 +121,7 @@ type carryHarness struct {
 	sctx *pipeline.StepContext
 	ag   *mockAgent
 	logs []string
+	plan *verificationplan.Snapshot
 }
 
 func newCarryHarness(t *testing.T, r *carryRepo, reviewed []string) *carryHarness {
@@ -131,7 +135,20 @@ func newCarryHarness(t *testing.T, r *carryRepo, reviewed []string) *carryHarnes
 	h.sctx.Config.ReplayRepoYAML = []byte(carryRepoYAML)
 	h.sctx.Config.ReplayGlobalYAML = []byte(carryGlobalYAML)
 	h.sctx.Log = func(msg string) { h.logs = append(h.logs, msg) }
+	h.plan = newCarryPlan(t)
 	return h
+}
+
+// newCarryPlan is a verification plan snapshot as `axi run --verification-plan`
+// captures it: a digest-checked file outside the repository.
+func newCarryPlan(t *testing.T) *verificationplan.Snapshot {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "verification-plan.txt")
+	content := "verify the feature end to end\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return &verificationplan.Snapshot{ID: "planned-run", Path: path, SHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(content)))}
 }
 
 // approvedReview records an earlier run of the same branch whose Review
@@ -144,6 +161,8 @@ type approvedReview struct {
 	findings   string
 	prBase     string
 	noApproval bool
+	profile    *agentcfg.PiProfile
+	plan       *verificationplan.Snapshot
 }
 
 func (h *carryHarness) recordPrior(t *testing.T, p approvedReview) *db.Run {
@@ -158,7 +177,7 @@ func (h *carryHarness) recordPrior(t *testing.T, p approvedReview) *db.Run {
 		p.findings = `{"findings":[],"risk_level":"low","risk_rationale":"clean"}`
 	}
 	d := h.sctx.DB
-	prior, err := d.InsertRunWithIntent(h.sctx.Repo.ID, h.sctx.Run.Branch, p.head, h.sctx.Run.BaseSHA, p.intent, p.prBase)
+	prior, err := d.InsertRunWithIntentAndLaunchNonce(h.sctx.Repo.ID, h.sctx.Run.Branch, p.head, h.sctx.Run.BaseSHA, p.intent, "", "", "", p.prBase, false, p.plan, p.profile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,16 +219,22 @@ func (h *carryHarness) logged(substr string) bool {
 
 func carriedMarker(t *testing.T, outcome *pipeline.StepOutcome) (types.Finding, bool) {
 	t.Helper()
-	findings, err := types.ParseFindingsJSON(outcome.Findings)
-	if err != nil {
-		t.Fatalf("parse findings: %v", err)
-	}
+	findings := parsedFindings(t, outcome)
 	for _, item := range findings.Items {
 		if item.ID == types.FindingIDReviewCarried {
 			return item, true
 		}
 	}
 	return types.Finding{}, false
+}
+
+func parsedFindings(t *testing.T, outcome *pipeline.StepOutcome) types.Findings {
+	t.Helper()
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatalf("parse findings: %v", err)
+	}
+	return findings
 }
 
 // assertCarried: the Review spent no agent turn, approved the run head, and
@@ -245,6 +270,9 @@ func assertFull(t *testing.T, h *carryHarness, reason string) {
 	}
 	if _, ok := carriedMarker(t, outcome); ok {
 		t.Fatalf("a full review must not record a carried approval: %s", outcome.Findings)
+	}
+	if scope := parsedFindings(t, outcome).ReviewCoverageScope; scope != nil && scope.Incremental {
+		t.Fatalf("a full review must not record an incremental scope: %+v", scope)
 	}
 	if !slices.Contains(outcome.ReviewablePaths, "feature.txt") {
 		t.Fatalf("a full review must cover the whole branch, reviewable = %v", outcome.ReviewablePaths)
@@ -331,6 +359,9 @@ func TestIncrementalReview_NewCommitsAreReviewedAlone(t *testing.T) {
 	}
 	if _, ok := carriedMarker(t, outcome); ok {
 		t.Fatalf("an incremental review that reviewed new work records no carried marker")
+	}
+	if scope := parsedFindings(t, outcome).ReviewCoverageScope; scope == nil || !scope.Incremental || scope.BaseSHA == r.base {
+		t.Fatalf("an incremental review must record the base it judged from as incremental: %+v", scope)
 	}
 	if !h.logged("incremental review: run " + prior.ID) {
 		t.Fatalf("logs %v should announce the incremental review", h.logs)
@@ -437,6 +468,87 @@ func TestIncrementalReview_FallsBackToAFullReview(t *testing.T) {
 			prior:  func(r *carryRepo) approvedReview { return approvedReview{head: r.approved, prBase: "release"} },
 			reason: "targeted base branch",
 		},
+		"model profile pinned on the approved run only": {
+			prior:  func(r *carryRepo) approvedReview { return approvedReview{head: r.approved, profile: carryPin} },
+			reason: "different model profile",
+		},
+		"model profile pinned on this run only": {
+			tweak:  func(h *carryHarness) { h.sctx.Run.PiProfile = carryPin },
+			reason: "different model profile",
+		},
+		"changed pinned model": {
+			prior: func(r *carryRepo) approvedReview { return approvedReview{head: r.approved, profile: carryPin} },
+			tweak: func(h *carryHarness) {
+				h.sctx.Run.PiProfile = &agentcfg.PiProfile{Model: "acme/kit-pro", Effort: agentcfg.EffortHigh}
+			},
+			reason: "different model profile",
+		},
+		"changed pinned effort": {
+			prior: func(r *carryRepo) approvedReview { return approvedReview{head: r.approved, profile: carryPin} },
+			tweak: func(h *carryHarness) {
+				h.sctx.Run.PiProfile = &agentcfg.PiProfile{Model: "acme/kit", Effort: agentcfg.EffortLow}
+			},
+			reason: "different model profile",
+		},
+		"changed agent args override": {
+			prior: func(r *carryRepo) approvedReview {
+				return approvedReview{head: r.approved, globalYAML: carryGlobalYAML + "agent_args_override:\n  claude:\n    - --model\n    - sonnet\n"}
+			},
+			reason: "(agent_args_override)",
+		},
+		"changed agent binary path": {
+			prior: func(r *carryRepo) approvedReview {
+				return approvedReview{head: r.approved, globalYAML: carryGlobalYAML + "agent_path_override:\n  claude: /opt/claude\n"}
+			},
+			reason: "(agent_path_override)",
+		},
+		"changed ACP bridge path": {
+			prior: func(r *carryRepo) approvedReview {
+				return approvedReview{head: r.approved, globalYAML: carryGlobalYAML + "acpx_path: /opt/acpx\n"}
+			},
+			reason: "(acpx_path)",
+		},
+		"changed ACP registry override": {
+			prior: func(r *carryRepo) approvedReview {
+				return approvedReview{head: r.approved, globalYAML: carryGlobalYAML + "acp_registry_overrides:\n  cursor: cursor-agent acp\n"}
+			},
+			reason: "(acp_registry_overrides)",
+		},
+		"changed quota routing": {
+			prior: func(r *carryRepo) approvedReview {
+				return approvedReview{head: r.approved, globalYAML: carryGlobalYAML + "quota_routing:\n  enabled: true\n"}
+			},
+			reason: "(quota_routing)",
+		},
+		"another no-mistakes build": {
+			tweak:  func(h *carryHarness) { build := "build-2"; h.sctx.Run.NoMistakesBuildSHA = &build },
+			reason: "is not this run's",
+		},
+		"another version, no build SHA recorded": {
+			tweak: func(h *carryHarness) {
+				version := "v2.0.0"
+				h.sctx.Run.NoMistakesBuildSHA = nil
+				h.sctx.Run.NoMistakesVersion = &version
+			},
+			reason: "is not this run's",
+		},
+		"no recorded build": {
+			tweak:  func(h *carryHarness) { h.sctx.Run.NoMistakesBuildSHA = nil; h.sctx.Run.NoMistakesVersion = nil },
+			reason: "is not this run's",
+		},
+		"verification plan on the approved run only": {
+			prior:  func(r *carryRepo) approvedReview { return approvedReview{head: r.approved, plan: carryPlan} },
+			reason: "different verification plans",
+		},
+		"verification plan on this run only": {
+			tweak:  func(h *carryHarness) { h.sctx.Run.VerificationPlan = h.plan },
+			reason: "different verification plans",
+		},
+		"changed verification plan": {
+			prior:  func(r *carryRepo) approvedReview { return approvedReview{head: r.approved, plan: carryPlan} },
+			tweak:  func(h *carryHarness) { h.sctx.Run.VerificationPlan = h.plan },
+			reason: "different verification plans",
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -489,6 +601,73 @@ func TestIncrementalReview_InferredIntentsDoNotBlockTheCarry(t *testing.T) {
 	h := newCarryHarness(t, r, nil)
 	prior := h.recordPrior(t, approvedReview{head: r.approved, intent: &db.RunIntent{Summary: "a transcript guess", Source: "claude", Score: 0.4}})
 	assertCarried(t, h, prior)
+}
+
+// carryPin is a per-run model profile as `axi run --model/--effort` records it.
+var carryPin = &agentcfg.PiProfile{Model: "acme/kit", Effort: agentcfg.EffortHigh}
+
+// carryPlan is the approved run's verification plan: a digest no other plan in
+// these tests has.
+var carryPlan = &verificationplan.Snapshot{ID: "planned-run", SHA256: "approved-run-plan"}
+
+// The same per-run model profile on both runs keeps the reviewer, so the
+// approval carries.
+func TestIncrementalReview_TheSamePinnedModelProfileCarries(t *testing.T) {
+	t.Parallel()
+	r := newCarryRepo(t)
+	h := newCarryHarness(t, r, nil)
+	h.sctx.Run.PiProfile = carryPin
+	prior := h.recordPrior(t, approvedReview{head: r.approved, profile: carryPin})
+	assertCarried(t, h, prior)
+}
+
+// The same verification plan on both runs keeps what the Review judges
+// against, so the approval carries.
+func TestIncrementalReview_TheSameVerificationPlanCarries(t *testing.T) {
+	t.Parallel()
+	r := newCarryRepo(t)
+	h := newCarryHarness(t, r, nil)
+	h.sctx.Run.VerificationPlan = h.plan
+	prior := h.recordPrior(t, approvedReview{head: r.approved, plan: &verificationplan.Snapshot{ID: h.plan.ID, SHA256: h.plan.SHA256}})
+	assertCarried(t, h, prior)
+}
+
+// A fix round can find the incremental scope empty (the fixer deleted the file
+// its finding was about) while that finding is still outstanding. The PR body
+// renders the carried notice in place of every other finding, so the notice
+// belongs to a Review with nothing outstanding, never to a fix round.
+func TestIncrementalReview_AFixRoundWithAnEmptyScopeRecordsNoCarriedNotice(t *testing.T) {
+	t.Parallel()
+	r := newCarryRepo(t)
+	r.write("new.txt", "new branch work\n")
+	r.commit("new branch work")
+	if err := os.Remove(filepath.Join(r.dir, "new.txt")); err != nil {
+		t.Fatal(err)
+	}
+	h := newCarryHarness(t, r, nil)
+	prior := h.recordPrior(t, approvedReview{head: r.approved})
+	h.sctx.PriorRounds = 1
+	h.sctx.Fixing = true
+	h.sctx.SkipFixExecution = true
+	h.sctx.PreviousFindings = `{"findings":[{"id":"review-1","severity":"warning","file":"new.txt","line":1,"description":"fix me","action":"auto-fix"}]}`
+
+	outcome := h.execute(t)
+	if len(h.ag.calls) != 0 {
+		t.Fatalf("an empty scope ran %d agent turns, want 0", len(h.ag.calls))
+	}
+	if _, ok := carriedMarker(t, outcome); ok {
+		t.Fatalf("a fix round recorded the carried notice over an outstanding finding: %s", outcome.Findings)
+	}
+	findings := parsedFindings(t, outcome)
+	if len(findings.Items) != 0 || findings.RiskRationale != "no reviewable changes" {
+		t.Fatalf("findings = %s, want the ordinary no-changes outcome", outcome.Findings)
+	}
+	if outcome.NeedsApproval || outcome.ReviewApprovedHeadSHA != h.sctx.Run.HeadSHA || !outcome.ReviewCoverageComplete {
+		t.Fatalf("an empty scope must still approve the run head: %+v", outcome)
+	}
+	if h.logged("carried from run " + prior.ID) {
+		t.Fatalf("the step log announced a carry: %v", h.logs)
+	}
 }
 
 // The latest approved Review is the one carried, and it must be an ancestor:

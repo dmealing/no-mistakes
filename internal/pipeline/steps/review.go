@@ -244,7 +244,7 @@ Previous review findings to address:
 			RiskLevel:     "low",
 			RiskRationale: "no reviewable changes",
 		}
-		if carry != nil {
+		if carry != nil && !sctx.Fixing {
 			// The approval this Review carries is the marker the step result
 			// and the PR body show (types.FindingIDReviewCarried).
 			marker := reviewCarriedFinding(carry, sctx.Run.HeadSHA, len(changed) == 0)
@@ -630,6 +630,7 @@ Risk assessment (after listing all findings):
 		needsApproval = true
 	}
 	findings.ReviewCoverageScope = currentReviewCoverageScope(sctx, baseSHA, reviewTargetSHA, reviewable)
+	findings.ReviewCoverageScope.Incremental = carry != nil
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
