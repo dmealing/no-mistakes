@@ -1077,8 +1077,9 @@ Fix-round provenance:
 `, fromSHA, toSHA)
 }
 
-// approvedReviewOutcome captures the immutable commit examined by this full
-// review round. The executor persists it only if this outcome ultimately
+// approvedReviewOutcome captures the immutable commit examined by this review
+// round (a full Review, or an incremental one that carries an earlier
+// approval for the rest of the branch). The executor persists it only if this outcome ultimately
 // completes the review step, so parked, failed, skipped, and superseded rounds
 // cannot gain or advance approval authority.
 func approvedReviewOutcome(reviewTargetSHA string, outcome *pipeline.StepOutcome) (*pipeline.StepOutcome, error) {
