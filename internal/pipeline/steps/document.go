@@ -8,8 +8,13 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/triage"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+// documentInternalOnlySkipReason is recorded on a Document step skipped for
+// an internal-only change.
+const documentInternalOnlySkipReason = "internal-only change: no docs, CLI, config, schema, or public API path touched (document.skip_internal)"
 
 // DocumentStep keeps documentation accurate for the change under its
 // placement policy, and - when no deterministic lint command is configured -
@@ -115,13 +120,24 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	// Skip entirely when nothing the agent would document has changed. No
 	// lint result is stashed, so the lint step falls back to its own pass -
 	// neither duty is ever silently skipped.
-	changedFiles, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-only", baseSHA+".."+sctx.Run.HeadSHA)
+	changedOutput, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-only", "--no-renames", "-z", baseSHA+".."+sctx.Run.HeadSHA)
 	if err != nil {
 		return nil, fmt.Errorf("get changed files: %w", err)
 	}
+	changedFiles := changedPathList(changedOutput)
 	if !hasNonIgnoredDocumentChanges(changedFiles, sctx.Config.IgnorePatterns) {
 		sctx.Log("no changes to document")
 		return &pipeline.StepOutcome{}, nil
+	}
+	// An internal-only change (triage's path classification: no docs, CLI,
+	// config, schema, or public API path, every production file under an
+	// internal/ directory) has no user-facing documentation to keep accurate,
+	// so the step is skipped on document.skip_internal. Only a clean signal
+	// skips: InternalOnly is false whenever any path is doubtful. As above, no
+	// lint result is stashed, so the lint step still runs its own pass.
+	if sctx.Config.Document.SkipInternal && triage.InternalOnly(changedFiles) {
+		sctx.Log("internal-only change (no docs, CLI, config, schema, or public API path touched); skipping documentation (document.skip_internal)")
+		return &pipeline.StepOutcome{Skipped: true, SkipReason: documentInternalOnlySkipReason}, nil
 	}
 
 	if combinedLint {
@@ -356,9 +372,8 @@ func splitHousekeepingFindings(findings Findings) (doc Findings, lint Findings) 
 	return doc, lint
 }
 
-func hasNonIgnoredDocumentChanges(changedFiles string, ignorePatterns []string) bool {
-	for _, path := range strings.Split(changedFiles, "\n") {
-		path = strings.TrimSpace(path)
+func hasNonIgnoredDocumentChanges(changedFiles []string, ignorePatterns []string) bool {
+	for _, path := range changedFiles {
 		if path == "" {
 			continue
 		}

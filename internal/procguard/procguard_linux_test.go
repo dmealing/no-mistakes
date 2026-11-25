@@ -2,6 +2,7 @@ package procguard
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -288,5 +289,46 @@ func waitPID(t *testing.T, path string) int {
 			t.Fatalf("no pid in %s", path)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestStackedGuardsResolveTheRealToolInsteadOfEachOther reproduces the gate
+// incident: a gate run's Test agent already has its run's guard on PATH when
+// it runs this package's tests, which install a second guard in front. Each
+// wrapper used to skip only its own directory, so the inner guard resolved
+// the "real" pgrep to the outer guard's wrapper and the outer one back to the
+// inner's, re-entering each other until the host ran out of memory. The
+// oracle is the real pgrep's answer: this run's own PID, printed promptly.
+func TestStackedGuardsResolveTheRealToolInsteadOfEachOther(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(t.TempDir(), "inner-guard")
+	outer := filepath.Join(t.TempDir(), "outer-guard")
+	for _, dir := range []string{inner, outer} {
+		if err := Install(dir, exe); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tag := fmt.Sprintf("%d.%d", 9000+os.Getpid()%1000, time.Now().UnixNano()%1000000)
+	own := startTagged(t, tag, "run-own")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	shell := exec.CommandContext(ctx, "sh", "-c", "pgrep -f 'sleep "+tag+"'")
+	shell.Env = []string{
+		"PATH=" + inner + string(os.PathListSeparator) + outer + string(os.PathListSeparator) + os.Getenv("PATH"),
+		MarkerEnv + "=run-own",
+	}
+	out, err := shell.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("stacked guards never reached the real pgrep (re-entered each other):\n%s", out)
+	}
+	if err != nil {
+		t.Fatalf("pgrep through stacked guards failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), fmt.Sprint(own.Process.Pid)) {
+		t.Fatalf("pgrep through stacked guards = %q, want this run's PID %d", out, own.Process.Pid)
 	}
 }

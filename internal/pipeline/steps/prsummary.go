@@ -1261,6 +1261,14 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 		return buildDetail(fmt.Sprintf("⚠️ **%s** - findings unavailable", name))
 	}
 
+	// A Review that carried an earlier approval instead of reviewing says
+	// where the approval came from (review.incremental).
+	if sr.StepName == types.StepReview {
+		if notice, carried := reviewCarriedNotice(finalFindings); carried {
+			return buildDetail(fmt.Sprintf("♻️ **%s** - %s", name, notice))
+		}
+	}
+
 	if sr.StepName == types.StepReview && (riskLevel == "medium" || riskLevel == "high") && !hadAnyFindings {
 		return buildDetail(fmt.Sprintf("%s **%s** - %s risk", riskEmoji(riskLevel), name, riskLevel))
 	}
@@ -1285,6 +1293,14 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 	currentFindings := initialFindings
 	if hasFinalFindings {
 		currentFindings = finalFindings
+	}
+
+	// A Review completed at review.round_cap left its remaining findings as
+	// notes instead of looping: say so, rather than "approved as-is".
+	if sr.StepName == types.StepReview {
+		if notes, capped := reviewRoundCapNotes(currentFindings); capped {
+			return buildDetail(fmt.Sprintf("📌 **%s** - %s left as notes at the round cap", name, countFindingsBySeverity(&notes)))
+		}
 	}
 
 	// Had findings and the final state still contains them - approved as-is.
@@ -1453,6 +1469,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 	// True only when the step recorded final findings but no round captured
 	// them - a data gap we must not paper over as "no issues found".
 	missingRoundFindingsData := sr.FindingsJSON != nil && !roundsHaveFindings(rounds) && !roundsHaveParseFailure(rounds)
+	wroteCarried := false
 
 	for i, r := range rounds {
 		isFixRound := r.IsFixRound()
@@ -1479,6 +1496,15 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 			continue
 		}
 
+		// An incremental Review judged only the changes since an earlier
+		// approval, and the findings decided there are not its own: say both.
+		_, isCarriedNotice := reviewCarriedNotice(&findings)
+		if sr.StepName == types.StepReview && !wroteCarried && !isCarriedNotice && findings.CarriedReview != nil {
+			wroteCarried = true
+			inner.WriteString(fmt.Sprintf("♻️ Reviewed only the branch's changes since run %s approved; the rest of the branch carries that approval.\n\n", findings.CarriedReview.SourceRunID))
+			writeCarriedReview(&inner, sr, findings.CarriedReview, flavor)
+		}
+
 		if len(findings.Items) == 0 {
 			if isFixRound {
 				inner.WriteString("✅ Re-checked - no issues remain.\n")
@@ -1496,6 +1522,19 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 		if sr.StepName == types.StepReview && i == len(rounds)-1 && r.Round > 1 && sr.Status == types.StepStatusCompleted && types.OnlyWordingNotes(findings.Items) {
 			inner.WriteString(fmt.Sprintf("📝 %d wording or comment-placement %s left for the author (no fix round spent):\n\n", len(findings.Items), pluralWordPR(len(findings.Items), "note", "notes")))
 			writeFindingItems(&inner, sr, &findings, flavor)
+			inner.WriteString("\n")
+			continue
+		}
+		if notice, carried := reviewCarriedNotice(&findings); carried && sr.StepName == types.StepReview {
+			inner.WriteString(fmt.Sprintf("♻️ %s\n\n", notice))
+			writeCarriedReview(&inner, sr, findings.CarriedReview, flavor)
+			continue
+		}
+		// A completed Review that reached review.round_cap recorded its
+		// remaining findings as notes (the executor's reviewCapNotes).
+		if notes, capped := reviewRoundCapNotes(&findings); capped && sr.StepName == types.StepReview {
+			inner.WriteString(fmt.Sprintf("📌 Review round cap reached: %s left unresolved as notes (no further fix round):\n\n", countFindingsBySeverity(&notes)))
+			writeFindingItems(&inner, sr, &notes, flavor)
 			inner.WriteString("\n")
 			continue
 		}
@@ -1809,4 +1848,50 @@ func pluralWordPR(n int, one, many string) string {
 		return one
 	}
 	return many
+}
+
+// reviewRoundCapNotes returns findings without the review round cap notice and
+// whether the notice was present (types.FindingIDReviewRoundCapNotes).
+func reviewRoundCapNotes(findings *types.Findings) (types.Findings, bool) {
+	if findings == nil {
+		return types.Findings{}, false
+	}
+	notes := *findings
+	notes.Items = nil
+	capped := false
+	for _, item := range findings.Items {
+		if item.ID == types.FindingIDReviewRoundCapNotes {
+			capped = true
+			continue
+		}
+		notes.Items = append(notes.Items, item)
+	}
+	return notes, capped
+}
+
+// reviewCarriedNotice returns the carried-approval notice's description and
+// whether findings hold one (types.FindingIDReviewCarried).
+func reviewCarriedNotice(findings *types.Findings) (string, bool) {
+	if findings == nil {
+		return "", false
+	}
+	for _, item := range findings.Items {
+		if item.ID == types.FindingIDReviewCarried {
+			return sanitizePromptText(item.Description), true
+		}
+	}
+	return "", false
+}
+
+// writeCarriedReview lists the findings an incremental Review carried from an
+// earlier approved one. They were decided there, so they stand beside a
+// round's own findings and are never counted among them.
+func writeCarriedReview(b *strings.Builder, sr *db.StepResult, carried *types.CarriedReview, flavor prBodyFlavor) {
+	if carried == nil || len(carried.Findings) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "Findings carried from run %s, already decided there:\n\n", escapePRText(carried.SourceRunID, flavor))
+	decided := types.Findings{Items: carried.Findings}
+	writeFindingItems(b, sr, &decided, flavor)
+	b.WriteString("\n")
 }

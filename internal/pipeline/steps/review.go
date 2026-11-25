@@ -40,7 +40,22 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		ignorePatterns = strings.Join(sctx.Config.IgnorePatterns, ", ")
 	}
 
+	// review.incremental: when the branch's latest approved Review still holds
+	// for everything but the commits added since, this Review covers only
+	// those commits. The plan is re-derived on every round from the same
+	// inputs, among them the agent the run is on, so a fix round, answer
+	// round, or coverage continuation of an incremental Review keeps the same
+	// base commit and scope unless the run switched to another agent, which
+	// has not reviewed the earlier work and reviews in full.
+	carry, fullReason := planIncrementalReview(sctx, baseSHA)
 	reviewScope := fmt.Sprintf("branch changes between %s and %s", baseSHA, sctx.Run.HeadSHA)
+	if carry != nil {
+		sctx.Log(fmt.Sprintf("incremental review: run %s approved head %s; reviewing only the branch's changes since it (from %s)", carry.SourceRunID, shortObjectID(carry.ApprovedHead), shortObjectID(carry.BaseSHA)))
+		baseSHA = carry.BaseSHA
+		reviewScope = incrementalReviewScope(carry, sctx.Run.HeadSHA)
+	} else if fullReason != "" {
+		sctx.Log("full review: " + fullReason)
+	}
 	if sctx.Fixing {
 		startingHeadSHA := sctx.ReviewStartingHeadSHA
 		if startingHeadSHA == "" {
@@ -227,19 +242,30 @@ Previous review findings to address:
 		retained = &prior
 	}
 	if len(reviewable) == 0 {
-		sctx.Log("no changes to review")
 		noChangeFindings := Findings{
 			RiskLevel:     "low",
 			RiskRationale: "no reviewable changes",
+		}
+		if carry != nil && !sctx.Fixing {
+			// The approval this Review carries is the marker the step result
+			// and the PR body show (types.FindingIDReviewCarried).
+			marker := reviewCarriedFinding(carry, sctx.Run.HeadSHA, len(changed) == 0)
+			sctx.Log(marker.Description)
+			noChangeFindings.Items = []Finding{marker}
+			noChangeFindings.RiskRationale = "approval carried from an earlier review"
+			noChangeFindings.CarriedReview = &carry.Carried
+		} else {
+			sctx.Log("no changes to review")
 		}
 		// Nothing changed, so nothing needed covering; an empty coverage record
 		// is honest here and cannot clear any outstanding finding.
 		noChangeFindings.ReviewedPaths = nil
 		findingsJSON, _ := json.Marshal(noChangeFindings)
 		return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
-			Findings:        string(findingsJSON),
-			ReviewablePaths: reviewable,
-			FixSummary:      fixSummary,
+			Findings:               string(findingsJSON),
+			ReviewablePaths:        reviewable,
+			ReviewCoverageComplete: true,
+			FixSummary:             fixSummary,
 		})
 	}
 
@@ -269,7 +295,7 @@ Previous review findings to address:
 	if err != nil {
 		return nil, err
 	}
-	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + planSection + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
+	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + incrementalReviewPromptSection(carry) + userIntentPromptSection(sctx) + planSection + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
 
 	// The authorization/privacy obligation below specializes the existing
 	// concrete-state trace only when changed behavior crosses a potentially
@@ -578,7 +604,9 @@ Risk assessment (after listing all findings):
 		// loop; whatever is still uncovered after them parks with the explicit
 		// remainder named, so a partial or fabricated record never approves.
 		completed := findings
-		if retained == nil {
+		if retained == nil && !automaticCoverageCompletionAllowed(sctx) {
+			sctx.Log("skipping the focused coverage pass: it runs on the first review round only (review.coverage_first_round_only)")
+		} else if retained == nil {
 			completionPrompt := turnPrompt
 			if inlineAllowed {
 				// Same prompt minus the inline-fix permission: only the main turn
@@ -605,16 +633,22 @@ Risk assessment (after listing all findings):
 		needsApproval = true
 	}
 	findings.ReviewCoverageScope = currentReviewCoverageScope(sctx, baseSHA, reviewTargetSHA, reviewable)
+	findings.ReviewCoverageScope.Incremental = carry != nil
+	findings.CarriedReview = nil
+	if carry != nil {
+		findings.CarriedReview = &carry.Carried
+	}
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
-		NeedsApproval:     needsApproval,
-		AutoFixable:       len(findings.Items) > 0,
-		Findings:          string(findingsJSON),
-		ReviewedPaths:     findings.ReviewedPaths,
-		WithdrawnFindings: withdrawnFindings(findings),
-		ReviewablePaths:   reviewable,
-		FixSummary:        fixSummary,
+		NeedsApproval:          needsApproval,
+		AutoFixable:            len(findings.Items) > 0,
+		Findings:               string(findingsJSON),
+		ReviewedPaths:          findings.ReviewedPaths,
+		WithdrawnFindings:      withdrawnFindings(findings),
+		ReviewablePaths:        reviewable,
+		ReviewCoverageComplete: reviewedPathsCoverReviewable(findings.ReviewedPaths, reviewable),
+		FixSummary:             fixSummary,
 	})
 }
 
@@ -686,6 +720,17 @@ func reviewCoverageCompletionSection(missing []string) string {
 	b.WriteString("- Return the complete review JSON again. List in reviewed_paths exactly the files you examined in THIS turn; the pipeline merges your record with the earlier pass. Never list a file you did not examine.\n")
 	b.WriteString("- Report any defect you find in those files as a finding in the same JSON. If they are clean, return an empty findings array.\n")
 	return b.String()
+}
+
+// automaticCoverageCompletionAllowed reports whether this round may run the
+// automatic focused coverage pass. Under review.coverage_first_round_only it
+// runs only on a Review step's first round (no earlier round in this step):
+// a post-fix re-review, an answer round, and an intent-correction re-run all
+// skip it, so an incomplete coverage record there parks named, as it always
+// did after the pass. An explicit coverage continuation the operator
+// requested at the gate is not automatic and still runs.
+func automaticCoverageCompletionAllowed(sctx *pipeline.StepContext) bool {
+	return sctx.PriorRounds == 0 || sctx.Config == nil || !sctx.Config.Review.CoverageFirstRoundOnly
 }
 
 // maxCoverageCompletionTurns caps the focused coverage-completion turns one
@@ -1032,8 +1077,9 @@ Fix-round provenance:
 `, fromSHA, toSHA)
 }
 
-// approvedReviewOutcome captures the immutable commit examined by this full
-// review round. The executor persists it only if this outcome ultimately
+// approvedReviewOutcome captures the immutable commit examined by this review
+// round (a full Review, or an incremental one that carries an earlier
+// approval for the rest of the branch). The executor persists it only if this outcome ultimately
 // completes the review step, so parked, failed, skipped, and superseded rounds
 // cannot gain or advance approval authority.
 func approvedReviewOutcome(reviewTargetSHA string, outcome *pipeline.StepOutcome) (*pipeline.StepOutcome, error) {

@@ -16,6 +16,8 @@ When `eval sets`, `eval report`, or `eval run` resolves repository fingerprints 
 
 Cases arrive on their own. When an eligible run finishes, its decided Review passes are frozen into the local corpus - one case per pass. Collection happens after the pipeline has already reported its outcome, so it can never change or fail the run; a problem is logged and nothing else.
 
+A Review that carried an earlier approval, or that reviewed only the branch's work since one ([`review.incremental`](/no-mistakes/reference/global-config/#reviewincremental)), is never collected. A replay starts from the branch's merge base with no earlier approval to carry, so it could not reproduce the pass its gold came from. Such a run has no capturable review pass, and fixed CI findings on it are not ingested.
+
 Two settings in `config.yaml` govern review-case collection, both on by default and both documented in [Global configuration](/no-mistakes/reference/global-config/#eval):
 
 - `eval.capture_provenance` records the exact commit and configuration inputs a replay needs. It is written when the review round is written and **cannot be added afterwards**, so a run reviewed with it off is never capturable - not by the automatic path and not by hand.

@@ -103,6 +103,12 @@ rebase:
 review:
   path_instructions: []
   inline_fixes: true
+  round_cap: 2
+  coverage_first_round_only: true
+  incremental: true
+
+document:
+  skip_internal: true
 
 commit:
   fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
@@ -972,7 +978,7 @@ Per-run agent session reuse for the review loop's fixer role.
 | Default | `true` |
 
 When enabled and every fixer that can serve the run supports native session resume (Claude or Grok via `--resume`, Codex via `exec resume`, Pi via `--session <UUID>`, Antigravity via `--conversation <id>`), each run keeps one durable fixer session across its review-fix turns. A configured later-round fixer that cannot resume therefore makes all fixer turns cold for that run; see [later-round role overrides](#later-round-role-overrides).
-Review turns - the initial full review and every full rereview - always run as fresh invocations regardless of this setting. They are also session-free, unless the run has a [review conversation](/no-mistakes/reference/repo-config/#reviewconversation) AND this setting is on, in which case one reviewer session spans exactly one review pass - the asking turn and the finalize turn that receives its answers - and never a code change; with `session_reuse: false` that finalize turn runs cold, which costs a re-read rather than the answers, because the finalize prompt is the complete review prompt plus the answers. Either way a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them; cross-round review context travels only in the explicit sanitized round history.
+Review turns - the initial review and every rereview - always run as fresh invocations regardless of this setting. They are also session-free, unless the run has a [review conversation](/no-mistakes/reference/repo-config/#reviewconversation) AND this setting is on, in which case one reviewer session spans exactly one review pass - the asking turn and the finalize turn that receives its answers - and never a code change; with `session_reuse: false` that finalize turn runs cold, which costs a re-read rather than the answers, because the finalize prompt is the complete review prompt plus the answers. Either way a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them; cross-round review context travels only in the explicit sanitized round history.
 The fixer session is never lent to review turns, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
 A fixer session idle longer than five minutes, the provider's prompt-cache window, is not resumed: the next fix turn starts a fresh fixer session whose prompt adds a summary of the earlier fix rounds, bounded to the last eight rounds.
 When resume is unavailable or fails, the fix turn falls back to a cold run or a fresh fixer session and the fallback is recorded in the local `agent_invocations` performance record. Pi emits per-invocation usage after a resume, unlike Codex's cumulative session counters.
@@ -1257,8 +1263,95 @@ review:
   inline_fixes: false
 ```
 
-When on, each full review pass may fix typos, wording, comment or documentation text, formatting, and obviously dead code in the files the change touches, and records each one as an `info` finding marked `applied_inline`. Anything that changes behaviour, logic, tests, or data stays an ordinary finding. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns how inline edits are committed and verified.
+When on, each review pass may fix typos, wording, comment or documentation text, formatting, and obviously dead code in the files the change touches, and records each one as an `info` finding marked `applied_inline`. Anything that changes behaviour, logic, tests, or data stays an ordinary finding. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns how inline edits are committed and verified.
 Set `false` to keep every review pass read-only, as before this setting existed. It is global-only: neither a [`repository_overrides`](#repository_overrides) entry nor a repository's own `.no-mistakes.yaml` can set it.
+
+### review.round_cap
+
+Caps how many review rounds one Review step runs before it stops asking for fix rounds.
+
+| | |
+|---|---|
+| Type | `int` |
+| Default | `2` |
+
+```yaml
+review:
+  round_cap: 0 # turn the cap off
+```
+
+A cap of `N` allows at most `N-1` fix rounds before the final review round. Fix rounds the operator requests at the gate count toward the cap, so it applies with `auto_fix.review: 0` too; answer, coverage, and intent rounds do not count.
+When the last allowed round still reports findings that would start another fix round or park at the gate, no further fix round starts.
+The step completes with those findings recorded as unresolved notes, on the step result and in the PR body's Review section, only when every one of them is a `warning` or `info` that needs no decision (including a `no-op` warning) and the round's coverage record covers every reviewable file. The rereview after the last allowed fix round completes this way rather than parking at `fix_review`.
+A round that completes without the cap anyway (only `info` findings that start no fix round, or only wording notes after the first round) completes exactly as it does without the cap, with no notes notice.
+An `error` finding, an `ask-user` finding, or an incomplete coverage record parks at the usual approval gate instead, so the cap never passes an error silently. An explicit fix from the operator after that park still runs.
+The round count, like the `auto_fix.review` budget, is cumulative across a validation restart at Review within the same run, so a revalidated Review gets neither a fresh cap nor a fresh first-round coverage pass.
+`0` turns the cap off, leaving the loop bounded by `auto_fix.review` and the repository's `review.max_fix_rounds` as before. A negative value is rejected. It is global-only, like [`review.inline_fixes`](#reviewinline_fixes).
+
+### review.coverage_first_round_only
+
+Runs the automatic focused coverage pass on the first review round only.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+
+```yaml
+review:
+  coverage_first_round_only: false
+```
+
+When a review turn's `reviewed_paths` omits reviewable files, the Review step normally runs a bounded focused pass over just those files. With this on, only the step's first review round runs it: a post-fix re-review, an answer round, and an intent-correction re-run skip that pass. A later round whose coverage record is incomplete then parks on the named files, because certification still requires full coverage. An operator-requested coverage continuation is unaffected.
+Set `false` to run the focused pass on every round. It is global-only.
+
+### review.incremental
+
+Reviews only what changed since the branch's latest approved Review, and carries that approval when nothing reviewable changed.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+
+```yaml
+review:
+  incremental: false # always run a full Review
+```
+
+The Review step looks up the latest Review of the same branch in the same repository that completed with an approval, in an earlier run or in this one. When that approved head is still an ancestor of the new head, it merges the approved head with the current base (`git merge-tree`) and reviews only the diff from that merge to the new head: the branch's commits since the approval, including any edit made inside a merge commit. Commits that only bring in the base branch add nothing to that diff.
+The reviewer is told which run approved which head and gets that review's findings as already-decided context; earlier decisions on the branch carry as they always do. Fix, answer, coverage, and intent rounds of an incremental Review keep the same base commit and scope, unless the run switches to another agent, which has not reviewed the earlier work and reviews in full.
+When the new head adds no reviewable work (only a clean base merge, or the same head again), the step completes without an agent turn, approving the new head, with an `info` notice `review-carried` that reads `review carried from run <id> at <sha>` on the step result and on the Review line of the PR body. The earlier run's unresolved findings stay listed beside that notice in the PR body, and the Review entry of an incremental Review says it reviewed only the changes since the approval and lists those findings too.
+A full Review runs instead, and the step log says why, when any of these holds:
+
+- the base changes since the approved head touch a file the approved review changed within 3 lines of a reviewed hunk, or touch such a file without line hunks (binary, mode, or type change)
+- the approved head is not an ancestor of the new head (a rebase, force-push, or rewrite), or does not merge cleanly with the base
+- the branch has no Review that completed with an approval (a revalidation revokes a run's approval, so it is not carried)
+- the explicit `--intent` differs from the approved run's, the PR base branch differs, or the run's [per-run Pi profile](#per-run-pi-profiles) (`--model`/`--effort`) or `--verification-plan` content is not the approved run's
+- the repository configuration, or the global `agent`, `agent_config`, `review_agents`, `review` (other than this key), `repository_overrides`, `agent_args_override`, `agent_path_override`, `acpx_path`, or `acp_registry_overrides` settings, differ from what the approved review's rounds recorded; rounds record them while [`eval.capture_provenance`](#eval) is on (the default), and with no record nothing can be compared
+- the agent or model that reviewed the approved head is not the one this run's Review selects, compared with the review invocations recorded on the earlier run. The order [`quota_routing`](#quota_routing) picks for a run counts, so a run that starts on another agent gets a full Review. A Review that recorded no review invocation cannot carry, unless it carried an approval itself: the Review that ran is the one compared
+- the run was started by a different `no-mistakes` build than the approved run's, so each branch gets one full Review after an upgrade. Builds are compared by build SHA, or by version when the SHA is the unstamped placeholder `unknown`; the version `dev` and an empty value name no build, so a run created by an unstamped build cannot carry. For an approval carried by `axi retry`, the run that ran the Review is the one compared
+- any git or database read fails
+
+Two inferred intents never block a carry, since an inferred intent is not an acceptance contract. The Test step and everything after it still run on every head. Set `false` to review every run in full. It is global-only.
+
+### document.skip_internal
+
+Skips the Document step when the change is internal-only.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+
+```yaml
+document:
+  skip_internal: false
+```
+
+A change is internal-only when every changed production file sits under an `internal/` directory and no changed path is documentation, a command or CLI surface (`cmd/`, `cli/`), the terminal UI (`internal/tui/`), a generated skill source (`internal/skill/`), configuration or schema, help or usage text, or a public API definition (`api/`, `.proto`, `.graphql`, OpenAPI or Swagger). At least one production file must change: test files do not count either way, so a tests-only change runs the step. A renamed file counts at both its old and new path.
+The check is built on the same path classification `no-mistakes axi triage` uses. Without a clean internal-only signal (for example, a repository with no `internal/` layout) the step runs. A skipped Document step leaves Lint to run its own pass.
+Set `false` to always run the step. It is global-only.
 
 ### commit.fix_message
 

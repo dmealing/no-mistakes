@@ -302,6 +302,24 @@ func hasAskUserFindingsJSON(raw string) bool {
 	return types.HasAskUserFindings(findings)
 }
 
+// hasErrorFindingsJSON reports an error-severity finding; unparseable
+// findings fail closed as an error.
+func hasErrorFindingsJSON(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return true
+	}
+	for _, item := range findings.Items {
+		if item.Severity == types.FindingSeverityError {
+			return true
+		}
+	}
+	return false
+}
+
 func hasBlockingFindingsJSON(raw string) bool {
 	if raw == "" {
 		return false
