@@ -93,9 +93,15 @@ func retryRefusedFork(t *testing.T, what string, op func() (refused bool, detail
 // assertion.
 func runAgentShell(t *testing.T, env []string, script string) (stdout, combined string, err error) {
 	t.Helper()
+	return runAgentShellContext(t, context.Background(), env, script)
+}
+
+// runAgentShellContext is runAgentShell bounded by ctx.
+func runAgentShellContext(t *testing.T, ctx context.Context, env []string, script string) (stdout, combined string, err error) {
+	t.Helper()
 	retryRefusedFork(t, "agent shell "+script, func() (bool, any) {
 		var so, se bytes.Buffer
-		cmd := exec.Command("sh", "-c", script)
+		cmd := exec.CommandContext(ctx, "sh", "-c", script)
 		cmd.Env = env
 		cmd.Stdout = &so
 		cmd.Stderr = &se
@@ -254,15 +260,13 @@ func TestProcessStopRuleCommandStopsTheWholeGroup(t *testing.T) {
 	dir := t.TempDir()
 	pidfile := filepath.Join(dir, "suite.pid")
 	childPID := filepath.Join(dir, "child.pid")
-	start := exec.Command("sh", "-c", "setsid sh -c 'sleep 600 & echo $! > "+childPID+"; wait' > /dev/null 2>&1 & echo $! > "+pidfile)
-	if out, err := start.CombinedOutput(); err != nil {
+	if _, out, err := runAgentShell(t, nil, "setsid sh -c 'sleep 600 & echo $! > "+childPID+"; wait' > /dev/null 2>&1 & echo $! > "+pidfile); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	child := waitPID(t, childPID)
 	t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL) })
 
-	stop := exec.Command("sh", "-c", `kill -TERM -"$(cat `+pidfile+`)"`)
-	if out, err := stop.CombinedOutput(); err != nil {
+	if _, out, err := runAgentShell(t, nil, `kill -TERM -"$(cat `+pidfile+`)"`); err != nil {
 		t.Fatalf("stop command failed: %v\n%s", err, out)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -316,12 +320,10 @@ func TestStackedGuardsResolveTheRealToolInsteadOfEachOther(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	shell := exec.CommandContext(ctx, "sh", "-c", "pgrep -f 'sleep "+tag+"'")
-	shell.Env = []string{
+	_, out, err := runAgentShellContext(t, ctx, []string{
 		"PATH=" + inner + string(os.PathListSeparator) + outer + string(os.PathListSeparator) + os.Getenv("PATH"),
 		MarkerEnv + "=run-own",
-	}
-	out, err := shell.CombinedOutput()
+	}, "pgrep -f 'sleep "+tag+"'")
 	if ctx.Err() != nil {
 		t.Fatalf("stacked guards never reached the real pgrep (re-entered each other):\n%s", out)
 	}
