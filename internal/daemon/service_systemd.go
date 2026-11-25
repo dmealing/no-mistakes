@@ -86,6 +86,9 @@ func legacySystemdUserServicePath() string {
 	return filepath.Join(home, ".config", "systemd", "user", legacySystemdServiceName)
 }
 
+// systemdTasksMax is the generated unit's TasksMax (see the unit comment).
+const systemdTasksMax = 120000
+
 // renderSystemdUnit is a test convenience wrapper using serviceEnv(nil).
 // Production callers use renderSystemdUnitWithProxyEnv with the environment
 // resolved by serviceEnv from the process and existing definition.
@@ -121,6 +124,14 @@ Type=simple
 # stop (the default) terminates every process in the service, which is how one
 # step's allocation used to fail every other in-flight run.
 OOMPolicy=continue
+# Threads count as tasks, and every step of every run (parallel test binaries,
+# JVM suites, agents) shares this one cgroup. Without an explicit value the
+# unit inherits systemd's DefaultTasksMax (15%% of kernel.threads-max, 68133 on
+# a 454225-thread host), which a busy gate reached: forks then fail with
+# "resource temporarily unavailable" in whichever step forks next. This keeps a
+# bound against a runaway fork loop but sits well above that default; a
+# user-slice limit still applies on top of it.
+TasksMax=%d
 ExecStart=%s
 WorkingDirectory=%s
 %s
@@ -131,7 +142,7 @@ RestartSec=2
 
 [Install]
 WantedBy=default.target
-`, command, systemdEscapeArg(p.Root()), strings.Join(envLines, "\n"), systemdEscapeArg("append:"+p.DaemonBootstrapLog()), systemdEscapeArg("append:"+p.DaemonBootstrapLog()))
+`, systemdTasksMax, command, systemdEscapeArg(p.Root()), strings.Join(envLines, "\n"), systemdEscapeArg("append:"+p.DaemonBootstrapLog()), systemdEscapeArg("append:"+p.DaemonBootstrapLog()))
 }
 
 // systemdEnvironmentLine renders one `Environment=` directive. systemd runs

@@ -112,7 +112,8 @@ Configured commands, agent subprocesses, and managed agent servers raise their `
 The margin is deliberately small: the kernel counts it as 1% of memory, so a step process never outranks a much larger process that is not a step, and a memory-pressure killer such as earlyoom does not terminate the small agent and test processes of every other run first.
 The generated systemd unit sets `OOMPolicy=continue`, so one killed step no longer stops the whole service and fails every other in-flight run with "daemon shutting down".
 When a step process is killed and the daemon's cgroup records a new `oom_kill`, the step fails with "ran out of memory" appended to its original error text, and the step log keeps the command output printed before the kill.
-An existing unit picks up the policy when `no-mistakes daemon start`, `restart`, or `update` refreshes the service definition.
+It also sets `TasksMax=120000`. Threads count as tasks and every run shares the service's cgroup, so the inherited systemd default (15% of `kernel.threads-max`, 68133 on a large host) could be exhausted under load, and the next fork in whichever step ran then failed with "resource temporarily unavailable".
+An existing unit picks up these settings when `no-mistakes daemon start`, `restart`, or `update` refreshes the service definition.
 
 ## Concurrent push handling
 
